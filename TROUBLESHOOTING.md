@@ -88,8 +88,9 @@ bun run cli -- status
 ### Scheduler appears stuck on one account
 If a single source account hangs for a long time (media fetch/processing), scheduled checks now skip that account after a timeout and continue with the next one.
 
-- Default timeout: `480000` ms (8 minutes)
-- Override with env var: `SCHEDULED_ACCOUNT_TIMEOUT_MS`
+- Default timeout: `1200000` ms (20 minutes) for scheduled checks, `900000` ms (15 minutes) per account for backfills
+- Override with env vars: `SCHEDULED_ACCOUNT_TIMEOUT_MS` / `BACKFILL_ACCOUNT_TIMEOUT_MS`
+- Note: the pipeline intentionally paces 5–15s between posts, so don't set these too low — a 15-tweet backfill normally takes a few minutes.
 
 Examples:
 

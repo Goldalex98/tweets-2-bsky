@@ -14,6 +14,7 @@
     "rebuild:native": "bash scripts/rebuild-native.sh",
     "run:once": "bun dist/index.js --run-once --no-web",
     "test:twitter-metadata": "bun scripts/test-twitter-profile-metadata.ts",
+    "test:twitter-fetch": "bun scripts/test-twitter-fetch.ts",
     "start": "bun dist/index.js",
     "cli": "bun src/cli.ts",
     "dev": "bun src/index.ts",

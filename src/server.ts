@@ -253,12 +253,18 @@ interface RateLimitBucket {
 
 const authRateBuckets = new Map<string, RateLimitBucket>();
 
+// Only honor X-Forwarded-For when explicitly running behind a trusted reverse
+// proxy; otherwise clients could spoof the header to bypass auth rate limiting.
+const TRUST_PROXY = ['1', 'true', 'yes'].includes((process.env.TRUST_PROXY || '').trim().toLowerCase());
+
 const getRequestIp = (req: any): string => {
-  const forwarded = req.headers?.['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
-    const [first] = forwarded.split(',');
-    if (first && first.trim().length > 0) {
-      return first.trim();
+  if (TRUST_PROXY) {
+    const forwarded = req.headers?.['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
+      const [first] = forwarded.split(',');
+      if (first && first.trim().length > 0) {
+        return first.trim();
+      }
     }
   }
   if (typeof req.ip === 'string' && req.ip.length > 0) {
@@ -893,7 +899,8 @@ if (allowedOrigins.size === 0) {
     }),
   );
 }
-app.use(express.json());
+// Config imports with many mappings can exceed the 100kb express default.
+app.use(express.json({ limit: '2mb' }));
 
 app.use(
   express.static(staticAssetsDir, {
@@ -2259,6 +2266,7 @@ app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
     bskyIdentifier,
     bskyPassword: normalizeOptionalString(req.body?.bskyPassword) || existingMapping.bskyPassword,
     bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl) || existingMapping.bskyServiceUrl,
+    enabled: normalizeBoolean(req.body?.enabled, existingMapping.enabled),
     owner,
     groupName: nextGroupName,
     groupEmoji: nextGroupEmoji,
@@ -2406,7 +2414,9 @@ app.post('/api/mappings/bot-label-all', authenticateToken, async (req: any, res)
 
   const config = getConfig();
   const usersById = createUserLookupById(config);
-  const manageableMappings = getVisibleMappings(config, req.user).filter((mapping) => canManageMapping(req.user, mapping));
+  const manageableMappings = getVisibleMappings(config, req.user).filter((mapping) =>
+    canManageMapping(req.user, mapping),
+  );
   const requestedIds = parseMappingIds(req.body?.mappingIds);
   const requestedIdSet = requestedIds.length > 0 ? new Set(requestedIds) : null;
   const targets = requestedIdSet
@@ -2485,7 +2495,9 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
 
   const config = getConfig();
   const usersById = createUserLookupById(config);
-  const manageableMappings = getVisibleMappings(config, req.user).filter((mapping) => canManageMapping(req.user, mapping));
+  const manageableMappings = getVisibleMappings(config, req.user).filter((mapping) =>
+    canManageMapping(req.user, mapping),
+  );
   const requestedIds = parseMappingIds(req.body?.mappingIds);
   const requestedIdSet = requestedIds.length > 0 ? new Set(requestedIds) : null;
   const targets = requestedIdSet

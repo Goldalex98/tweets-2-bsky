@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import {
-  ACTIVE_CONFIG_FILE,
-  LEGACY_CONFIG_FILE,
-  USING_EXTERNAL_DATA_DIR,
-} from './storage-paths.js';
+import { ACTIVE_CONFIG_FILE, LEGACY_CONFIG_FILE, USING_EXTERNAL_DATA_DIR } from './storage-paths.js';
 
 const CONFIG_FILE = ACTIVE_CONFIG_FILE;
+const CONFIG_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.bak`;
+const CONFIG_TMP_FILE = `${ACTIVE_CONFIG_FILE}.tmp`;
 let configPathInitialized = false;
+// Set when config.json exists but cannot be parsed and no backup could recover it.
+// While true, saveConfig refuses to write so a transient read failure can never
+// cause the (possibly recoverable) on-disk config to be overwritten with defaults.
+let configUnreadable = false;
 
 function ensureConfigPathReady(): void {
   if (configPathInitialized) {
@@ -451,13 +453,28 @@ const normalizeConfigShape = (rawConfig: unknown): AppConfig => {
 };
 
 const writeConfigFile = (config: AppConfig) => {
-  fs.writeFileSync(CONFIG_FILE, `${JSON.stringify(config, null, 2)}\n`);
+  const serialized = `${JSON.stringify(config, null, 2)}\n`;
+
+  // Atomic write: write to a temp file and rename over the target so a crash
+  // mid-write can never leave a truncated/corrupted config.json behind.
+  fs.writeFileSync(CONFIG_TMP_FILE, serialized);
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      fs.copyFileSync(CONFIG_FILE, CONFIG_BACKUP_FILE);
+    }
+  } catch (error) {
+    console.warn(`⚠️ Failed to refresh config backup: ${(error as Error).message}`);
+  }
+  fs.renameSync(CONFIG_TMP_FILE, CONFIG_FILE);
 };
+
+const parseConfigText = (rawText: string): AppConfig => normalizeConfigShape(JSON.parse(rawText));
 
 export function getConfig(): AppConfig {
   ensureConfigPathReady();
 
   if (!fs.existsSync(CONFIG_FILE)) {
+    configUnreadable = false;
     return { ...DEFAULT_CONFIG };
   }
 
@@ -465,6 +482,7 @@ export function getConfig(): AppConfig {
     const rawText = fs.readFileSync(CONFIG_FILE, 'utf8');
     const rawConfig = JSON.parse(rawText);
     const normalizedConfig = normalizeConfigShape(rawConfig);
+    configUnreadable = false;
 
     if (JSON.stringify(rawConfig) !== JSON.stringify(normalizedConfig)) {
       writeConfigFile(normalizedConfig);
@@ -473,15 +491,41 @@ export function getConfig(): AppConfig {
     return normalizedConfig;
   } catch (err) {
     console.error('Error reading config:', err);
-    return { ...DEFAULT_CONFIG };
   }
+
+  // Main config is unreadable — attempt automatic recovery from the backup
+  // written alongside every successful save.
+  try {
+    if (fs.existsSync(CONFIG_BACKUP_FILE)) {
+      const recovered = parseConfigText(fs.readFileSync(CONFIG_BACKUP_FILE, 'utf8'));
+      writeConfigFile(recovered);
+      configUnreadable = false;
+      console.warn(`♻️ Recovered config from backup: ${CONFIG_BACKUP_FILE}`);
+      return recovered;
+    }
+  } catch (backupErr) {
+    console.error('Error reading config backup:', backupErr);
+  }
+
+  configUnreadable = true;
+  console.error(
+    `🛑 config.json is unreadable and no backup could be restored. Refusing to overwrite it; fix or remove ${CONFIG_FILE} to continue.`,
+  );
+  return { ...DEFAULT_CONFIG };
 }
 
 export function saveConfig(config: AppConfig): void {
   ensureConfigPathReady();
 
+  if (configUnreadable && fs.existsSync(CONFIG_FILE)) {
+    throw new Error(
+      `Refusing to save config: existing ${CONFIG_FILE} is unreadable and saving would overwrite it with defaults. Fix or remove the file first.`,
+    );
+  }
+
   const normalizedConfig = normalizeConfigShape(config);
   writeConfigFile(normalizedConfig);
+  configUnreadable = false;
 }
 
 export function addMapping(mapping: Omit<AccountMapping, 'id' | 'enabled'>): void {

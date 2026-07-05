@@ -3,6 +3,8 @@ dist/
 .env
 processed_tweets.json
 config.json
+config.json.bak
+config.json.tmp
 processed/
 npm-debug.log
 .DS_Store

@@ -2,15 +2,18 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import { getConfig } from './config-manager.js';
 
-export async function generateAltText(
-  buffer: Buffer,
-  mimeType: string,
-  contextText: string,
-): Promise<string | undefined> {
-  const config = getConfig();
+interface ResolvedAiProvider {
+  provider: 'gemini' | 'openai' | 'anthropic' | 'custom';
+  apiKey?: string;
+  model?: string;
+  baseUrl?: string;
+}
 
-  // 1. Determine Provider and Credentials
-  // Priority: AI Config > Legacy Gemini Config > Environment Variables
+// Determine Provider and Credentials.
+// Priority: AI Config > Legacy Gemini Config > Environment Variables.
+// Returns null when alt-text generation is effectively disabled (no usable credentials).
+function resolveAiProvider(): ResolvedAiProvider | null {
+  const config = getConfig();
 
   const provider = config.ai?.provider || 'gemini';
   let apiKey = config.ai?.apiKey;
@@ -25,14 +28,20 @@ export async function generateAltText(
     else if (provider === 'anthropic') apiKey = process.env.ANTHROPIC_API_KEY;
   }
 
-  // Fallback for Gemini specific legacy env var if provider is implicitly gemini
-  if (!apiKey && provider === 'gemini') {
-    apiKey = process.env.GEMINI_API_KEY;
-  }
-
   // API Key is mandatory for Gemini and Anthropic
   if (!apiKey && (provider === 'gemini' || provider === 'anthropic')) {
-    return undefined;
+    return null;
+  }
+
+  // OpenAI without a key only makes sense against a custom base URL (e.g. a
+  // local server); against api.openai.com it would fail on every image.
+  if (provider === 'openai' && !apiKey && !baseUrl) {
+    return null;
+  }
+
+  // Custom providers need at least a base URL to call.
+  if (provider === 'custom' && !baseUrl) {
+    return null;
   }
 
   // Default Models
@@ -41,6 +50,26 @@ export async function generateAltText(
     else if (provider === 'openai') model = 'gpt-4o';
     else if (provider === 'anthropic') model = 'claude-3-5-sonnet-20241022';
   }
+
+  return { provider, apiKey, model, baseUrl };
+}
+
+// Whether alt-text generation is configured/enabled at all. Many instances
+// run without it; callers should skip the generation step entirely when false.
+export function isAltTextConfigured(): boolean {
+  return resolveAiProvider() !== null;
+}
+
+export async function generateAltText(
+  buffer: Buffer,
+  mimeType: string,
+  contextText: string,
+): Promise<string | undefined> {
+  const resolved = resolveAiProvider();
+  if (!resolved) {
+    return undefined;
+  }
+  const { provider, apiKey, model, baseUrl } = resolved;
 
   try {
     const prompt = buildAltTextPrompt(contextText);
@@ -58,14 +87,7 @@ export async function generateAltText(
       case 'anthropic':
         // apiKey is guaranteed by check above
         return normalizeAltTextOutput(
-          await callAnthropic(
-            apiKey!,
-            model || 'claude-3-5-sonnet-20241022',
-            baseUrl,
-            buffer,
-            mimeType,
-            prompt,
-          ),
+          await callAnthropic(apiKey!, model || 'claude-3-5-sonnet-20241022', baseUrl, buffer, mimeType, prompt),
         );
       default:
         console.warn(`[AI] ⚠️ Unknown provider: ${provider}`);
@@ -127,7 +149,7 @@ async function callGemini(
   prompt: string,
 ): Promise<string | undefined> {
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: modelName });
+  const model = genAI.getGenerativeModel({ model: modelName }, { timeout: 60_000 });
 
   const result = await model.generateContent([
     prompt,
@@ -192,7 +214,7 @@ async function callOpenAICompatible(
     headers['X-Title'] = 'Tweets to Bluesky';
   }
 
-  const response = await axios.post(url, payload, { headers });
+  const response = await axios.post(url, payload, { headers, timeout: 60_000 });
 
   return response.data.choices[0]?.message?.content || undefined;
 }
@@ -239,6 +261,7 @@ async function callAnthropic(
       'anthropic-version': '2023-06-01',
       'Content-Type': 'application/json',
     },
+    timeout: 60_000,
   });
 
   return response.data.content[0]?.text || undefined;

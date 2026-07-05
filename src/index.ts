@@ -13,7 +13,7 @@ import * as francModule from 'franc-min';
 import iso6391 from 'iso-639-1';
 import puppeteer from 'puppeteer-core';
 import sharp from 'sharp';
-import { generateAltText } from './ai-manager.js';
+import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 
 import { getConfig, saveConfig } from './config-manager.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
@@ -265,12 +265,7 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   // Re-initialize if config changed, not yet initialized, or forced reset
   const existingScraper = scraperSessions.get(sessionKey);
   const existingCookies = sessionCookies.get(sessionKey);
-  if (
-    !existingScraper ||
-    forceReset ||
-    existingCookies?.authToken !== authToken ||
-    existingCookies?.ct0 !== ct0
-  ) {
+  if (!existingScraper || forceReset || existingCookies?.authToken !== authToken || existingCookies?.ct0 !== ct0) {
     console.log(`🔄 Initializing Twitter scraper with ${useBackupCredentials ? 'BACKUP' : 'PRIMARY'} credentials...`);
     const scraper = new Scraper();
     await scraper.setCookies([`auth_token=${authToken}`, `ct0=${ct0}`]);
@@ -623,6 +618,7 @@ async function fetchSyndicationMedia(tweetUrl: string): Promise<{ images: string
     const res = await axios.get('https://publish.twitter.com/oembed', {
       params: { url: normalized },
       headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 10000,
     });
     const html = res.data?.html as string | undefined;
     if (!html) return { images: [] };
@@ -634,6 +630,7 @@ async function fetchSyndicationMedia(tweetUrl: string): Promise<{ images: string
     const syndicationUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}`;
     const syndication = await axios.get(syndicationUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+      timeout: 10000,
     });
     const data = syndication.data as Record<string, unknown>;
     const images = (data?.photos as { url?: string }[] | undefined)
@@ -679,6 +676,7 @@ async function expandUrl(shortUrl: string): Promise<string> {
   try {
     const response = await axios.head(shortUrl, {
       maxRedirects: 5,
+      timeout: 10000,
       validateStatus: (status) => status >= 200 && status < 400,
     });
     // biome-ignore lint/suspicious/noExplicitAny: axios internal types
@@ -688,6 +686,7 @@ async function expandUrl(shortUrl: string): Promise<string> {
       const response = await axios.get(shortUrl, {
         responseType: 'stream',
         maxRedirects: 5,
+        timeout: 10000,
       });
       response.data.destroy();
       // biome-ignore lint/suspicious/noExplicitAny: axios internal types
@@ -707,12 +706,15 @@ interface DownloadedMedia {
   mimeType: string;
 }
 
-async function downloadMedia(url: string): Promise<DownloadedMedia> {
+async function downloadMedia(url: string, maxDurationMs = 120000): Promise<DownloadedMedia> {
   const response = await axios({
     url,
     method: 'GET',
     responseType: 'arraybuffer',
+    // axios `timeout` only fires on socket inactivity; the abort signal enforces
+    // a hard deadline so a slow-trickling large download can't stall the pipeline.
     timeout: 30000,
+    signal: AbortSignal.timeout(maxDurationMs),
   });
   return {
     buffer: Buffer.from(response.data as ArrayBuffer),
@@ -720,10 +722,13 @@ async function downloadMedia(url: string): Promise<DownloadedMedia> {
   };
 }
 
+const BLOB_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
+
 async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: string): Promise<BlobRef> {
   let finalBuffer = buffer;
   let finalMimeType = mimeType;
-  const MAX_SIZE = 950 * 1024;
+  // Bluesky accepts image blobs up to 2MB; stay slightly under for safety.
+  const MAX_SIZE = 1900 * 1024;
 
   const isPng = mimeType === 'image/png';
   const isJpeg = mimeType === 'image/jpeg' || mimeType === 'image/jpg';
@@ -741,62 +746,69 @@ async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: strin
       const metadata = await image.metadata();
       let currentBuffer = buffer;
       let width = metadata.width || 2000;
-      let quality = 90;
+      let quality = 95;
 
-      // Iterative compression loop
+      // Iterative compression loop. With the 2MB ceiling we can afford to keep
+      // media crisp: large dimensions, gentle quality steps, high quality floor.
       let attempts = 0;
       while (currentBuffer.length > MAX_SIZE && attempts < 5) {
         attempts++;
         console.log(`[UPLOAD] 📉 Compression attempt ${attempts}: Width ${width}, Quality ${quality}...`);
 
+        let attemptMimeType: string;
         if (isAnimation) {
-          // For animations (GIF/WebP), we can only do so much without losing frames
-          // Try to convert to WebP if it's a GIF, or optimize WebP
+          // For animations (GIF/WebP), we can only do so much without losing frames.
+          // Convert GIF to WebP for better compression, or re-encode WebP.
           image = sharp(buffer, { animated: true });
-          if (isGif) {
-            // Convert GIF to WebP for better compression
-            image = image.webp({ quality: Math.max(quality, 50), effort: 6 });
-            finalMimeType = 'image/webp';
-          } else {
-            image = image.webp({ quality: Math.max(quality, 50), effort: 6 });
-          }
           // Resize if really big
-          if (metadata.width && metadata.width > 800) {
-            image = image.resize({ width: 800, withoutEnlargement: true });
+          if (metadata.width && metadata.width > 1280) {
+            image = image.resize({ width: 1280, withoutEnlargement: true });
           }
+          image = image.webp({ quality, effort: 6 });
+          attemptMimeType = 'image/webp';
+          quality = Math.max(60, quality - 10);
         } else {
           // Static images
-          if (width > 1600) width = 1600;
-          else if (attempts > 1) width = Math.floor(width * 0.8);
+          if (width > 2560) width = 2560;
+          else if (attempts > 1) width = Math.floor(width * 0.85);
 
-          quality = Math.max(50, quality - 10);
+          quality = Math.max(70, quality - 5);
 
           image = sharp(buffer).resize({ width, withoutEnlargement: true }).jpeg({ quality, mozjpeg: true });
 
-          finalMimeType = 'image/jpeg';
+          attemptMimeType = 'image/jpeg';
         }
 
         currentBuffer = await image.toBuffer();
-        if (currentBuffer.length <= MAX_SIZE) {
+        // Keep the smallest result so far, even if still above the limit.
+        if (currentBuffer.length < finalBuffer.length) {
           finalBuffer = currentBuffer;
-          console.log(`[UPLOAD] ✅ Optimized to ${(finalBuffer.length / 1024).toFixed(2)} KB`);
+          finalMimeType = attemptMimeType;
+        }
+        if (currentBuffer.length <= MAX_SIZE) {
+          console.log(`[UPLOAD] ✅ Optimized to ${(currentBuffer.length / 1024).toFixed(2)} KB`);
           break;
         }
       }
-
-      if (finalBuffer.length > MAX_SIZE) {
-        console.warn(
-          `[UPLOAD] ⚠️ Could not compress below limit. Current: ${(finalBuffer.length / 1024).toFixed(2)} KB. Upload might fail.`,
-        );
-      }
     } catch (err) {
-      console.warn(`[UPLOAD] ⚠️ Optimization failed, attempting original upload:`, (err as Error).message);
-      finalBuffer = buffer;
-      finalMimeType = mimeType;
+      console.warn(`[UPLOAD] ⚠️ Optimization failed:`, (err as Error).message);
+    }
+
+    // Bluesky rejects image blobs over the embed size limit at post time; uploading
+    // an oversized blob "succeeds" but leaves the tweet permanently failing. Bail out
+    // instead so callers can fall back to the standard-quality image or skip this one.
+    if (finalBuffer.length > MAX_SIZE) {
+      throw new Error(
+        `Image still ${(finalBuffer.length / 1024).toFixed(2)} KB after optimization (limit ${(MAX_SIZE / 1024).toFixed(0)} KB)`,
+      );
     }
   }
 
-  const { data } = await agent.uploadBlob(finalBuffer, { encoding: finalMimeType });
+  const { data } = await withTimeout(
+    agent.uploadBlob(finalBuffer, { encoding: finalMimeType }),
+    BLOB_UPLOAD_TIMEOUT_MS,
+    `Blob upload timed out after ${Math.round(BLOB_UPLOAD_TIMEOUT_MS / 1000)}s`,
+  );
   return data.blob;
 }
 
@@ -900,9 +912,18 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<
     const statusUrl = new URL('https://video.bsky.app/xrpc/app.bsky.video.getJobStatus');
     statusUrl.searchParams.append('jobId', jobId);
 
-    const statusResponse = await fetch(statusUrl);
+    let statusResponse: Response;
+    try {
+      statusResponse = await fetch(statusUrl, { signal: AbortSignal.timeout(30000) });
+    } catch (err) {
+      console.warn(`[VIDEO] ⚠️ Job status fetch errored (${(err as Error).message}), retrying...`);
+      if (attempts > 60) throw new Error('Video processing timed out after 5 minutes.');
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      continue;
+    }
     if (!statusResponse.ok) {
       console.warn(`[VIDEO] ⚠️ Job status fetch failed (${statusResponse.status}), retrying...`);
+      if (attempts > 60) throw new Error('Video processing timed out after 5 minutes.');
       await new Promise((resolve) => setTimeout(resolve, 5000));
       continue;
     }
@@ -1034,6 +1055,8 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
         'Content-Type': 'video/mp4',
       },
       body: new Blob([new Uint8Array(buffer)]),
+      // Videos can be up to ~300MB; allow a generous window but never hang forever.
+      signal: AbortSignal.timeout(45 * 60 * 1000),
     });
 
     if (!uploadResponse.ok) {
@@ -1100,7 +1123,9 @@ function splitText(text: string, limit = 300): string[] {
   const effectiveLimit = limit - 8;
 
   while (remaining.length > 0) {
-    if (remaining.length <= limit) {
+    // Every chunk gets a " (i/n)" suffix appended later, so the final chunk
+    // must also respect the reserved-space limit or it would exceed 300 chars.
+    if (remaining.length <= effectiveLimit) {
       chunks.push(remaining);
       break;
     }
@@ -1314,8 +1339,7 @@ async function processTweets(
   addTweetsToMap(tweetMap, filteredTweets);
 
   // Maintain a local map that updates in real-time for intra-batch replies
-  const localProcessedMap: ProcessedTweetsMap =
-    sharedProcessedMap ?? { ...loadProcessedTweets(bskyIdentifier) };
+  const localProcessedMap: ProcessedTweetsMap = sharedProcessedMap ?? { ...loadProcessedTweets(bskyIdentifier) };
 
   const toProcess = filteredTweets.filter((t) => !localProcessedMap[t.id_str || t.id || '']);
 
@@ -1557,8 +1581,8 @@ async function processTweets(
           }
 
           let altText = media.ext_alt_text;
-          if (!altText) {
-            console.log(`[${twitterUsername}] 🤖 Generating alt text via Gemini...`);
+          if (!altText && isAltTextConfigured()) {
+            console.log(`[${twitterUsername}] 🤖 Generating alt text via AI provider...`);
             // Use original tweet text for context, not the modified/cleaned one
             const altTextContext = buildAltTextContext(tweet, tweetText, tweetMap);
             altText = await generateAltText(buffer, mimeType, altTextContext);
@@ -1603,9 +1627,11 @@ async function processTweets(
             try {
               console.log(`[${twitterUsername}] 📥 Downloading video: ${videoUrl}`);
               updateAppStatus({ message: `Downloading video: ${path.basename(videoUrl)}` });
-              const { buffer, mimeType } = await downloadMedia(videoUrl);
+              const { buffer, mimeType } = await downloadMedia(videoUrl, 30 * 60 * 1000);
 
-              if (buffer.length <= 90 * 1024 * 1024) {
+              // Bluesky accepts videos up to 300MB; stay slightly under for safety
+              // (280MiB = ~293.6M bytes, under the limit on either MB interpretation).
+              if (buffer.length <= 280 * 1024 * 1024) {
                 const filename = videoUrl.split('/').pop() || 'video.mp4';
                 if (dryRun) {
                   console.log(
@@ -1666,7 +1692,7 @@ async function processTweets(
     if (tweet.is_quote_status && tweet.quoted_status_id_str) {
       const quoteId = tweet.quoted_status_id_str;
       const quoteRef = localProcessedMap[quoteId];
-      if (quoteRef && !quoteRef.migrated && quoteRef.uri && quoteRef.cid) {
+      if (quoteRef?.uri && quoteRef.cid) {
         console.log(`[${twitterUsername}] 🔄 Found quoted tweet in local history. Natively embedding.`);
         quoteEmbed = { $type: 'app.bsky.embed.record', record: { uri: quoteRef.uri, cid: quoteRef.cid } };
       } else {
@@ -1780,13 +1806,20 @@ async function processTweets(
       updateAppStatus({ message: `Posting chunk ${i + 1}/${chunks.length}...` });
 
       const rt = new RichText({ text: chunk });
-      await rt.detectFacets(agent);
+      try {
+        await withTimeout(rt.detectFacets(agent), 60000, 'Facet detection timed out');
+      } catch (facetErr) {
+        console.warn(
+          `[${twitterUsername}] ⚠️ Facet detection failed, posting with basic text:`,
+          (facetErr as Error).message,
+        );
+      }
       rt.facets = addTwitterHandleLinkFacets(rt.text, rt.facets);
       const detectedLangs = detectLanguage(chunk);
 
       // Preserve original timing when available, but enforce monotonic per-account
       // timestamps to avoid equal-createdAt collisions in fast self-thread replies.
-      const parsedCreatedAt = tweet.created_at ? Date.parse(tweet.created_at) : NaN;
+      const parsedCreatedAt = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
       const baseCreatedAtMs = Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : Date.now();
       const chunkCreatedAtMs = baseCreatedAtMs + i * 1000;
 
@@ -1859,7 +1892,7 @@ async function processTweets(
         } else {
           while (retries > 0) {
             try {
-              response = await agent.post(postRecord);
+              response = await withTimeout(agent.post(postRecord), 120000, 'Post request timed out after 120s');
               break;
             } catch (err: any) {
               retries--;
@@ -2004,15 +2037,28 @@ async function importHistory(
 
   console.log(`Fetch complete. Found ${allFoundTweets.length} new tweets to import.`);
   if (allFoundTweets.length > 0) {
-    await processTweets(agent as BskyAgent, twitterUsername, bskyIdentifier, allFoundTweets, dryRun, undefined, undefined, sessionKey);
+    await processTweets(
+      agent as BskyAgent,
+      twitterUsername,
+      bskyIdentifier,
+      allFoundTweets,
+      dryRun,
+      undefined,
+      undefined,
+      sessionKey,
+    );
     console.log('History import complete.');
   }
 }
 
 // Task management
 const activeTasks = new Map<string, Promise<void>>();
-const DEFAULT_BACKFILL_ACCOUNT_TIMEOUT_MS = 2 * 60 * 1000;
-const DEFAULT_SCHEDULED_ACCOUNT_TIMEOUT_MS = 8 * 60 * 1000;
+// These must comfortably exceed normal processing time: the pipeline paces
+// 5-15s between tweets on purpose, so a 15-tweet backfill alone takes ~2.5-4
+// minutes. A too-short watchdog abandons runs that are still posting in the
+// background, which risks duplicate posts when the next cycle overlaps them.
+const DEFAULT_BACKFILL_ACCOUNT_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_SCHEDULED_ACCOUNT_TIMEOUT_MS = 20 * 60 * 1000;
 const PROFILE_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 let profileSyncStateWriteQueue: Promise<void> = Promise.resolve();
 
@@ -2111,7 +2157,11 @@ const persistProfileSyncResult = (
   return profileSyncStateWriteQueue;
 };
 
-async function maybeSyncMappingProfileInBackground(mapping: AccountMapping, dryRun: boolean, logPrefix: string): Promise<void> {
+async function maybeSyncMappingProfileInBackground(
+  mapping: AccountMapping,
+  dryRun: boolean,
+  logPrefix: string,
+): Promise<void> {
   if (dryRun) {
     return;
   }
@@ -2199,9 +2249,7 @@ async function runAccountTask(
     let checkedSources = 0;
     let sourceErrors = 0;
     const taskMode = backfillRequest ? 'backfill' : 'scheduled';
-    console.log(
-      `${logPrefix} ▶️ Starting ${taskMode} task for ${mapping.twitterUsernames.length} source account(s).`,
-    );
+    console.log(`${logPrefix} ▶️ Starting ${taskMode} task for ${mapping.twitterUsernames.length} source account(s).`);
 
     try {
       const backfillReq = backfillRequest ?? getPendingBackfills().find((b) => b.id === mapping.id);
@@ -2286,7 +2334,15 @@ async function runAccountTask(
               backfillRequestId: backfillReq.requestId,
             });
             await withTimeout(
-              importHistory(twitterUsername, mapping.bskyIdentifier, limit, dryRun, false, backfillReq.requestId, sessionKey),
+              importHistory(
+                twitterUsername,
+                mapping.bskyIdentifier,
+                limit,
+                dryRun,
+                false,
+                backfillReq.requestId,
+                sessionKey,
+              ),
               backfillAccountTimeoutMs,
               `[${twitterUsername}] Backfill timed out after ${Math.round(backfillAccountTimeoutMs / 1000)}s`,
             );
@@ -2301,9 +2357,7 @@ async function runAccountTask(
             });
           } catch (err) {
             sourceErrors += 1;
-            console.error(
-              `${logPrefix} ❌ Error backfilling @${twitterUsername}: ${describeError(err)}`,
-            );
+            console.error(`${logPrefix} ❌ Error backfilling @${twitterUsername}: ${describeError(err)}`);
           }
         }
         clearBackfill(mapping.id, backfillReq.requestId);
@@ -2351,7 +2405,16 @@ async function runAccountTask(
 
             console.log(`[${twitterUsername}] 📥 Fetched ${tweets.length} tweets.`);
             await withTimeout(
-              processTweets(agent, twitterUsername, mapping.bskyIdentifier, tweets, dryRun, undefined, undefined, sessionKey),
+              processTweets(
+                agent,
+                twitterUsername,
+                mapping.bskyIdentifier,
+                tweets,
+                dryRun,
+                undefined,
+                undefined,
+                sessionKey,
+              ),
               scheduledAccountTimeoutMs,
               `[${twitterUsername}] Scheduled processing timed out after ${Math.round(scheduledAccountTimeoutMs / 1000)}s`,
             );
@@ -2368,9 +2431,7 @@ async function runAccountTask(
       console.error(`${logPrefix} ❌ Mapping task failed: ${describeError(err)}`);
     } finally {
       activeTasks.delete(mapping.id);
-      console.log(
-        `${logPrefix} ✅ Task finished. Sources checked=${checkedSources}, source errors=${sourceErrors}.`,
-      );
+      console.log(`${logPrefix} ✅ Task finished. Sources checked=${checkedSources}, source errors=${sourceErrors}.`);
     }
   })();
 
@@ -2455,7 +2516,7 @@ async function main(): Promise<void> {
     );
   };
 
-  const createSubbranches = <T,>(items: T[], branchCount = SUBBRANCH_COUNT): T[][] => {
+  const createSubbranches = <T>(items: T[], branchCount = SUBBRANCH_COUNT): T[][] => {
     const branches = Array.from({ length: Math.max(1, branchCount) }, () => [] as T[]);
     for (let index = 0; index < items.length; index += 1) {
       branches[index % branches.length]?.push(items[index] as T);
@@ -2491,7 +2552,6 @@ async function main(): Promise<void> {
   };
 
   const runSingleCycle = async (cycleConfig: ReturnType<typeof getConfig>) => {
-
     if (options.backfillMapping) {
       const mapping = findMappingByRef(cycleConfig.mappings, options.backfillMapping);
       if (!mapping) {
@@ -2613,7 +2673,10 @@ async function main(): Promise<void> {
       if (remainingBackfills.length === 0) {
         updateAppStatus({
           state: 'idle',
-          message: deferredScheduledRun || isScheduledRunDue ? 'Backfill queue complete. Scheduled checks next.' : 'Backfill queue empty',
+          message:
+            deferredScheduledRun || isScheduledRunDue
+              ? 'Backfill queue complete. Scheduled checks next.'
+              : 'Backfill queue empty',
           backfillMappingId: undefined,
           backfillRequestId: undefined,
         });

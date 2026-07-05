@@ -15,6 +15,18 @@ function describeTarget(target: EventTarget | null): string {
   return `${tagName}${id}${className}`;
 }
 
+const SENSITIVE_NAME_PATTERN = /password|token|secret|ct0|api.?key|credential/i;
+
+function isSensitiveField(target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean {
+  if (target instanceof HTMLInputElement && target.type === 'password') {
+    return true;
+  }
+  const label = `${target.name || ''} ${target.id || ''} ${
+    target instanceof HTMLInputElement ? target.placeholder || '' : ''
+  }`;
+  return SENSITIVE_NAME_PATTERN.test(label);
+}
+
 function eventToPayload(event: Event): Record<string, unknown> {
   const target = event.target;
   const payload: Record<string, unknown> = {
@@ -30,7 +42,8 @@ function eventToPayload(event: Event): Record<string, unknown> {
     target instanceof HTMLSelectElement
   ) {
     payload.name = target.name || undefined;
-    payload.value = target.value;
+    // Never log credentials (app passwords, auth tokens, API keys) even in debug mode.
+    payload.value = isSensitiveField(target) ? '[redacted]' : target.value;
   }
 
   if (event instanceof MouseEvent) {
