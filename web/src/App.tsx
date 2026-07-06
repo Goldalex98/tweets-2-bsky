@@ -222,6 +222,36 @@ interface StatusState {
   lastUpdate: number;
 }
 
+type ActiveJobKind = 'checking' | 'mirroring' | 'backfilling' | 'profile-sync' | 'pin-sync';
+
+interface ActiveJobView {
+  id: string;
+  kind: ActiveJobKind;
+  account?: string;
+  target?: string;
+  message?: string;
+  processedCount?: number;
+  totalCount?: number;
+  startedAt: number;
+  updatedAt: number;
+}
+
+const JOB_KIND_LABEL: Record<string, string> = {
+  checking: 'Checking',
+  mirroring: 'Mirroring',
+  backfilling: 'Backfilling',
+  'profile-sync': 'Profile sync',
+  'pin-sync': 'Pin sync',
+};
+
+const JOB_KIND_DOT: Record<string, string> = {
+  checking: 'bg-sky-500',
+  mirroring: 'bg-emerald-500',
+  backfilling: 'bg-amber-500',
+  'profile-sync': 'bg-violet-500',
+  'pin-sync': 'bg-pink-500',
+};
+
 interface StatusResponse {
   lastCheckTime: number;
   nextCheckTime: number;
@@ -229,6 +259,7 @@ interface StatusResponse {
   checkIntervalMinutes: number;
   pendingBackfills: PendingBackfill[];
   currentStatus: StatusState;
+  activeJobs?: ActiveJobView[];
 }
 
 interface UserPermissions {
@@ -1555,6 +1586,7 @@ function App() {
   }, [newMapping.bskyIdentifier, newMapping.bskyPassword, newMapping.bskyServiceUrl]);
 
   const pendingBackfills = status?.pendingBackfills ?? [];
+  const activeJobs = status?.activeJobs ?? [];
   const currentStatus = status?.currentStatus;
   const latestActivity = recentActivity[0];
   const selectedMirrorPreview = selectedMirrorSourceUsername
@@ -4244,33 +4276,54 @@ function App() {
         </div>
       ) : null}
 
-      {currentStatus && currentStatus.state !== 'idle' ? (
-        <Card className="mb-6 border-border/80">
-          <div className="h-1 overflow-hidden rounded-t-xl bg-muted">
-            <div
-              className={cn(
-                'h-full transition-all duration-300',
-                currentStatus.state === 'backfilling' ? 'bg-amber-500' : 'bg-emerald-500',
-              )}
-              style={{ width: `${progressPercent || 100}%` }}
-            />
+      {activeJobs.length > 0 || (currentStatus && currentStatus.state !== 'idle') ? (
+        <Card className="mb-6">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
+            <p className="text-sm font-semibold">
+              {activeJobs.length > 0
+                ? `${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} running`
+                : `${formatState(currentStatus?.state || 'processing')} in progress`}
+            </p>
+            {pendingBackfills.length > 0 ? (
+              <p className="text-xs text-muted-foreground">{pendingBackfills.length} backfill(s) queued</p>
+            ) : null}
           </div>
-          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
-            <div className="space-y-1">
-              <p className="text-sm font-semibold">{formatState(currentStatus.state)} in progress</p>
+          {activeJobs.length > 0 ? (
+            <ul className="divide-y divide-border">
+              {activeJobs.map((job) => (
+                <li key={job.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-4 py-2 text-sm">
+                  <span
+                    className={cn(
+                      'inline-block h-2 w-2 shrink-0 self-center rounded-full',
+                      JOB_KIND_DOT[job.kind] || 'bg-muted-foreground',
+                    )}
+                  />
+                  <span className="font-medium">{JOB_KIND_LABEL[job.kind] || job.kind}</span>
+                  {job.account ? <span className="font-mono text-xs">@{job.account}</span> : null}
+                  {job.target ? <span className="text-xs text-muted-foreground">→ {job.target}</span> : null}
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">{job.message}</span>
+                  {typeof job.totalCount === 'number' && job.totalCount > 0 ? (
+                    <span className="font-mono text-xs text-muted-foreground">
+                      {job.processedCount ?? 0}/{job.totalCount}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : currentStatus ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
               <p className="text-sm text-muted-foreground">
                 {currentStatus.currentAccount ? `@${currentStatus.currentAccount} • ` : ''}
                 {currentStatus.message || 'Working through account queue.'}
               </p>
+              {currentStatus.totalCount ? (
+                <p className="font-mono text-xs text-muted-foreground">
+                  {(currentStatus.processedCount || 0).toLocaleString()} /{' '}
+                  {(currentStatus.totalCount || 0).toLocaleString()} ({progressPercent || 0}%)
+                </p>
+              ) : null}
             </div>
-            <div className="text-right">
-              <p className="text-lg font-semibold">{progressPercent || 0}%</p>
-              <p className="text-xs text-muted-foreground">
-                {(currentStatus.processedCount || 0).toLocaleString()} /{' '}
-                {(currentStatus.totalCount || 0).toLocaleString()}
-              </p>
-            </div>
-          </CardContent>
+          ) : null}
         </Card>
       ) : null}
 

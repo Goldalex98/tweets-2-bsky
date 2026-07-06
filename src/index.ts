@@ -1172,6 +1172,9 @@ async function processTweets(
 
   console.log(`[${twitterUsername}] 🚀 Processing ${toProcess.length} new tweets for ${bskyIdentifier}...`);
 
+  const mirrorJobId = `mirror:${bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`;
+  let mirroredCount = 0;
+
   filteredTweets.reverse();
   let count = 0;
   for (const tweet of filteredTweets) {
@@ -1214,6 +1217,14 @@ async function processTweets(
     }
 
     console.log(`\n[${twitterUsername}] 🔍 Inspecting tweet: ${tweetId}`);
+    updateJob(mirrorJobId, {
+      kind: 'mirroring',
+      account: twitterUsername,
+      target: bskyIdentifier,
+      message: `Mirroring tweet ${tweetId}`,
+      processedCount: mirroredCount,
+      totalCount: toProcess.length,
+    });
     updateAppStatus({
       state: 'processing',
       currentAccount: twitterUsername,
@@ -1798,14 +1809,21 @@ async function processTweets(
         saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, entry);
         localProcessedMap[tweetId] = entry; // Update local map for subsequent replies in this batch
       }
+      mirroredCount++;
     }
 
     // Add a random delay between 5s and 15s to be more human-like
     const wait = Math.floor(Math.random() * 10000) + 5000;
     console.log(`[${twitterUsername}] 😴 Pacing: Waiting ${wait / 1000}s before next tweet.`);
+    updateJob(mirrorJobId, {
+      message: `Mirrored tweet ${tweetId}. Pacing ${Math.round(wait / 1000)}s before the next one`,
+      processedCount: mirroredCount,
+    });
     updateAppStatus({ state: 'pacing', message: `Pacing: Waiting ${wait / 1000}s...` });
     await new Promise((r) => setTimeout(r, wait));
   }
+
+  updateJob(mirrorJobId, null);
 }
 
 import { getAgent } from './bsky.js';
@@ -1854,56 +1872,70 @@ async function importHistory(
 
   console.log(`Fetching tweets for ${twitterUsername}...`);
   updateAppStatus({ message: `Fetching tweets...` });
+  const backfillJobId = `backfill:${bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`;
+  updateJob(backfillJobId, {
+    kind: 'backfilling',
+    account: twitterUsername,
+    target: bskyIdentifier,
+    mappingId: mapping.id,
+    message: `Fetching up to ${limit || 100} tweets from the timeline`,
+  });
 
-  const client = await getTwitterScraper(sessionKey);
-  if (client) {
-    try {
-      // Use getTweets which reliably fetches user timeline
-      // limit defaults to 15 in function signature, but for history import we might want more.
-      // However, the generator will fetch as much as we ask.
-      const fetchLimit = limit || 100;
-      const generator = client.getTweets(twitterUsername, fetchLimit);
+  try {
+    const client = await getTwitterScraper(sessionKey);
+    if (client) {
+      try {
+        // Use getTweets which reliably fetches user timeline
+        // limit defaults to 15 in function signature, but for history import we might want more.
+        // However, the generator will fetch as much as we ask.
+        const fetchLimit = limit || 100;
+        const generator = client.getTweets(twitterUsername, fetchLimit);
 
-      for await (const scraperTweet of generator) {
-        if (!ignoreCancellation) {
-          const stillPending = getPendingBackfills().some(
-            (b) => b.id === mapping.id && (!requestId || b.requestId === requestId),
-          );
-          if (!stillPending) {
-            console.log(`[${twitterUsername}] 🛑 Backfill cancelled.`);
-            break;
+        for await (const scraperTweet of generator) {
+          if (!ignoreCancellation) {
+            const stillPending = getPendingBackfills().some(
+              (b) => b.id === mapping.id && (!requestId || b.requestId === requestId),
+            );
+            if (!stillPending) {
+              console.log(`[${twitterUsername}] 🛑 Backfill cancelled.`);
+              break;
+            }
           }
+
+          const t = mapScraperTweetToLocalTweet(scraperTweet);
+          const tid = t.id_str || t.id;
+          if (!tid) continue;
+
+          if (!processedTweets[tid] && !seenIds.has(tid)) {
+            allFoundTweets.push(t);
+            seenIds.add(tid);
+          }
+
+          if (allFoundTweets.length >= fetchLimit) break;
         }
-
-        const t = mapScraperTweetToLocalTweet(scraperTweet);
-        const tid = t.id_str || t.id;
-        if (!tid) continue;
-
-        if (!processedTweets[tid] && !seenIds.has(tid)) {
-          allFoundTweets.push(t);
-          seenIds.add(tid);
-        }
-
-        if (allFoundTweets.length >= fetchLimit) break;
+      } catch (e) {
+        console.warn('Error during history fetch:', e);
       }
-    } catch (e) {
-      console.warn('Error during history fetch:', e);
     }
-  }
 
-  console.log(`Fetch complete. Found ${allFoundTweets.length} new tweets to import.`);
-  if (allFoundTweets.length > 0) {
-    await processTweets(
-      agent as BskyAgent,
-      twitterUsername,
-      bskyIdentifier,
-      allFoundTweets,
-      dryRun,
-      undefined,
-      undefined,
-      sessionKey,
-    );
-    console.log('History import complete.');
+    console.log(`Fetch complete. Found ${allFoundTweets.length} new tweets to import.`);
+    if (allFoundTweets.length > 0) {
+      updateJob(backfillJobId, { message: `Backfilling ${allFoundTweets.length} tweet(s)` });
+      await processTweets(
+        agent as BskyAgent,
+        twitterUsername,
+        bskyIdentifier,
+        allFoundTweets,
+        dryRun,
+        undefined,
+        undefined,
+        sessionKey,
+      );
+      console.log('History import complete.');
+    }
+  } finally {
+    updateJob(backfillJobId, null);
+    updateJob(`mirror:${bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`, null);
   }
 }
 
@@ -2216,76 +2248,89 @@ async function syncPinnedTweetViaProfile(
       : 'No Twitter source account configured.';
   }
 
-  const scraper = await getTwitterScraper(sessionKey);
-  if (!scraper) {
-    return 'Twitter credentials are not configured.';
-  }
-
-  const agent = await getAgent(mapping);
-  if (!agent) {
-    return 'Bluesky login failed.';
-  }
-
-  const lookup = await fetchPinnedTweetId(scraper, pinSource);
-  if (!lookup.ok) {
-    return `Could not determine @${pinSource}'s pinned tweet (Twitter API lookup failed). Nothing changed.`;
-  }
-  const pinnedTweetId = lookup.pinnedTweetId;
-
-  if (!pinnedTweetId) {
-    await applyPinnedTweet(agent, mapping, undefined, dryRun, logPrefix);
-    return `@${pinSource} has no pinned tweet. Bluesky pin cleared if one was set.`;
-  }
-
-  if (pinnedTweetId === mapping.lastPinnedTweetId) {
-    return `Pinned tweet unchanged (${pinnedTweetId}). Nothing to do.`;
-  }
-
-  let record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
-  if (!record || record.status !== 'migrated') {
-    console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} not mirrored yet. Backfilling it now...`);
-    const rawPinned = await scraper.getTweet(pinnedTweetId);
-    if (rawPinned) {
-      // getTweet resolves the whole self-thread; mirror all of it so the pinned
-      // post threads on Bluesky exactly like a live thread would.
-      const seenIds = new Set<string>();
-      const threadTweets = [rawPinned, ...(rawPinned.thread ?? [])]
-        .map(mapScraperTweetToLocalTweet)
-        .filter((threadTweet) => {
-          const threadId = threadTweet.id_str || threadTweet.id;
-          if (!threadId || seenIds.has(threadId)) return false;
-          seenIds.add(threadId);
-          return true;
-        })
-        // processTweets expects timeline order (newest first) and reverses internally
-        .sort((a, b) => (BigInt(b.id_str || b.id || '0') < BigInt(a.id_str || a.id || '0') ? -1 : 1));
-      if (threadTweets.length > 1) {
-        console.log(
-          `${logPrefix} 📌 Pinned tweet is part of a thread (${threadTweets.length} tweets). Mirroring the whole thread.`,
-        );
-      }
-      await processTweets(
-        agent,
-        pinSource,
-        mapping.bskyIdentifier,
-        threadTweets,
-        dryRun,
-        undefined,
-        undefined,
-        sessionKey,
-      );
-      record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
+  const pinJobId = `pin:${mapping.id}`;
+  updateJob(pinJobId, {
+    kind: 'pin-sync',
+    account: pinSource,
+    target: mapping.bskyIdentifier,
+    mappingId: mapping.id,
+    message: `Checking @${pinSource}'s pinned tweet`,
+  });
+  try {
+    const scraper = await getTwitterScraper(sessionKey);
+    if (!scraper) {
+      return 'Twitter credentials are not configured.';
     }
-  }
 
-  if (!dryRun && (!record || record.status !== 'migrated')) {
-    return `Pinned tweet ${pinnedTweetId} could not be mirrored (it may be a retweet or an external reply).`;
-  }
+    const agent = await getAgent(mapping);
+    if (!agent) {
+      return 'Bluesky login failed.';
+    }
 
-  const synced = await applyPinnedTweet(agent, mapping, pinnedTweetId, dryRun, logPrefix);
-  return synced
-    ? `Pinned tweet synced for ${mapping.bskyIdentifier}.`
-    : `Pinned tweet ${pinnedTweetId} is not mirrored yet; try a backfill first.`;
+    const lookup = await fetchPinnedTweetId(scraper, pinSource);
+    if (!lookup.ok) {
+      return `Could not determine @${pinSource}'s pinned tweet (Twitter API lookup failed). Nothing changed.`;
+    }
+    const pinnedTweetId = lookup.pinnedTweetId;
+
+    if (!pinnedTweetId) {
+      await applyPinnedTweet(agent, mapping, undefined, dryRun, logPrefix);
+      return `@${pinSource} has no pinned tweet. Bluesky pin cleared if one was set.`;
+    }
+
+    if (pinnedTweetId === mapping.lastPinnedTweetId) {
+      return `Pinned tweet unchanged (${pinnedTweetId}). Nothing to do.`;
+    }
+
+    let record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
+    if (!record || record.status !== 'migrated') {
+      console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} not mirrored yet. Backfilling it now...`);
+      const rawPinned = await scraper.getTweet(pinnedTweetId);
+      if (rawPinned) {
+        // getTweet resolves the whole self-thread; mirror all of it so the pinned
+        // post threads on Bluesky exactly like a live thread would.
+        const seenIds = new Set<string>();
+        const threadTweets = [rawPinned, ...(rawPinned.thread ?? [])]
+          .map(mapScraperTweetToLocalTweet)
+          .filter((threadTweet) => {
+            const threadId = threadTweet.id_str || threadTweet.id;
+            if (!threadId || seenIds.has(threadId)) return false;
+            seenIds.add(threadId);
+            return true;
+          })
+          // processTweets expects timeline order (newest first) and reverses internally
+          .sort((a, b) => (BigInt(b.id_str || b.id || '0') < BigInt(a.id_str || a.id || '0') ? -1 : 1));
+        if (threadTweets.length > 1) {
+          console.log(
+            `${logPrefix} 📌 Pinned tweet is part of a thread (${threadTweets.length} tweets). Mirroring the whole thread.`,
+          );
+        }
+        await processTweets(
+          agent,
+          pinSource,
+          mapping.bskyIdentifier,
+          threadTweets,
+          dryRun,
+          undefined,
+          undefined,
+          sessionKey,
+        );
+        record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
+      }
+    }
+
+    if (!dryRun && (!record || record.status !== 'migrated')) {
+      return `Pinned tweet ${pinnedTweetId} could not be mirrored (it may be a retweet or an external reply).`;
+    }
+
+    const synced = await applyPinnedTweet(agent, mapping, pinnedTweetId, dryRun, logPrefix);
+    return synced
+      ? `Pinned tweet synced for ${mapping.bskyIdentifier}.`
+      : `Pinned tweet ${pinnedTweetId} is not mirrored yet; try a backfill first.`;
+  } finally {
+    updateJob(pinJobId, null);
+    updateJob(`mirror:${mapping.bskyIdentifier.toLowerCase()}:${pinSource.toLowerCase()}`, null);
+  }
 }
 
 async function maybeSyncMappingProfileInBackground(
@@ -2310,6 +2355,14 @@ async function maybeSyncMappingProfileInBackground(
     return;
   }
 
+  const profileJobId = `profile:${mapping.id}`;
+  updateJob(profileJobId, {
+    kind: 'profile-sync',
+    account: sourceTwitterUsername,
+    target: mapping.bskyIdentifier,
+    mappingId: mapping.id,
+    message: `Pulling bio/avatar from @${sourceTwitterUsername}`,
+  });
   try {
     console.log(`${logPrefix} 🪞 Running automatic profile sync from @${sourceTwitterUsername}.`);
     const result = await syncBlueskyProfileFromTwitter({
@@ -2343,6 +2396,8 @@ async function maybeSyncMappingProfileInBackground(
     console.log(`${logPrefix} ✅ Profile sync completed.`);
   } catch (error) {
     console.error(`${logPrefix} ❌ Automatic profile sync failed: ${describeError(error)}`);
+  } finally {
+    updateJob(profileJobId, null);
   }
 }
 
@@ -2510,9 +2565,17 @@ async function runAccountTask(
         const processedIds = new Set(Object.keys(processedMap));
 
         for (const twitterUsername of mapping.twitterUsernames) {
+          const checkJobId = `check:${mapping.id}:${twitterUsername.toLowerCase()}`;
           try {
             checkedSources += 1;
             console.log(`[${twitterUsername}] 🏁 Starting check for new tweets...`);
+            updateJob(checkJobId, {
+              kind: 'checking',
+              account: twitterUsername,
+              target: mapping.bskyIdentifier,
+              mappingId: mapping.id,
+              message: 'Checking for new tweets',
+            });
             updateAppStatus({
               state: 'checking',
               currentAccount: twitterUsername,
@@ -2554,6 +2617,10 @@ async function runAccountTask(
           } catch (err) {
             sourceErrors += 1;
             console.error(`${logPrefix} ❌ Error checking @${twitterUsername}: ${describeError(err)}`);
+          } finally {
+            updateJob(checkJobId, null);
+            // Clear the mirror job too in case processing threw mid-tweet
+            updateJob(`mirror:${mapping.bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`, null);
           }
         }
 
@@ -2583,6 +2650,7 @@ import {
   getSchedulerWakeSignal,
   startServer,
   updateAppStatus,
+  updateJob,
   updateLastCheckTime,
 } from './server.js';
 import type { PendingBackfill } from './server.js';

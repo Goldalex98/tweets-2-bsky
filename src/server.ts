@@ -854,6 +854,52 @@ let pendingBackfills: PendingBackfill[] = [];
 let backfillSequence = 0;
 let schedulerWakeSignal = 0; // Monotonic counter to wake scheduler loop immediately.
 
+// Multiple subbranches work in parallel, so a single global status message
+// gets clobbered constantly. Each unit of work registers its own job here and
+// the dashboard renders the full list.
+export type ActiveJobKind = 'checking' | 'mirroring' | 'backfilling' | 'profile-sync' | 'pin-sync';
+
+export interface ActiveJob {
+  id: string;
+  kind: ActiveJobKind;
+  account?: string;
+  target?: string;
+  mappingId?: string;
+  message?: string;
+  processedCount?: number;
+  totalCount?: number;
+  startedAt: number;
+  updatedAt: number;
+}
+
+const activeJobs = new Map<string, ActiveJob>();
+const JOB_STALE_MS = 30 * 60 * 1000;
+
+export function updateJob(id: string, patch: Partial<Omit<ActiveJob, 'id' | 'startedAt' | 'updatedAt'>> | null): void {
+  if (patch === null) {
+    activeJobs.delete(id);
+    return;
+  }
+  const existing = activeJobs.get(id);
+  activeJobs.set(id, {
+    kind: 'checking',
+    ...existing,
+    ...patch,
+    id,
+    startedAt: existing?.startedAt ?? Date.now(),
+    updatedAt: Date.now(),
+  });
+}
+
+function getActiveJobsSnapshot(): ActiveJob[] {
+  const now = Date.now();
+  for (const [id, job] of activeJobs) {
+    // A crashed/abandoned task should not leave a ghost job on the dashboard.
+    if (now - job.updatedAt > JOB_STALE_MS) activeJobs.delete(id);
+  }
+  return [...activeJobs.values()].sort((a, b) => a.startedAt - b.startedAt);
+}
+
 export interface PendingPinSync {
   id: string;
   queuedAt: number;
@@ -2824,6 +2870,19 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
         }
       : currentAppStatus;
 
+  // Jobs are scoped like backfills: by mapping id when set, otherwise by the
+  // Bluesky target of a mapping the user can see.
+  const visibleBskyIdentifiers = new Set(
+    config.mappings
+      .filter((mapping) => visibleMappingIds.has(mapping.id))
+      .map((mapping) => mapping.bskyIdentifier.toLowerCase()),
+  );
+  const scopedJobs = getActiveJobsSnapshot().filter((job) => {
+    if (job.mappingId) return visibleMappingIds.has(job.mappingId);
+    if (job.target) return visibleBskyIdentifiers.has(job.target.toLowerCase());
+    return true;
+  });
+
   res.json({
     lastCheckTime,
     nextCheckTime,
@@ -2834,6 +2893,7 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
       position: index + 1,
     })),
     currentStatus: scopedStatus,
+    activeJobs: scopedJobs,
   });
 });
 
