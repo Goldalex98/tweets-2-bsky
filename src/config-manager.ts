@@ -85,6 +85,7 @@ export interface AccountMapping {
   lastMirroredAvatarUrl?: string;
   lastMirroredBannerUrl?: string;
   lastPinnedTweetId?: string;
+  lastPinSyncAt?: string;
   hasBotLabel?: boolean;
 }
 
@@ -339,6 +340,7 @@ const normalizeMapping = (rawMapping: unknown, users: WebUser[], adminUserId?: s
     lastMirroredAvatarUrl: normalizeString(record.lastMirroredAvatarUrl),
     lastMirroredBannerUrl: normalizeString(record.lastMirroredBannerUrl),
     lastPinnedTweetId: normalizeString(record.lastPinnedTweetId),
+    lastPinSyncAt: normalizeIsoDateString(record.lastPinSyncAt),
     hasBotLabel: normalizeBoolean(record.hasBotLabel, false),
     createdByUserId:
       (explicitCreatorExists ? explicitCreator : undefined) ?? matchOwnerToUserId(owner, users) ?? adminUserId,

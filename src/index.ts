@@ -521,6 +521,11 @@ interface DownloadedMedia {
   mimeType: string;
 }
 
+// Hard cap on media downloads. Bluesky rejects videos over 300MB anyway, so
+// anything larger aborts early (→ link fallback) instead of buffering gigabytes
+// of RAM — with 5 subbranches downloading in parallel that risks OOM.
+const MAX_MEDIA_DOWNLOAD_BYTES = 320 * 1024 * 1024;
+
 async function downloadMedia(url: string, maxDurationMs = 120000): Promise<DownloadedMedia> {
   const response = await axios({
     url,
@@ -530,6 +535,8 @@ async function downloadMedia(url: string, maxDurationMs = 120000): Promise<Downl
     // a hard deadline so a slow-trickling large download can't stall the pipeline.
     timeout: 30000,
     signal: AbortSignal.timeout(maxDurationMs),
+    maxContentLength: MAX_MEDIA_DOWNLOAD_BYTES,
+    maxBodyLength: MAX_MEDIA_DOWNLOAD_BYTES,
   });
   return {
     buffer: Buffer.from(response.data as ArrayBuffer),
@@ -2024,6 +2031,65 @@ const persistPinnedTweetState = (mappingId: string, pinnedTweetId: string | unde
   return profileSyncStateWriteQueue;
 };
 
+const persistPinSyncTimestamp = (mappingId: string, lastPinSyncAt: string) => {
+  profileSyncStateWriteQueue = profileSyncStateWriteQueue
+    .then(() => {
+      const config = getConfig();
+      const mapping = config.mappings.find((entry) => entry.id === mappingId);
+      if (!mapping) {
+        return;
+      }
+      mapping.lastPinSyncAt = lastPinSyncAt;
+      saveConfig(config);
+    })
+    .catch((error) => {
+      console.error(`[Scheduler] Failed persisting pin sync timestamp for mapping ${mappingId}:`, error);
+    });
+
+  return profileSyncStateWriteQueue;
+};
+
+const PIN_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// Authoritative pin check at least once every 24h per mapping (the timeline
+// isPin path only catches pins that are inside the fetched window). Unchanged
+// pins are a cheap no-op: two API reads, no backfill, no profile write.
+async function maybeSyncPinnedTweetDaily(
+  mapping: AccountMapping,
+  dryRun: boolean,
+  sessionKey: string,
+  logPrefix: string,
+): Promise<void> {
+  if (dryRun) {
+    return;
+  }
+
+  const lastMs = parseIsoTimestampMs(mapping.lastPinSyncAt);
+  if (!lastMs) {
+    // First run after upgrade: spread mappings across the 24h window so a
+    // large instance (100 mappings) doesn't burst the Twitter API in one cycle.
+    const staggered = new Date(Date.now() - Math.floor(Math.random() * PIN_SYNC_INTERVAL_MS)).toISOString();
+    mapping.lastPinSyncAt = staggered;
+    await persistPinSyncTimestamp(mapping.id, staggered);
+    return;
+  }
+  if (Date.now() - lastMs < PIN_SYNC_INTERVAL_MS) {
+    return;
+  }
+
+  // Bump the timestamp before running so failures retry in 24h, not every cycle.
+  const stamp = new Date().toISOString();
+  mapping.lastPinSyncAt = stamp;
+  await persistPinSyncTimestamp(mapping.id, stamp);
+
+  try {
+    const message = await syncPinnedTweetViaProfile(mapping, dryRun, sessionKey);
+    console.log(`${logPrefix} 📌 Daily pin check: ${message}`);
+  } catch (error) {
+    console.error(`${logPrefix} ❌ Daily pin check failed: ${describeError(error)}`);
+  }
+}
+
 const resolvePinSourceForMapping = (mapping: AccountMapping): string | null => {
   return resolveProfileSyncSourceForMapping(mapping) || mapping.twitterUsernames[0] || null;
 };
@@ -2164,6 +2230,10 @@ async function syncPinnedTweetViaProfile(
   if (!pinnedTweetId) {
     await applyPinnedTweet(agent, mapping, undefined, dryRun, logPrefix);
     return `@${pinSource} has no pinned tweet. Bluesky pin cleared if one was set.`;
+  }
+
+  if (pinnedTweetId === mapping.lastPinnedTweetId) {
+    return `Pinned tweet unchanged (${pinnedTweetId}). Nothing to do.`;
   }
 
   let record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
@@ -2483,6 +2553,7 @@ async function runAccountTask(
         }
 
         await maybeSyncMappingProfileInBackground(mapping, dryRun, logPrefix);
+        await maybeSyncPinnedTweetDaily(mapping, dryRun, sessionKey, logPrefix);
       }
     } catch (err) {
       sourceErrors += 1;
