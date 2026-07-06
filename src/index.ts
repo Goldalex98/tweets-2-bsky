@@ -2090,8 +2090,11 @@ async function maybeSyncPinnedTweetDaily(
   }
 }
 
+// Pins always come from the same account the bio/avatar are mirrored from.
+// For multi-source mappings that means the designated profileSyncSourceUsername;
+// without a valid selection we skip pin sync, exactly like profile sync does.
 const resolvePinSourceForMapping = (mapping: AccountMapping): string | null => {
-  return resolveProfileSyncSourceForMapping(mapping) || mapping.twitterUsernames[0] || null;
+  return resolveProfileSyncSourceForMapping(mapping);
 };
 
 async function setBlueskyPinnedPost(
@@ -2208,7 +2211,9 @@ async function syncPinnedTweetViaProfile(
   const logPrefix = getMappingLogPrefix(mapping);
   const pinSource = resolvePinSourceForMapping(mapping);
   if (!pinSource) {
-    return 'No Twitter source account configured.';
+    return mapping.twitterUsernames.length > 1
+      ? 'No profile-sync source account selected for this multi-account mapping. Pick which account to pull the bio/avatar (and pin) from first.'
+      : 'No Twitter source account configured.';
   }
 
   const scraper = await getTwitterScraper(sessionKey);
