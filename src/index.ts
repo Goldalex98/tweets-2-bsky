@@ -2750,7 +2750,9 @@ async function main(): Promise<void> {
     const isScheduledRunDue = now >= nextTime;
 
     // Pin syncs are quick one-shot jobs queued from the web UI; run them first.
-    const pendingPinSyncs = getPendingPinSyncs();
+    // Cap per iteration so a bulk "sync all pins" on a large instance doesn't
+    // starve scheduled checks and backfills.
+    const pendingPinSyncs = getPendingPinSyncs().slice(0, SUBBRANCH_COUNT);
     for (const pinSync of pendingPinSyncs) {
       const mapping = findMappingById(config.mappings, pinSync.id);
       clearPinSync(pinSync.id);

@@ -17,6 +17,7 @@ import {
   MessageCircle,
   Moon,
   Newspaper,
+  Pin,
   Play,
   Plus,
   Quote,
@@ -44,7 +45,13 @@ type ThemeMode = 'system' | 'light' | 'dark';
 type AuthView = 'login' | 'register';
 type DashboardTab = 'overview' | 'accounts' | 'posts' | 'activity' | 'settings';
 type SettingsSection = 'account' | 'users' | 'twitter' | 'ai' | 'data';
-type BulkAccountsAction = 'sync_profiles' | 'pull_twitter_bio' | 'bridge_all' | 'apply_bot_label' | 'append_bot_name';
+type BulkAccountsAction =
+  | 'sync_profiles'
+  | 'pull_twitter_bio'
+  | 'bridge_all'
+  | 'apply_bot_label'
+  | 'append_bot_name'
+  | 'sync_pins';
 
 type AppState = 'idle' | 'checking' | 'backfilling' | 'pacing' | 'processing';
 
@@ -2804,6 +2811,37 @@ function App() {
     }
   };
 
+  const handleSyncPinsForAccounts = async (targets: AccountMapping[]) => {
+    if (!authHeaders) {
+      return;
+    }
+    if (!canQueueBackfillsPermission) {
+      showNotice('error', 'You do not have permission to sync pins.');
+      return;
+    }
+
+    let queued = 0;
+    let failed = 0;
+    for (const mapping of targets) {
+      try {
+        await axios.post(`/api/pin-sync/${mapping.id}`, {}, { headers: authHeaders });
+        queued += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+
+    if (queued > 0) {
+      showNotice(
+        'success',
+        `Pin sync queued for ${queued} account(s)${failed > 0 ? ` (${failed} failed to queue)` : ''}. Pinned tweets will be mirrored and pinned on Bluesky.`,
+      );
+    } else {
+      showNotice('error', 'Failed to queue pin sync for the selected accounts.');
+    }
+    await fetchStatus();
+  };
+
   const handleApplyAllAccountsAction = async () => {
     const actionLabel =
       accountsBulkAction === 'sync_profiles'
@@ -2814,7 +2852,9 @@ function App() {
             ? 'fediverse bridge'
             : accountsBulkAction === 'apply_bot_label'
               ? 'bot label update'
-              : 'display-name suffix update';
+              : accountsBulkAction === 'sync_pins'
+                ? 'pinned tweet sync'
+                : 'display-name suffix update';
     const targets = resolveBulkAccountTargets(actionLabel);
     if (targets.length === 0) {
       return;
@@ -2834,6 +2874,10 @@ function App() {
     }
     if (accountsBulkAction === 'apply_bot_label') {
       await handleAddBotLabelToAllAccounts(targets);
+      return;
+    }
+    if (accountsBulkAction === 'sync_pins') {
+      await handleSyncPinsForAccounts(targets);
       return;
     }
     await handleAppendBotNameToAllAccounts(targets);
@@ -4372,6 +4416,7 @@ function App() {
                     <option value="bridge_all">Apply fediverse bridge to eligible accounts</option>
                     <option value="apply_bot_label">Apply automated-account label to accounts</option>
                     <option value="append_bot_name">Apply {'{bot}'} display-name suffix to accounts</option>
+                    <option value="sync_pins">Sync pinned tweets to accounts</option>
                   </select>
                   <select
                     className={cn(selectClassName, 'h-9 w-[200px] px-2 py-1 text-xs')}
@@ -4401,6 +4446,8 @@ function App() {
                       <Link2 className="mr-2 h-4 w-4" />
                     ) : accountsBulkAction === 'sync_profiles' ? (
                       <RefreshCw className="mr-2 h-4 w-4" />
+                    ) : accountsBulkAction === 'sync_pins' ? (
+                      <Pin className="mr-2 h-4 w-4" />
                     ) : (
                       <Bot className="mr-2 h-4 w-4" />
                     )}
@@ -4412,7 +4459,9 @@ function App() {
                           ? 'Apply bridge all'
                           : accountsBulkAction === 'apply_bot_label'
                             ? 'Apply bot label all'
-                            : 'Apply append {bot} all'}
+                            : accountsBulkAction === 'sync_pins'
+                              ? 'Apply pin sync all'
+                              : 'Apply append {bot} all'}
                   </Button>
                   {isBridgeAllBusy && bridgeAllProgress ? (
                     <Badge variant="outline" className="max-w-[280px] truncate">
