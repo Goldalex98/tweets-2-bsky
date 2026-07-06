@@ -33,7 +33,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -443,7 +443,7 @@ const PERMISSION_OPTIONS: Array<{
 ];
 
 const selectClassName =
-  'flex h-10 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+  'flex h-10 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
 function getApiErrorMessage(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
@@ -1724,7 +1724,11 @@ function App() {
         ),
       }));
   }, [accountMappingsForView, groupOptions]);
-  const normalizedAccountsQuery = useMemo(() => normalizeSearchValue(accountsSearchQuery), [accountsSearchQuery]);
+  const deferredAccountsSearchQuery = useDeferredValue(accountsSearchQuery);
+  const normalizedAccountsQuery = useMemo(
+    () => normalizeSearchValue(deferredAccountsSearchQuery),
+    [deferredAccountsSearchQuery],
+  );
   const accountSearchTokens = useMemo(() => tokenizeSearchValue(normalizedAccountsQuery), [normalizedAccountsQuery]);
   const accountSearchScores = useMemo(() => {
     const scores = new Map<string, number>();
@@ -4101,7 +4105,7 @@ function App() {
   if (!token) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
-        <Card className="w-full max-w-md animate-slide-up border-border/80 bg-card/95">
+        <Card className="w-full max-w-md border-border/80 bg-card">
           <CardHeader className="space-y-1">
             <CardTitle className="text-2xl">Tweets-2-Bsky</CardTitle>
             <CardDescription>
@@ -4172,8 +4176,8 @@ function App() {
 
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mb-6 animate-slide-up">
-        <Card className="border-border/80 bg-card/90">
+      <div className="mb-6">
+        <Card className="border-border/80 bg-card">
           <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4 sm:p-5">
             <div className="space-y-1">
               <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">Dashboard</p>
@@ -4228,7 +4232,7 @@ function App() {
       {notice ? (
         <div
           className={cn(
-            'mb-5 animate-pop-in rounded-md border px-4 py-2 text-sm',
+            'mb-5 rounded-md border px-4 py-2 text-sm',
             notice.tone === 'success' &&
               'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:border-emerald-500/30 dark:text-emerald-300',
             notice.tone === 'error' &&
@@ -4241,7 +4245,7 @@ function App() {
       ) : null}
 
       {currentStatus && currentStatus.state !== 'idle' ? (
-        <Card className="mb-6 animate-fade-in border-border/80">
+        <Card className="mb-6 border-border/80">
           <div className="h-1 overflow-hidden rounded-t-xl bg-muted">
             <div
               className={cn(
@@ -4270,8 +4274,8 @@ function App() {
         </Card>
       ) : null}
 
-      <div className="mb-6 animate-fade-in overflow-x-auto pb-1">
-        <div className="inline-flex min-w-full gap-2 rounded-xl border border-border/70 bg-card/90 p-2 sm:min-w-0">
+      <div className="mb-6 overflow-x-auto pb-1">
+        <div className="inline-flex min-w-full gap-2 rounded-lg border border-border/70 bg-card p-2 sm:min-w-0">
           {dashboardTabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -4279,10 +4283,10 @@ function App() {
               <button
                 key={tab.id}
                 className={cn(
-                  'inline-flex h-11 min-w-[8rem] touch-manipulation items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium transition-[transform,background-color,color,box-shadow] duration-200 ease-out motion-reduce:transition-none motion-safe:hover:-translate-y-0.5',
+                  'inline-flex h-11 min-w-[8rem] touch-manipulation items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium',
                   isActive
-                    ? 'bg-foreground text-background shadow-sm'
-                    : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground hover:shadow-sm',
+                    ? 'bg-foreground text-background'
+                    : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground',
                 )}
                 onClick={() => setActiveTab(tab.id)}
                 type="button"
@@ -4296,15 +4300,15 @@ function App() {
       </div>
 
       {activeTab === 'overview' ? (
-        <section className="space-y-6 animate-fade-in">
+        <section className="space-y-6">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardContent className="p-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Mapped Accounts</p>
                 <p className="mt-2 text-2xl font-semibold">{mappings.length}</p>
               </CardContent>
             </Card>
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardContent className="p-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Bot-Labeled</p>
                 <p className="mt-2 text-2xl font-semibold">
@@ -4312,19 +4316,19 @@ function App() {
                 </p>
               </CardContent>
             </Card>
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardContent className="p-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Backfill Queue</p>
                 <p className="mt-2 text-2xl font-semibold">{pendingBackfills.length}</p>
               </CardContent>
             </Card>
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardContent className="p-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Current State</p>
                 <p className="mt-2 text-2xl font-semibold">{formatState(currentStatus?.state || 'idle')}</p>
               </CardContent>
             </Card>
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardContent className="p-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Latest Activity</p>
                 <p className="mt-2 text-sm font-medium text-foreground">
@@ -4334,7 +4338,7 @@ function App() {
                 </p>
               </CardContent>
             </Card>
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardContent className="p-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Top Account (Engagement)</p>
                 {topAccount ? (
@@ -4367,7 +4371,7 @@ function App() {
             </Card>
           </div>
 
-          <Card className="animate-slide-up">
+          <Card className="">
             <CardHeader>
               <CardTitle>Quick Navigation</CardTitle>
               <CardDescription>Use tabs to focus one workflow at a time, especially on mobile.</CardDescription>
@@ -4390,8 +4394,8 @@ function App() {
       ) : null}
 
       {activeTab === 'accounts' ? (
-        <section className="space-y-6 animate-fade-in">
-          <Card className="animate-slide-up">
+        <section className="space-y-6">
+          <Card className="">
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <div className="space-y-1">
@@ -4689,14 +4693,10 @@ function App() {
                     const remainingMappingsCount = Math.max(0, group.mappings.length - renderedMappings.length);
 
                     return (
-                      <div
-                        key={group.key}
-                        className="overflow-hidden rounded-lg border border-border/70 bg-card/70 animate-slide-up [animation-fill-mode:both]"
-                        style={{ animationDelay: `${Math.min(groupIndex * 45, 220)}ms` }}
-                      >
+                      <div key={group.key} className="cv-auto overflow-hidden rounded-lg border border-border bg-card">
                         <button
                           className={cn(
-                            'group flex w-full items-center justify-between bg-muted/40 px-3 py-2 text-left transition-[background-color,padding] duration-200',
+                            'group flex w-full items-center justify-between bg-muted/40 px-3 py-2 text-left',
                             canCollapseGroup ? 'hover:bg-muted/70' : '',
                           )}
                           onClick={() => {
@@ -4713,18 +4713,13 @@ function App() {
                             <Badge variant="outline">{group.mappings.length}</Badge>
                           </div>
                           {canCollapseGroup ? (
-                            <ChevronDown
-                              className={cn(
-                                'h-4 w-4 transition-transform duration-200 motion-reduce:transition-none',
-                                collapsed ? '-rotate-90' : 'rotate-0',
-                              )}
-                            />
+                            <ChevronDown className={cn('h-4 w-4', collapsed ? '-rotate-90' : 'rotate-0')} />
                           ) : null}
                         </button>
 
                         <div
                           className={cn(
-                            'grid transition-[grid-template-rows,opacity] duration-300 ease-out motion-reduce:transition-none',
+                            'grid',
                             collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100',
                           )}
                         >
@@ -5153,7 +5148,7 @@ function App() {
           </Card>
 
           {canManageGroupsPermission ? (
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardHeader className="pb-3">
                 <CardTitle>Group Manager</CardTitle>
                 <CardDescription>Edit folder names/emojis or delete a group.</CardDescription>
@@ -5226,8 +5221,8 @@ function App() {
       ) : null}
 
       {activeTab === 'posts' ? (
-        <section className="space-y-6 animate-fade-in">
-          <Card className="animate-slide-up">
+        <section className="space-y-6">
+          <Card className="">
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="space-y-1">
@@ -5293,7 +5288,7 @@ function App() {
                       return (
                         <article
                           key={`${post.twitterId}-${post.bskyIdentifier}-${post.bskyCid || post.createdAt || 'result'}`}
-                          className="rounded-xl border border-border/70 bg-background/80 p-4 shadow-sm"
+                          className="rounded-lg border border-border/70 bg-background p-4"
                         >
                           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                             <div className="min-w-0">
@@ -5380,8 +5375,7 @@ function App() {
                     return (
                       <article
                         key={post.bskyUri || `${post.bskyCid || 'post'}-${post.createdAt || index}`}
-                        className="rounded-xl border border-border/70 bg-background/80 p-4 shadow-sm transition-[transform,box-shadow,border-color,background-color] duration-200 ease-out motion-reduce:transition-none motion-safe:hover:-translate-y-0.5 motion-safe:hover:shadow-md animate-slide-up [animation-fill-mode:both]"
-                        style={{ animationDelay: `${Math.min(index * 45, 260)}ms` }}
+                        className="cv-auto rounded-lg border border-border bg-background p-4"
                       >
                         <div className="mb-3 flex items-start justify-between gap-3">
                           <div className="flex items-center gap-2">
@@ -5428,10 +5422,7 @@ function App() {
                             return (
                               <a
                                 key={`${post.bskyUri}-segment-${segmentIndex}`}
-                                className={cn(
-                                  'underline decoration-transparent transition hover:decoration-current',
-                                  linkTone,
-                                )}
+                                className={cn('hover:underline', linkTone)}
                                 href={segment.href}
                                 target="_blank"
                                 rel="noreferrer"
@@ -5457,7 +5448,7 @@ function App() {
                                     rel="noreferrer"
                                   >
                                     <img
-                                      className="h-56 w-full object-cover transition-transform duration-300 ease-out motion-reduce:transition-none motion-safe:group-hover:scale-[1.02]"
+                                      className="h-56 w-full object-cover"
                                       src={imageSrc}
                                       alt={media.alt || 'Bluesky media'}
                                       loading="lazy"
@@ -5475,7 +5466,7 @@ function App() {
                                   >
                                     {media.thumb ? (
                                       <img
-                                        className="h-56 w-full object-cover transition-transform duration-300 ease-out motion-reduce:transition-none motion-safe:group-hover:scale-[1.02]"
+                                        className="h-56 w-full object-cover"
                                         src={media.thumb}
                                         alt={media.alt || 'Video thumbnail'}
                                         loading="lazy"
@@ -5514,7 +5505,7 @@ function App() {
                                   >
                                     {media.thumb ? (
                                       <img
-                                        className="h-40 w-full object-cover transition-transform duration-300 ease-out motion-reduce:transition-none motion-safe:group-hover:scale-[1.02]"
+                                        className="h-40 w-full object-cover"
                                         src={media.thumb}
                                         alt={media.title || media.url}
                                         loading="lazy"
@@ -5594,8 +5585,8 @@ function App() {
       ) : null}
 
       {activeTab === 'activity' ? (
-        <section className="space-y-6 animate-fade-in">
-          <Card className="animate-slide-up">
+        <section className="space-y-6">
+          <Card className="">
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="space-y-1">
@@ -5723,8 +5714,8 @@ function App() {
       ) : null}
 
       {activeTab === 'settings' ? (
-        <section className="space-y-6 animate-fade-in">
-          <Card className="animate-slide-up">
+        <section className="space-y-6">
+          <Card className="">
             <button
               className="flex w-full items-center justify-between px-5 py-4 text-left"
               onClick={() => toggleSettingsSection('account')}
@@ -5735,15 +5726,12 @@ function App() {
                 <p className="text-xs text-muted-foreground">Update your own email/password with verification.</p>
               </div>
               <ChevronDown
-                className={cn(
-                  'h-4 w-4 transition-transform duration-200',
-                  isSettingsSectionExpanded('account') ? 'rotate-0' : '-rotate-90',
-                )}
+                className={cn('h-4 w-4', isSettingsSectionExpanded('account') ? 'rotate-0' : '-rotate-90')}
               />
             </button>
             <div
               className={cn(
-                'grid transition-[grid-template-rows,opacity] duration-300 ease-out',
+                'grid',
                 isSettingsSectionExpanded('account') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
               )}
             >
@@ -5845,7 +5833,7 @@ function App() {
 
           {isAdmin ? (
             <>
-              <Card className="animate-slide-up">
+              <Card className="">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Settings2 className="h-4 w-4" />
@@ -5901,7 +5889,7 @@ function App() {
                 </CardContent>
               </Card>
 
-              <Card className="animate-slide-up">
+              <Card className="">
                 <button
                   className="flex w-full items-center justify-between px-5 py-4 text-left"
                   onClick={() => toggleSettingsSection('users')}
@@ -5912,15 +5900,12 @@ function App() {
                     <p className="text-xs text-muted-foreground">Create users and control what they can see/manage.</p>
                   </div>
                   <ChevronDown
-                    className={cn(
-                      'h-4 w-4 transition-transform duration-200',
-                      isSettingsSectionExpanded('users') ? 'rotate-0' : '-rotate-90',
-                    )}
+                    className={cn('h-4 w-4', isSettingsSectionExpanded('users') ? 'rotate-0' : '-rotate-90')}
                   />
                 </button>
                 <div
                   className={cn(
-                    'grid transition-[grid-template-rows,opacity] duration-300 ease-out',
+                    'grid',
                     isSettingsSectionExpanded('users') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
                   )}
                 >
@@ -5989,7 +5974,7 @@ function App() {
                             {PERMISSION_OPTIONS.map((permission) => (
                               <label
                                 key={`new-user-permission-${permission.key}`}
-                                className="rounded-md border border-border/70 bg-background/80 px-3 py-2 text-xs"
+                                className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
                               >
                                 <span className="flex items-center justify-between gap-2">
                                   <span className="font-medium">{permission.label}</span>
@@ -6087,7 +6072,7 @@ function App() {
                                         {PERMISSION_OPTIONS.map((permission) => (
                                           <label
                                             key={`edit-user-permission-${user.id}-${permission.key}`}
-                                            className="rounded-md border border-border/70 bg-background/80 px-3 py-2 text-xs"
+                                            className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
                                           >
                                             <span className="flex items-center justify-between gap-2">
                                               <span className="font-medium">{permission.label}</span>
@@ -6208,7 +6193,7 @@ function App() {
                 </div>
               </Card>
 
-              <Card className="animate-slide-up">
+              <Card className="">
                 <button
                   className="flex w-full items-center justify-between px-5 py-4 text-left"
                   onClick={() => toggleSettingsSection('twitter')}
@@ -6223,16 +6208,13 @@ function App() {
                       {twitterConfigured ? 'Configured' : 'Missing'}
                     </Badge>
                     <ChevronDown
-                      className={cn(
-                        'h-4 w-4 transition-transform duration-200',
-                        isSettingsSectionExpanded('twitter') ? 'rotate-0' : '-rotate-90',
-                      )}
+                      className={cn('h-4 w-4', isSettingsSectionExpanded('twitter') ? 'rotate-0' : '-rotate-90')}
                     />
                   </div>
                 </button>
                 <div
                   className={cn(
-                    'grid transition-[grid-template-rows,opacity] duration-300 ease-out',
+                    'grid',
                     isSettingsSectionExpanded('twitter') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
                   )}
                 >
@@ -6295,7 +6277,7 @@ function App() {
                 </div>
               </Card>
 
-              <Card className="animate-slide-up">
+              <Card className="">
                 <button
                   className="flex w-full items-center justify-between px-5 py-4 text-left"
                   onClick={() => toggleSettingsSection('ai')}
@@ -6310,16 +6292,13 @@ function App() {
                       {aiConfigured ? 'Configured' : 'Optional'}
                     </Badge>
                     <ChevronDown
-                      className={cn(
-                        'h-4 w-4 transition-transform duration-200',
-                        isSettingsSectionExpanded('ai') ? 'rotate-0' : '-rotate-90',
-                      )}
+                      className={cn('h-4 w-4', isSettingsSectionExpanded('ai') ? 'rotate-0' : '-rotate-90')}
                     />
                   </div>
                 </button>
                 <div
                   className={cn(
-                    'grid transition-[grid-template-rows,opacity] duration-300 ease-out',
+                    'grid',
                     isSettingsSectionExpanded('ai') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
                   )}
                 >
@@ -6393,7 +6372,7 @@ function App() {
                 </div>
               </Card>
 
-              <Card className="animate-slide-up">
+              <Card className="">
                 <button
                   className="flex w-full items-center justify-between px-5 py-4 text-left"
                   onClick={() => toggleSettingsSection('data')}
@@ -6404,15 +6383,12 @@ function App() {
                     <p className="text-xs text-muted-foreground">Export/import mappings and provider settings.</p>
                   </div>
                   <ChevronDown
-                    className={cn(
-                      'h-4 w-4 transition-transform duration-200',
-                      isSettingsSectionExpanded('data') ? 'rotate-0' : '-rotate-90',
-                    )}
+                    className={cn('h-4 w-4', isSettingsSectionExpanded('data') ? 'rotate-0' : '-rotate-90')}
                   />
                 </button>
                 <div
                   className={cn(
-                    'grid transition-[grid-template-rows,opacity] duration-300 ease-out',
+                    'grid',
                     isSettingsSectionExpanded('data') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
                   )}
                 >
@@ -6451,7 +6427,7 @@ function App() {
               </Card>
             </>
           ) : (
-            <Card className="animate-slide-up">
+            <Card className="">
               <CardHeader>
                 <CardTitle>Access Scope</CardTitle>
                 <CardDescription>Your current account permissions.</CardDescription>
@@ -6469,7 +6445,7 @@ function App() {
       ) : null}
       {isAddAccountSheetOpen ? (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 backdrop-blur-sm sm:items-stretch sm:justify-end"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-stretch sm:justify-end"
           onClick={closeAddAccountSheet}
         >
           <aside
@@ -6521,7 +6497,7 @@ function App() {
 
             <div className="flex-1 overflow-y-auto px-5 py-4">
               {addAccountStep === 1 ? (
-                <div className="space-y-4 animate-fade-in">
+                <div className="space-y-4">
                   <div className="space-y-1">
                     <p className="text-sm font-semibold">Add Twitter source account(s)</p>
                     <p className="text-xs text-muted-foreground">
@@ -6627,7 +6603,7 @@ function App() {
               ) : null}
 
               {addAccountStep === 2 ? (
-                <div className="space-y-4 animate-fade-in">
+                <div className="space-y-4">
                   <div className="space-y-1">
                     <p className="text-sm font-semibold">Create Bluesky account (or use existing)</p>
                     <p className="text-xs text-muted-foreground">
@@ -6655,7 +6631,7 @@ function App() {
               ) : null}
 
               {addAccountStep === 3 ? (
-                <div className="space-y-4 animate-fade-in">
+                <div className="space-y-4">
                   <div className="space-y-1">
                     <p className="text-sm font-semibold">Enter Bluesky credentials</p>
                     <p className="text-xs text-muted-foreground">Support includes custom PDS/service URLs.</p>
@@ -6723,7 +6699,7 @@ function App() {
               ) : null}
 
               {addAccountStep === 4 ? (
-                <div className="space-y-4 animate-fade-in">
+                <div className="space-y-4">
                   <div className="space-y-1">
                     <p className="text-sm font-semibold">Verify email and create mapping</p>
                     <p className="text-xs text-muted-foreground">
@@ -6869,8 +6845,8 @@ function App() {
       ) : null}
 
       {editingMapping ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-          <Card className="w-full max-w-xl animate-slide-up border-border/90 bg-card">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <Card className="w-full max-w-xl border-border/90 bg-card">
             <CardHeader>
               <CardTitle>Edit Mapping</CardTitle>
               <CardDescription>Update ownership, handles, and target credentials.</CardDescription>
