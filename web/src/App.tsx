@@ -44,12 +44,7 @@ type ThemeMode = 'system' | 'light' | 'dark';
 type AuthView = 'login' | 'register';
 type DashboardTab = 'overview' | 'accounts' | 'posts' | 'activity' | 'settings';
 type SettingsSection = 'account' | 'users' | 'twitter' | 'ai' | 'data';
-type BulkAccountsAction =
-  | 'sync_profiles'
-  | 'pull_twitter_bio'
-  | 'bridge_all'
-  | 'apply_bot_label'
-  | 'append_bot_name';
+type BulkAccountsAction = 'sync_profiles' | 'pull_twitter_bio' | 'bridge_all' | 'apply_bot_label' | 'append_bot_name';
 
 type AppState = 'idle' | 'checking' | 'backfilling' | 'pacing' | 'processing';
 
@@ -1791,7 +1786,10 @@ function App() {
     () => filteredGroupedMappings.reduce((total, group) => total + group.mappings.length, 0),
     [filteredGroupedMappings],
   );
-  const paginatedMappings = useMemo(() => filteredGroupedMappings.flatMap((group) => group.mappings), [filteredGroupedMappings]);
+  const paginatedMappings = useMemo(
+    () => filteredGroupedMappings.flatMap((group) => group.mappings),
+    [filteredGroupedMappings],
+  );
   const accountsPageCount = useMemo(
     () => Math.max(1, Math.ceil(paginatedMappings.length / Math.max(1, accountsPageSize))),
     [accountsPageSize, paginatedMappings.length],
@@ -1820,7 +1818,8 @@ function App() {
         .filter((group) => group.mappings.length > 0),
     [filteredGroupedMappings, pagedMappingIdSet],
   );
-  const currentAccountsPageStart = accountMatchesCount === 0 ? 0 : (accountsPage - 1) * Math.max(1, accountsPageSize) + 1;
+  const currentAccountsPageStart =
+    accountMatchesCount === 0 ? 0 : (accountsPage - 1) * Math.max(1, accountsPageSize) + 1;
   const currentAccountsPageEnd =
     accountMatchesCount === 0 ? 0 : Math.min(accountMatchesCount, accountsPage * Math.max(1, accountsPageSize));
   useEffect(() => {
@@ -2314,6 +2313,25 @@ function App() {
     }
   };
 
+  const requestPinSync = async (mappingId: string) => {
+    if (!authHeaders) {
+      return;
+    }
+    const mapping = mappings.find((entry) => entry.id === mappingId);
+    if (!mapping || !canQueueBackfillsPermission || !canManageMapping(mapping)) {
+      showNotice('error', 'You do not have permission to sync pins for this account.');
+      return;
+    }
+
+    try {
+      await axios.post(`/api/pin-sync/${mappingId}`, {}, { headers: authHeaders });
+      showNotice('success', 'Pin sync queued. The pinned tweet will be mirrored and pinned on Bluesky.');
+      await fetchStatus();
+    } catch (error) {
+      handleAuthFailure(error, 'Failed to queue pin sync.');
+    }
+  };
+
   const handleDeleteAllPosts = async (mappingId: string) => {
     if (!authHeaders) {
       return;
@@ -2591,7 +2609,8 @@ function App() {
       return;
     }
 
-    const candidates = targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
+    const candidates =
+      targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
     if (candidates.length === 0) {
       showNotice('info', 'No accounts available for profile sync.');
       return;
@@ -2645,7 +2664,8 @@ function App() {
       return;
     }
 
-    const candidates = targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
+    const candidates =
+      targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
     if (candidates.length === 0) {
       showNotice('info', 'No accounts available for Twitter bio pull.');
       return;
@@ -2701,7 +2721,8 @@ function App() {
       return;
     }
 
-    const candidates = targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
+    const candidates =
+      targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
     if (candidates.length === 0) {
       showNotice('info', 'No accounts available for bot label update.');
       return;
@@ -2746,7 +2767,8 @@ function App() {
       return;
     }
 
-    const candidates = targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
+    const candidates =
+      targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
     if (candidates.length === 0) {
       showNotice('info', 'No accounts available for display-name suffix update.');
       return;
@@ -2988,7 +3010,8 @@ function App() {
       return;
     }
 
-    const manageable = targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
+    const manageable =
+      targetsOverride && targetsOverride.length > 0 ? targetsOverride : manageableAccountMappingsForView;
     if (manageable.length === 0) {
       showNotice('info', 'No accounts available for fediverse bridge.');
       return;
@@ -3505,14 +3528,18 @@ function App() {
         showNotice(
           'info',
           `Account mapping added. Profile mirrored with ${warnings.length} warning(s).${
-            botLabelApplied ? '' : ' Bot label was not applied automatically; use the bulk bot-label button in Accounts.'
+            botLabelApplied
+              ? ''
+              : ' Bot label was not applied automatically; use the bulk bot-label button in Accounts.'
           }`,
         );
       } else {
         showNotice(
           botLabelApplied ? 'success' : 'info',
           `Account mapping added and Bluesky profile mirrored from Twitter.${
-            botLabelApplied ? '' : ' Bot label was not applied automatically; use the bulk bot-label button in Accounts.'
+            botLabelApplied
+              ? ''
+              : ' Bot label was not applied automatically; use the bulk bot-label button in Accounts.'
           }`,
         );
       }
@@ -4358,7 +4385,10 @@ function App() {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={isAnyBulkAccountsActionBusy || (accountsBulkScope === 'selected' && selectedManageableMappingsCount === 0)}
+                    disabled={
+                      isAnyBulkAccountsActionBusy ||
+                      (accountsBulkScope === 'selected' && selectedManageableMappingsCount === 0)
+                    }
                     onClick={() => {
                       void handleApplyAllAccountsAction();
                     }}
@@ -4378,11 +4408,11 @@ function App() {
                       ? 'Apply sync all'
                       : accountsBulkAction === 'pull_twitter_bio'
                         ? 'Apply pull bio'
-                      : accountsBulkAction === 'bridge_all'
-                        ? 'Apply bridge all'
-                        : accountsBulkAction === 'apply_bot_label'
-                          ? 'Apply bot label all'
-                          : 'Apply append {bot} all'}
+                        : accountsBulkAction === 'bridge_all'
+                          ? 'Apply bridge all'
+                          : accountsBulkAction === 'apply_bot_label'
+                            ? 'Apply bot label all'
+                            : 'Apply append {bot} all'}
                   </Button>
                   {isBridgeAllBusy && bridgeAllProgress ? (
                     <Badge variant="outline" className="max-w-[280px] truncate">
@@ -4490,11 +4520,7 @@ function App() {
                   >
                     Clear selected
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setShowAccountAvatars((previous) => !previous)}
-                  >
+                  <Button size="sm" variant="outline" onClick={() => setShowAccountAvatars((previous) => !previous)}>
                     {showAccountAvatars ? 'Hide avatars (faster)' : 'Show avatars'}
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => setShowAccountBios((previous) => !previous)}>
@@ -4662,289 +4688,359 @@ function App() {
                               <>
                                 <div className="overflow-x-auto">
                                   <table className="min-w-full text-left text-sm">
-                                  <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                                    <tr>
-                                      <th className="px-2 py-3">Owner</th>
-                                      {isAdmin ? <th className="px-2 py-3">Created By</th> : null}
-                                      <th className="px-2 py-3">Twitter Sources</th>
-                                      <th className="px-2 py-3">Bluesky Target</th>
-                                      <th className="px-2 py-3">Status</th>
-                                      <th className="px-2 py-3 text-right">Actions</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {renderedMappings.map((mapping) => {
-                                      const queued = isBackfillQueued(mapping.id);
-                                      const active = isBackfillActive(mapping.id);
-                                      const queuePosition = getBackfillEntry(mapping.id)?.position;
-                                      const profile = getProfileForActor(mapping.bskyIdentifier);
-                                      const profileHandle = profile?.handle || mapping.bskyIdentifier;
-                                      const profileName = profile?.displayName || profileHandle;
-                                      const profileBio = showAccountBios ? profile?.description?.trim() || '' : '';
-                                      const profileUrl = `https://bsky.app/profile/${profileHandle}`;
-                                      const canManageThisMapping = canManageMapping(mapping);
-                                      const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
-                                      const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
-                                      const isFediverseBridged = bridgeStatus?.bridged === true;
-                                      const bridging = bridgingMappingId === mapping.id;
-                                      const mappingGroup = getMappingGroupMeta(mapping);
-                                      const syncingProfile = syncingProfileMappingId === mapping.id;
-                                      const pullingBio = pullingBioMappingId === mapping.id;
-                                      const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
+                                    <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                                      <tr>
+                                        <th className="px-2 py-3">Owner</th>
+                                        {isAdmin ? <th className="px-2 py-3">Created By</th> : null}
+                                        <th className="px-2 py-3">Twitter Sources</th>
+                                        <th className="px-2 py-3">Bluesky Target</th>
+                                        <th className="px-2 py-3">Status</th>
+                                        <th className="px-2 py-3 text-right">Actions</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {renderedMappings.map((mapping) => {
+                                        const queued = isBackfillQueued(mapping.id);
+                                        const active = isBackfillActive(mapping.id);
+                                        const queuePosition = getBackfillEntry(mapping.id)?.position;
+                                        const profile = getProfileForActor(mapping.bskyIdentifier);
+                                        const profileHandle = profile?.handle || mapping.bskyIdentifier;
+                                        const profileName = profile?.displayName || profileHandle;
+                                        const profileBio = showAccountBios ? profile?.description?.trim() || '' : '';
+                                        const profileUrl = `https://bsky.app/profile/${profileHandle}`;
+                                        const canManageThisMapping = canManageMapping(mapping);
+                                        const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
+                                        const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
+                                        const isFediverseBridged = bridgeStatus?.bridged === true;
+                                        const bridging = bridgingMappingId === mapping.id;
+                                        const mappingGroup = getMappingGroupMeta(mapping);
+                                        const syncingProfile = syncingProfileMappingId === mapping.id;
+                                        const pullingBio = pullingBioMappingId === mapping.id;
+                                        const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
 
-                                      return (
-                                        <tr
-                                          key={mapping.id}
-                                          className="interactive-row border-b border-border/60 last:border-0"
-                                        >
-                                          <td className="px-2 py-3 align-top">
-                                            <div className="flex items-center gap-2 font-medium">
-                                              <UserRound className="h-4 w-4 text-muted-foreground" />
-                                              {mapping.owner || 'System'}
-                                            </div>
-                                          </td>
-                                          {isAdmin ? (
-                                            <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                                              {mapping.createdByLabel ||
-                                                mapping.createdByUser?.username ||
-                                                mapping.createdByUser?.email ||
-                                                '--'}
+                                        return (
+                                          <tr
+                                            key={mapping.id}
+                                            className="interactive-row border-b border-border/60 last:border-0"
+                                          >
+                                            <td className="px-2 py-3 align-top">
+                                              <div className="flex items-center gap-2 font-medium">
+                                                <UserRound className="h-4 w-4 text-muted-foreground" />
+                                                {mapping.owner || 'System'}
+                                              </div>
                                             </td>
-                                          ) : null}
-                                          <td className="px-2 py-3 align-top">
-                                            <div className="flex flex-wrap gap-2">
-                                              {mapping.twitterUsernames.map((username) => (
-                                                <Badge key={username} variant="secondary">
-                                                  @{username}
-                                                </Badge>
-                                              ))}
-                                            </div>
-                                          </td>
-                                          <td className="px-2 py-3 align-top">
-                                            <div className="flex items-center gap-2">
-                                              {showAccountAvatars && profile?.avatar ? (
-                                                <img
-                                                  className="h-8 w-8 rounded-full border border-border/70 object-cover"
-                                                  src={profile.avatar}
-                                                  alt={profileName}
-                                                  loading="lazy"
-                                                  decoding="async"
-                                                  fetchPriority="low"
-                                                />
-                                              ) : (
-                                                <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                                                  <UserRound className="h-4 w-4" />
-                                                </div>
-                                              )}
-                                              <div className="min-w-0">
-                                                <p className="truncate text-sm font-medium">{profileName}</p>
-                                                <a
-                                                  className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                                                  href={profileUrl}
-                                                  target="_blank"
-                                                  rel="noreferrer"
-                                                  title={`Open @${profileHandle} on Bluesky`}
-                                                >
-                                                  {profileHandle}
-                                                  <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
-                                                </a>
-                                                {profileBio ? (
-                                                  <p
-                                                    className="mt-1 overflow-hidden text-xs text-muted-foreground"
-                                                    style={{
-                                                      display: '-webkit-box',
-                                                      WebkitLineClamp: 2,
-                                                      WebkitBoxOrient: 'vertical',
-                                                    }}
-                                                    title={profileBio}
+                                            {isAdmin ? (
+                                              <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                                                {mapping.createdByLabel ||
+                                                  mapping.createdByUser?.username ||
+                                                  mapping.createdByUser?.email ||
+                                                  '--'}
+                                              </td>
+                                            ) : null}
+                                            <td className="px-2 py-3 align-top">
+                                              <div className="flex flex-wrap gap-2">
+                                                {mapping.twitterUsernames.map((username) => (
+                                                  <Badge key={username} variant="secondary">
+                                                    @{username}
+                                                  </Badge>
+                                                ))}
+                                              </div>
+                                            </td>
+                                            <td className="px-2 py-3 align-top">
+                                              <div className="flex items-center gap-2">
+                                                {showAccountAvatars && profile?.avatar ? (
+                                                  <img
+                                                    className="h-8 w-8 rounded-full border border-border/70 object-cover"
+                                                    src={profile.avatar}
+                                                    alt={profileName}
+                                                    loading="lazy"
+                                                    decoding="async"
+                                                    fetchPriority="low"
+                                                  />
+                                                ) : (
+                                                  <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                                                    <UserRound className="h-4 w-4" />
+                                                  </div>
+                                                )}
+                                                <div className="min-w-0">
+                                                  <p className="truncate text-sm font-medium">{profileName}</p>
+                                                  <a
+                                                    className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                                                    href={profileUrl}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    title={`Open @${profileHandle} on Bluesky`}
                                                   >
-                                                    {profileBio}
-                                                  </p>
+                                                    {profileHandle}
+                                                    <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
+                                                  </a>
+                                                  {profileBio ? (
+                                                    <p
+                                                      className="mt-1 overflow-hidden text-xs text-muted-foreground"
+                                                      style={{
+                                                        display: '-webkit-box',
+                                                        WebkitLineClamp: 2,
+                                                        WebkitBoxOrient: 'vertical',
+                                                      }}
+                                                      title={profileBio}
+                                                    >
+                                                      {profileBio}
+                                                    </p>
+                                                  ) : null}
+                                                </div>
+                                              </div>
+                                            </td>
+                                            <td className="px-2 py-3 align-top">
+                                              <div className="flex flex-wrap items-center gap-1.5">
+                                                {active ? (
+                                                  <Badge variant="warning">Backfilling</Badge>
+                                                ) : queued ? (
+                                                  <Badge variant="warning">
+                                                    Queued {queuePosition ? `#${queuePosition}` : ''}
+                                                  </Badge>
+                                                ) : (
+                                                  <Badge variant="success">Active</Badge>
+                                                )}
+                                                {isFediverseBridged ? (
+                                                  <Badge variant="success">
+                                                    <Link2 className="mr-1 h-3 w-3" />
+                                                    Bridged
+                                                  </Badge>
+                                                ) : null}
+                                                {mapping.hasBotLabel ? (
+                                                  <Badge variant="outline">
+                                                    <Bot className="mr-1 h-3 w-3" />
+                                                    Bot
+                                                  </Badge>
                                                 ) : null}
                                               </div>
-                                            </div>
-                                          </td>
-                                          <td className="px-2 py-3 align-top">
-                                            <div className="flex flex-wrap items-center gap-1.5">
-                                              {active ? (
-                                                <Badge variant="warning">Backfilling</Badge>
-                                              ) : queued ? (
-                                                <Badge variant="warning">
-                                                  Queued {queuePosition ? `#${queuePosition}` : ''}
-                                                </Badge>
-                                              ) : (
-                                                <Badge variant="success">Active</Badge>
-                                              )}
-                                              {isFediverseBridged ? (
-                                                <Badge variant="success">
-                                                  <Link2 className="mr-1 h-3 w-3" />
-                                                  Bridged
-                                                </Badge>
-                                              ) : null}
-                                              {mapping.hasBotLabel ? (
-                                                <Badge variant="outline">
-                                                  <Bot className="mr-1 h-3 w-3" />
-                                                  Bot
-                                                </Badge>
-                                              ) : null}
-                                            </div>
-                                          </td>
-                                          <td className="px-2 py-3 align-top">
-                                            <div className="flex flex-wrap justify-end gap-1">
-                                              {canManageThisMapping ? (
-                                                <label className="inline-flex items-center gap-1 rounded border border-border/70 px-2 py-1 text-xs text-muted-foreground">
-                                                  <input
-                                                    type="checkbox"
-                                                    className="h-3.5 w-3.5 rounded border-border"
-                                                    checked={isSelectedForBulk}
-                                                    disabled={isAnyBulkAccountsActionBusy}
-                                                    onChange={(event) =>
-                                                      toggleAccountMappingSelection(mapping.id, event.target.checked)
-                                                    }
-                                                  />
-                                                  Select
-                                                </label>
-                                              ) : null}
-                                              <select
-                                                className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
-                                                value={mappingGroup.key}
-                                                disabled={
-                                                  !canManageThisMapping ||
-                                                  !canManageGroupsPermission ||
-                                                  isBridgeAllBusy ||
-                                                  isAnyBulkAccountsActionBusy ||
-                                                  isSyncAllProfilesBusy ||
-                                                  Boolean(syncingProfileMappingId)
-                                                }
-                                                onChange={(event) => {
-                                                  void handleAssignMappingGroup(mapping, event.target.value);
-                                                }}
-                                              >
-                                                <option value={DEFAULT_GROUP_KEY}>
-                                                  {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
-                                                </option>
-                                                {groupOptions
-                                                  .filter((option) => option.key !== DEFAULT_GROUP_KEY)
-                                                  .map((option) => (
-                                                    <option
-                                                      key={`group-move-${mapping.id}-${option.key}`}
-                                                      value={option.key}
-                                                    >
-                                                      {option.emoji} {option.name}
-                                                    </option>
-                                                  ))}
-                                              </select>
-                                              {canManageThisMapping ? (
-                                                <>
-                                                  {mapping.twitterUsernames.length > 1 ? (
-                                                    <select
-                                                      className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
-                                                      value={mapping.profileSyncSourceUsername || ''}
-                                                      disabled={
-                                                        isBridgeAllBusy ||
-                                                        isAnyBulkAccountsActionBusy ||
-                                                        isSyncAllProfilesBusy ||
-                                                        Boolean(syncingProfileMappingId) ||
-                                                        Boolean(bridgingMappingId)
+                                            </td>
+                                            <td className="px-2 py-3 align-top">
+                                              <div className="flex flex-wrap justify-end gap-1">
+                                                {canManageThisMapping ? (
+                                                  <label className="inline-flex items-center gap-1 rounded border border-border/70 px-2 py-1 text-xs text-muted-foreground">
+                                                    <input
+                                                      type="checkbox"
+                                                      className="h-3.5 w-3.5 rounded border-border"
+                                                      checked={isSelectedForBulk}
+                                                      disabled={isAnyBulkAccountsActionBusy}
+                                                      onChange={(event) =>
+                                                        toggleAccountMappingSelection(mapping.id, event.target.checked)
                                                       }
-                                                      onChange={(event) => {
-                                                        void handleUpdateProfileSyncSource(mapping, event.target.value);
-                                                      }}
-                                                    >
-                                                      <option value="">Select sync source</option>
-                                                      {mapping.twitterUsernames.map((username) => (
-                                                        <option
-                                                          key={`sync-source-${mapping.id}-${username}`}
-                                                          value={username}
-                                                        >
-                                                          @{username}
-                                                        </option>
-                                                      ))}
-                                                    </select>
-                                                  ) : null}
-                                                  <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    disabled={
-                                                      isBridgeAllBusy ||
-                                                      isAnyBulkAccountsActionBusy ||
-                                                      Boolean(syncingProfileMappingId)
-                                                    }
-                                                    onClick={() => startEditMapping(mapping)}
-                                                  >
-                                                    Edit
-                                                  </Button>
-                                                  <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    disabled={
-                                                      isBridgeAllBusy ||
-                                                      isAnyBulkAccountsActionBusy ||
-                                                      Boolean(syncingProfileMappingId) ||
-                                                      Boolean(pullingBioMappingId) ||
-                                                      isSyncAllProfilesBusy ||
-                                                      Boolean(bridgingMappingId)
-                                                    }
-                                                    onClick={() => {
-                                                      void handleSyncProfileFromTwitter(mapping);
-                                                    }}
-                                                  >
-                                                    {syncingProfile ? (
-                                                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                    ) : (
-                                                      <RefreshCw className="mr-1 h-4 w-4" />
-                                                    )}
-                                                    Sync Profile
-                                                  </Button>
-                                                  <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    disabled={
-                                                      isBridgeAllBusy ||
-                                                      isAnyBulkAccountsActionBusy ||
-                                                      Boolean(syncingProfileMappingId) ||
-                                                      Boolean(pullingBioMappingId) ||
-                                                      isSyncAllProfilesBusy ||
-                                                      Boolean(bridgingMappingId)
-                                                    }
-                                                    onClick={() => {
-                                                      void handlePullTwitterBio(mapping);
-                                                    }}
-                                                  >
-                                                    {pullingBio ? (
-                                                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                    ) : (
-                                                      <Download className="mr-1 h-4 w-4" />
-                                                    )}
-                                                    Pull Twitter Bio
-                                                  </Button>
-                                                  {canUseFediverseBridge && !isFediverseBridged ? (
+                                                    />
+                                                    Select
+                                                  </label>
+                                                ) : null}
+                                                <select
+                                                  className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
+                                                  value={mappingGroup.key}
+                                                  disabled={
+                                                    !canManageThisMapping ||
+                                                    !canManageGroupsPermission ||
+                                                    isBridgeAllBusy ||
+                                                    isAnyBulkAccountsActionBusy ||
+                                                    isSyncAllProfilesBusy ||
+                                                    Boolean(syncingProfileMappingId)
+                                                  }
+                                                  onChange={(event) => {
+                                                    void handleAssignMappingGroup(mapping, event.target.value);
+                                                  }}
+                                                >
+                                                  <option value={DEFAULT_GROUP_KEY}>
+                                                    {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
+                                                  </option>
+                                                  {groupOptions
+                                                    .filter((option) => option.key !== DEFAULT_GROUP_KEY)
+                                                    .map((option) => (
+                                                      <option
+                                                        key={`group-move-${mapping.id}-${option.key}`}
+                                                        value={option.key}
+                                                      >
+                                                        {option.emoji} {option.name}
+                                                      </option>
+                                                    ))}
+                                                </select>
+                                                {canManageThisMapping ? (
+                                                  <>
+                                                    {mapping.twitterUsernames.length > 1 ? (
+                                                      <select
+                                                        className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
+                                                        value={mapping.profileSyncSourceUsername || ''}
+                                                        disabled={
+                                                          isBridgeAllBusy ||
+                                                          isAnyBulkAccountsActionBusy ||
+                                                          isSyncAllProfilesBusy ||
+                                                          Boolean(syncingProfileMappingId) ||
+                                                          Boolean(bridgingMappingId)
+                                                        }
+                                                        onChange={(event) => {
+                                                          void handleUpdateProfileSyncSource(
+                                                            mapping,
+                                                            event.target.value,
+                                                          );
+                                                        }}
+                                                      >
+                                                        <option value="">Select sync source</option>
+                                                        {mapping.twitterUsernames.map((username) => (
+                                                          <option
+                                                            key={`sync-source-${mapping.id}-${username}`}
+                                                            value={username}
+                                                          >
+                                                            @{username}
+                                                          </option>
+                                                        ))}
+                                                      </select>
+                                                    ) : null}
                                                     <Button
                                                       variant="outline"
                                                       size="sm"
                                                       disabled={
                                                         isBridgeAllBusy ||
                                                         isAnyBulkAccountsActionBusy ||
-                                                        Boolean(bridgingMappingId) ||
+                                                        Boolean(syncingProfileMappingId)
+                                                      }
+                                                      onClick={() => startEditMapping(mapping)}
+                                                    >
+                                                      Edit
+                                                    </Button>
+                                                    <Button
+                                                      variant="outline"
+                                                      size="sm"
+                                                      disabled={
+                                                        isBridgeAllBusy ||
+                                                        isAnyBulkAccountsActionBusy ||
                                                         Boolean(syncingProfileMappingId) ||
-                                                        isSyncAllProfilesBusy
+                                                        Boolean(pullingBioMappingId) ||
+                                                        isSyncAllProfilesBusy ||
+                                                        Boolean(bridgingMappingId)
                                                       }
                                                       onClick={() => {
-                                                        void handleBridgeToFediverse(mapping);
+                                                        void handleSyncProfileFromTwitter(mapping);
                                                       }}
                                                     >
-                                                      {bridging ? (
+                                                      {syncingProfile ? (
                                                         <Loader2 className="mr-1 h-4 w-4 animate-spin" />
                                                       ) : (
-                                                        <Repeat2 className="mr-1 h-4 w-4" />
+                                                        <RefreshCw className="mr-1 h-4 w-4" />
                                                       )}
-                                                      Bridge to Fediverse
+                                                      Sync Profile
                                                     </Button>
-                                                  ) : null}
-                                                  {canQueueBackfillsPermission ? (
-                                                    <>
+                                                    <Button
+                                                      variant="outline"
+                                                      size="sm"
+                                                      disabled={
+                                                        isBridgeAllBusy ||
+                                                        isAnyBulkAccountsActionBusy ||
+                                                        Boolean(syncingProfileMappingId) ||
+                                                        Boolean(pullingBioMappingId) ||
+                                                        isSyncAllProfilesBusy ||
+                                                        Boolean(bridgingMappingId)
+                                                      }
+                                                      onClick={() => {
+                                                        void handlePullTwitterBio(mapping);
+                                                      }}
+                                                    >
+                                                      {pullingBio ? (
+                                                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                                                      ) : (
+                                                        <Download className="mr-1 h-4 w-4" />
+                                                      )}
+                                                      Pull Twitter Bio
+                                                    </Button>
+                                                    {canUseFediverseBridge && !isFediverseBridged ? (
                                                       <Button
                                                         variant="outline"
+                                                        size="sm"
+                                                        disabled={
+                                                          isBridgeAllBusy ||
+                                                          isAnyBulkAccountsActionBusy ||
+                                                          Boolean(bridgingMappingId) ||
+                                                          Boolean(syncingProfileMappingId) ||
+                                                          isSyncAllProfilesBusy
+                                                        }
+                                                        onClick={() => {
+                                                          void handleBridgeToFediverse(mapping);
+                                                        }}
+                                                      >
+                                                        {bridging ? (
+                                                          <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                                                        ) : (
+                                                          <Repeat2 className="mr-1 h-4 w-4" />
+                                                        )}
+                                                        Bridge to Fediverse
+                                                      </Button>
+                                                    ) : null}
+                                                    {canQueueBackfillsPermission ? (
+                                                      <>
+                                                        <Button
+                                                          variant="outline"
+                                                          size="sm"
+                                                          disabled={
+                                                            isBridgeAllBusy ||
+                                                            isAnyBulkAccountsActionBusy ||
+                                                            Boolean(syncingProfileMappingId) ||
+                                                            isSyncAllProfilesBusy
+                                                          }
+                                                          onClick={() => {
+                                                            void requestBackfill(mapping.id, 'normal');
+                                                          }}
+                                                        >
+                                                          Add to queue
+                                                        </Button>
+                                                        <Button
+                                                          variant="outline"
+                                                          size="sm"
+                                                          disabled={
+                                                            isBridgeAllBusy ||
+                                                            isAnyBulkAccountsActionBusy ||
+                                                            Boolean(syncingProfileMappingId) ||
+                                                            isSyncAllProfilesBusy
+                                                          }
+                                                          onClick={() => {
+                                                            void requestPinSync(mapping.id);
+                                                          }}
+                                                        >
+                                                          Sync Pin
+                                                        </Button>
+                                                        {queued && !active ? (
+                                                          <Button
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            disabled={
+                                                              isBridgeAllBusy ||
+                                                              isAnyBulkAccountsActionBusy ||
+                                                              Boolean(syncingProfileMappingId) ||
+                                                              isSyncAllProfilesBusy
+                                                            }
+                                                            onClick={() => {
+                                                              void cancelQueuedBackfill(mapping.id);
+                                                            }}
+                                                          >
+                                                            Cancel queue
+                                                          </Button>
+                                                        ) : null}
+                                                        {isAdmin ? (
+                                                          <Button
+                                                            variant="subtle"
+                                                            size="sm"
+                                                            disabled={
+                                                              isBridgeAllBusy ||
+                                                              isAnyBulkAccountsActionBusy ||
+                                                              Boolean(syncingProfileMappingId) ||
+                                                              isSyncAllProfilesBusy
+                                                            }
+                                                            onClick={() => {
+                                                              void requestBackfill(mapping.id, 'reset');
+                                                            }}
+                                                          >
+                                                            Reset + Backfill
+                                                          </Button>
+                                                        ) : null}
+                                                      </>
+                                                    ) : null}
+                                                    {isAdmin ? (
+                                                      <Button
+                                                        variant="destructive"
                                                         size="sm"
                                                         disabled={
                                                           isBridgeAllBusy ||
@@ -4953,99 +5049,43 @@ function App() {
                                                           isSyncAllProfilesBusy
                                                         }
                                                         onClick={() => {
-                                                          void requestBackfill(mapping.id, 'normal');
+                                                          void handleDeleteAllPosts(mapping.id);
                                                         }}
                                                       >
-                                                        Add to queue
+                                                        Delete Posts
                                                       </Button>
-                                                      {queued && !active ? (
-                                                        <Button
-                                                          variant="ghost"
-                                                          size="sm"
-                                                          disabled={
-                                                            isBridgeAllBusy ||
-                                                            isAnyBulkAccountsActionBusy ||
-                                                            Boolean(syncingProfileMappingId) ||
-                                                            isSyncAllProfilesBusy
-                                                          }
-                                                          onClick={() => {
-                                                            void cancelQueuedBackfill(mapping.id);
-                                                          }}
-                                                        >
-                                                          Cancel queue
-                                                        </Button>
-                                                      ) : null}
-                                                      {isAdmin ? (
-                                                        <Button
-                                                          variant="subtle"
-                                                          size="sm"
-                                                          disabled={
-                                                            isBridgeAllBusy ||
-                                                            isAnyBulkAccountsActionBusy ||
-                                                            Boolean(syncingProfileMappingId) ||
-                                                            isSyncAllProfilesBusy
-                                                          }
-                                                          onClick={() => {
-                                                            void requestBackfill(mapping.id, 'reset');
-                                                          }}
-                                                        >
-                                                          Reset + Backfill
-                                                        </Button>
-                                                      ) : null}
-                                                    </>
-                                                  ) : null}
-                                                  {isAdmin ? (
-                                                    <Button
-                                                      variant="destructive"
-                                                      size="sm"
-                                                      disabled={
-                                                        isBridgeAllBusy ||
-                                                        isAnyBulkAccountsActionBusy ||
-                                                        Boolean(syncingProfileMappingId) ||
-                                                        isSyncAllProfilesBusy
-                                                      }
-                                                      onClick={() => {
-                                                        void handleDeleteAllPosts(mapping.id);
-                                                      }}
-                                                    >
-                                                      Delete Posts
-                                                    </Button>
-                                                  ) : null}
-                                                </>
-                                              ) : null}
-                                              {canManageThisMapping ? (
-                                                <Button
-                                                  variant="ghost"
-                                                  size="sm"
-                                                  disabled={
-                                                    isBridgeAllBusy ||
-                                                    isAnyBulkAccountsActionBusy ||
-                                                    Boolean(syncingProfileMappingId) ||
-                                                    isSyncAllProfilesBusy
-                                                  }
-                                                  onClick={() => {
-                                                    void handleDeleteMapping(mapping.id);
-                                                  }}
-                                                >
-                                                  <Trash2 className="mr-1 h-4 w-4" />
-                                                  Remove
-                                                </Button>
-                                              ) : null}
-                                            </div>
-                                          </td>
-                                        </tr>
-                                      );
-                                    })}
-                                  </tbody>
+                                                    ) : null}
+                                                  </>
+                                                ) : null}
+                                                {canManageThisMapping ? (
+                                                  <Button
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    disabled={
+                                                      isBridgeAllBusy ||
+                                                      isAnyBulkAccountsActionBusy ||
+                                                      Boolean(syncingProfileMappingId) ||
+                                                      isSyncAllProfilesBusy
+                                                    }
+                                                    onClick={() => {
+                                                      void handleDeleteMapping(mapping.id);
+                                                    }}
+                                                  >
+                                                    <Trash2 className="mr-1 h-4 w-4" />
+                                                    Remove
+                                                  </Button>
+                                                ) : null}
+                                              </div>
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
                                   </table>
                                 </div>
                                 {remainingMappingsCount > 0 ? (
                                   <div className="border-t border-border/60 px-3 py-2">
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => showMoreRowsForGroup(group.key)}
-                                    >
+                                    <Button size="sm" variant="outline" onClick={() => showMoreRowsForGroup(group.key)}>
                                       Show {Math.min(ACCOUNT_ROWS_BATCH_SIZE, remainingMappingsCount)} more (
                                       {remainingMappingsCount} remaining)
                                     </Button>
@@ -6638,8 +6678,8 @@ function App() {
                   <div className="space-y-1">
                     <p className="text-sm font-semibold">Verify email and create mapping</p>
                     <p className="text-xs text-muted-foreground">
-                      Verify email in Bluesky, then create mapping to auto-sync name, bio, avatar, and banner, and
-                      apply the Bluesky bot self-label.
+                      Verify email in Bluesky, then create mapping to auto-sync name, bio, avatar, and banner, and apply
+                      the Bluesky bot self-label.
                     </p>
                   </div>
                   <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">

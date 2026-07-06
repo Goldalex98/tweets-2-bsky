@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type BskyAgent, RichText } from '@atproto/api';
@@ -17,6 +18,14 @@ import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 
 import { getConfig, saveConfig } from './config-manager.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
+import {
+  buildPollNote,
+  detectCardMedia,
+  detectCarouselLinks,
+  ensureSponsoredLinks,
+  recoverCardData,
+} from './tweet-cards.js';
+import type { MediaEntity, TweetCard, TweetEntities } from './tweet-cards.js';
 
 // ESM __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -40,79 +49,6 @@ interface ProcessedTweetsMap {
   [twitterId: string]: ProcessedTweetEntry;
 }
 
-interface UrlEntity {
-  url?: string;
-  expanded_url?: string;
-}
-
-interface CardImageValue {
-  url?: string;
-  width?: number;
-  height?: number;
-  alt?: string;
-}
-
-interface CardBindingValue {
-  type?: string;
-  string_value?: string;
-  image_value?: CardImageValue;
-}
-
-interface CardBindingEntry {
-  key?: string;
-  value?: CardBindingValue;
-}
-
-type CardBindingValues = Record<string, CardBindingValue> | CardBindingEntry[];
-
-interface TweetCard {
-  name?: string;
-  binding_values?: CardBindingValues;
-  url?: string;
-}
-
-interface MediaSize {
-  w: number;
-  h: number;
-}
-
-interface MediaSizes {
-  large?: MediaSize;
-}
-
-interface OriginalInfo {
-  width: number;
-  height: number;
-}
-
-interface VideoVariant {
-  content_type: string;
-  url: string;
-  bitrate?: number;
-}
-
-interface VideoInfo {
-  variants?: VideoVariant[];
-  duration_millis?: number;
-}
-
-interface MediaEntity {
-  url?: string;
-  expanded_url?: string;
-  media_url_https?: string;
-  type?: 'photo' | 'video' | 'animated_gif';
-  ext_alt_text?: string;
-  sizes?: MediaSizes;
-  original_info?: OriginalInfo;
-  video_info?: VideoInfo;
-  source?: 'tweet' | 'card';
-}
-
-interface TweetEntities {
-  urls?: UrlEntity[];
-  media?: MediaEntity[];
-}
-
 interface Tweet {
   id?: string;
   id_str?: string;
@@ -129,6 +65,8 @@ interface Tweet {
   in_reply_to_user_id_str?: string;
   in_reply_to_user_id?: string;
   isRetweet?: boolean;
+  isPin?: boolean;
+  possibly_sensitive?: boolean;
   user?: {
     screen_name?: string;
     id_str?: string;
@@ -249,7 +187,7 @@ function getUniqueCreatedAtIso(bskyIdentifier: string, desiredMs: number): strin
   return new Date(nextMs).toISOString();
 }
 
-async function getTwitterScraper(sessionKey = 'default', forceReset = false): Promise<Scraper | null> {
+function getActiveTwitterCredentials(): { authToken: string; ct0: string } | null {
   const config = getConfig();
   let authToken = config.twitter.authToken;
   let ct0 = config.twitter.ct0;
@@ -261,6 +199,13 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   }
 
   if (!authToken || !ct0) return null;
+  return { authToken, ct0 };
+}
+
+async function getTwitterScraper(sessionKey = 'default', forceReset = false): Promise<Scraper | null> {
+  const credentials = getActiveTwitterCredentials();
+  if (!credentials) return null;
+  const { authToken, ct0 } = credentials;
 
   // Re-initialize if config changed, not yet initialized, or forced reset
   const existingScraper = scraperSessions.get(sessionKey);
@@ -291,6 +236,108 @@ async function switchCredentials() {
   return false;
 }
 
+// Public web bearer token (stable since 2018), used by every browser session.
+const TWITTER_WEB_BEARER =
+  'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+
+let cachedUserTweetsUrlTemplate: string | null | undefined;
+
+// X dropped pinned_tweet_ids_str from the profile endpoint, so the only place
+// the pinned tweet id still appears is the UserTweets timeline payload — which
+// the scraper parses but does not expose. Read the request URL template from
+// the installed scraper bundle (keeps queryId/features in sync with the
+// package) so we can make the same call and extract the pin ourselves.
+function getUserTweetsUrlTemplate(): string | null {
+  if (cachedUserTweetsUrlTemplate !== undefined) return cachedUserTweetsUrlTemplate;
+  cachedUserTweetsUrlTemplate = null;
+  try {
+    const require = createRequire(import.meta.url);
+    const entryPath = require.resolve('@the-convocation/twitter-scraper');
+    const candidates = [entryPath, path.join(path.dirname(entryPath), '..', 'esm', 'index.mjs')];
+    for (const candidate of candidates) {
+      try {
+        const source = fs.readFileSync(candidate, 'utf8');
+        const match = source.match(/UserTweets:\s*["'](https:\/\/[^"']+)["']/);
+        if (match?.[1]) {
+          cachedUserTweetsUrlTemplate = match[1];
+          break;
+        }
+      } catch {
+        // try next candidate
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ Could not read UserTweets endpoint from scraper bundle:', (err as Error).message);
+  }
+  return cachedUserTweetsUrlTemplate;
+}
+
+type PinnedTweetLookup = { ok: true; pinnedTweetId?: string } | { ok: false };
+
+async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<PinnedTweetLookup> {
+  // Preferred path, in case the scraper exposes it again in a future version
+  try {
+    const profile = await scraper.getProfile(username);
+    if (profile.pinnedTweetIds && profile.pinnedTweetIds.length > 0) {
+      return { ok: true, pinnedTweetId: profile.pinnedTweetIds[0] };
+    }
+  } catch (err) {
+    console.warn(`[${username}] ⚠️ Profile lookup failed during pin sync:`, (err as Error).message);
+  }
+
+  const urlTemplate = getUserTweetsUrlTemplate();
+  const credentials = getActiveTwitterCredentials();
+  if (!urlTemplate || !credentials) return { ok: false };
+
+  try {
+    const userId = await scraper.getUserIdByScreenName(username);
+    const url = urlTemplate.replace(/%22userId%22%3A%22\d+%22/, `%22userId%22%3A%22${userId}%22`);
+    const res = await axios.get(url, {
+      timeout: 15000,
+      headers: {
+        authorization: `Bearer ${TWITTER_WEB_BEARER}`,
+        cookie: `auth_token=${credentials.authToken}; ct0=${credentials.ct0}`,
+        'x-csrf-token': credentials.ct0,
+        'x-twitter-auth-type': 'OAuth2Session',
+        'x-twitter-active-user': 'yes',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      },
+    });
+
+    // biome-ignore lint/suspicious/noExplicitAny: raw GraphQL payload
+    const instructions: any[] = res.data?.data?.user?.result?.timeline?.timeline?.instructions ?? [];
+    for (const instruction of instructions) {
+      if (instruction?.type === 'TimelinePinEntry') {
+        const match = String(instruction.entry?.entryId ?? '').match(/tweet-(\d+)/);
+        if (match?.[1]) return { ok: true, pinnedTweetId: match[1] };
+      }
+    }
+
+    // Fallback: the author's user object inside any tweet still carries the field
+    // biome-ignore lint/suspicious/noExplicitAny: raw GraphQL payload
+    const findAuthorPin = (node: any): string | undefined | null => {
+      if (!node || typeof node !== 'object') return undefined;
+      if (node.rest_id === userId && node.legacy && Array.isArray(node.legacy.pinned_tweet_ids_str)) {
+        return node.legacy.pinned_tweet_ids_str[0] ?? null; // null = author found, no pin
+      }
+      for (const value of Object.values(node)) {
+        const found = findAuthorPin(value);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    };
+
+    const found = findAuthorPin(res.data);
+    if (found !== undefined) {
+      return { ok: true, pinnedTweetId: found ?? undefined };
+    }
+    return { ok: false };
+  } catch (err) {
+    console.warn(`[${username}] ⚠️ Raw pinned-tweet lookup failed:`, (err as Error).message);
+    return { ok: false };
+  }
+}
+
 function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
   const raw = scraperTweet.__raw_UNSTABLE;
   if (!raw) {
@@ -314,6 +361,8 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
       },
       created_at: scraperTweet.timeParsed?.toUTCString(),
       permanentUrl: scraperTweet.permanentUrl,
+      isPin: scraperTweet.isPin,
+      possibly_sensitive: scraperTweet.sensitiveContent,
     };
   }
 
@@ -324,6 +373,9 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
     full_text: raw.full_text,
     created_at: raw.created_at,
     isRetweet: scraperTweet.isRetweet,
+    isPin: scraperTweet.isPin,
+    // biome-ignore lint/suspicious/noExplicitAny: missing in LegacyTweetRaw type
+    possibly_sensitive: Boolean((raw as any).possibly_sensitive) || scraperTweet.sensitiveContent,
     // biome-ignore lint/suspicious/noExplicitAny: raw types match compatible structure
     entities: raw.entities as any,
     // biome-ignore lint/suspicious/noExplicitAny: raw types match compatible structure
@@ -348,211 +400,22 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
 // Helper Functions
 // ============================================================================
 
-function normalizeCardBindings(bindingValues?: CardBindingValues): Record<string, CardBindingValue> {
-  if (!bindingValues) return {};
-  if (Array.isArray(bindingValues)) {
-    return bindingValues.reduce(
-      (acc, entry) => {
-        if (entry?.key && entry.value) acc[entry.key] = entry.value;
-        return acc;
-      },
-      {} as Record<string, CardBindingValue>,
-    );
+// Mirror Twitter's sensitive-media flags as Bluesky self labels. Per-media
+// warnings map to specific labels; the tweet-level possibly_sensitive flag has
+// no category, so it maps to the mildest adult label.
+function buildSensitiveLabels(tweet: Tweet, mediaEntities: MediaEntity[]): string[] {
+  const values = new Set<string>();
+  for (const media of mediaEntities) {
+    const warning = media.ext_sensitive_media_warning;
+    if (!warning) continue;
+    if (warning.adult_content) values.add('porn');
+    if (warning.graphic_violence) values.add('graphic-media');
+    if (warning.other) values.add('graphic-media');
   }
-  return bindingValues as Record<string, CardBindingValue>;
-}
-
-function isLikelyUrl(value?: string): value is string {
-  if (!value) return false;
-  return /^https?:\/\//i.test(value);
-}
-
-function extractCardImageUrl(bindingValues: CardBindingValues, preferredKeys: string[]): string | undefined {
-  const normalized = normalizeCardBindings(bindingValues);
-  for (const key of preferredKeys) {
-    const value = normalized[key];
-    const imageUrl = value?.image_value?.url;
-    if (imageUrl) return imageUrl;
+  if (values.size === 0 && tweet.possibly_sensitive) {
+    values.add('sexual');
   }
-  const fallbackValue = Object.values(normalized).find((value) => value?.image_value?.url);
-  return fallbackValue?.image_value?.url;
-}
-
-function extractCardLink(bindingValues: CardBindingValues, preferredKeys: string[]): string | undefined {
-  const normalized = normalizeCardBindings(bindingValues);
-  for (const key of preferredKeys) {
-    const value = normalized[key];
-    const link = value?.string_value;
-    if (isLikelyUrl(link)) return link;
-  }
-  const fallbackValue = Object.values(normalized).find((value) => isLikelyUrl(value?.string_value));
-  return fallbackValue?.string_value;
-}
-
-function extractCardTitle(bindingValues: CardBindingValues, preferredKeys: string[]): string | undefined {
-  const normalized = normalizeCardBindings(bindingValues);
-  for (const key of preferredKeys) {
-    const value = normalized[key];
-    const title = value?.string_value;
-    if (title && !isLikelyUrl(title)) return title;
-  }
-  const fallbackValue = Object.values(normalized).find(
-    (value) => value?.string_value && !isLikelyUrl(value?.string_value),
-  );
-  return fallbackValue?.string_value;
-}
-
-function extractCardAlt(bindingValues: CardBindingValues): string | undefined {
-  const normalized = normalizeCardBindings(bindingValues);
-  const altValue = Object.values(normalized).find((value) => value?.image_value?.alt);
-  return altValue?.image_value?.alt;
-}
-
-function appendCallToAction(text: string, link?: string, label = 'Sponsored') {
-  if (!link) return text;
-  if (text.includes(link)) return text;
-  return `${text}\n\n${label}: ${link}`.trim();
-}
-
-function detectCardMedia(tweet: Tweet): { imageUrls: string[]; link?: string; title?: string; alt?: string } {
-  if (!tweet.card?.binding_values) return { imageUrls: [] };
-  const bindings = tweet.card.binding_values;
-
-  const imageUrls: string[] = [];
-  const preferredImageKeys = [
-    'photo_image_full_size',
-    'photo_image_full_size_original',
-    'thumbnail_image',
-    'image',
-    'thumbnail',
-    'summary_photo_image',
-    'player_image',
-  ];
-  const preferredLinkKeys = ['site', 'destination', 'landing_url', 'cta_link', 'card_url', 'url'];
-  const preferredTitleKeys = ['title', 'summary', 'card_title'];
-
-  const primaryImage = extractCardImageUrl(bindings, preferredImageKeys);
-  if (primaryImage) imageUrls.push(primaryImage);
-
-  const imageKeys = normalizeCardBindings(bindings);
-  Object.values(imageKeys).forEach((value) => {
-    const url = value?.image_value?.url;
-    if (url && !imageUrls.includes(url)) imageUrls.push(url);
-  });
-
-  const link = extractCardLink(bindings, preferredLinkKeys);
-  const title = extractCardTitle(bindings, preferredTitleKeys);
-  const alt = extractCardAlt(bindings);
-
-  return { imageUrls, link, title, alt };
-}
-
-function buildCardMediaEntities(tweet: Tweet): { media: MediaEntity[]; link?: string } {
-  const cardData = detectCardMedia(tweet);
-  if (cardData.imageUrls.length === 0) return { media: [] };
-
-  const media = cardData.imageUrls.slice(0, 4).map((url) => ({
-    media_url_https: url,
-    type: 'photo' as const,
-    ext_alt_text: cardData.alt || cardData.title || 'Sponsored image',
-    source: 'card' as const,
-  }));
-
-  return { media, link: cardData.link };
-}
-
-function ensureUrlEntity(entities: TweetEntities | undefined, link?: string) {
-  if (!link) return;
-  if (!entities) return;
-  const urls = entities.urls || [];
-  if (!urls.some((url) => url.expanded_url === link || url.url === link)) {
-    urls.push({ url: link, expanded_url: link });
-    entities.urls = urls;
-  }
-}
-
-function detectSponsoredCard(tweet: Tweet): boolean {
-  if (!tweet.card?.binding_values) return false;
-  const cardName = tweet.card.name?.toLowerCase() || '';
-  const cardMedia = detectCardMedia(tweet);
-  const hasMultipleImages = cardMedia.imageUrls.length > 1;
-  const promoKeywords = ['promo', 'unified', 'carousel', 'collection', 'amplify'];
-  const hasPromoName = promoKeywords.some((keyword) => cardName.includes(keyword));
-  return hasMultipleImages || hasPromoName;
-}
-
-function mergeMediaEntities(primary: MediaEntity[], secondary: MediaEntity[], limit = 4): MediaEntity[] {
-  const merged: MediaEntity[] = [];
-  const seen = new Set<string>();
-  const ordered = [
-    ...primary.filter((media) => media?.source !== 'card'),
-    ...primary.filter((media) => media?.source === 'card'),
-    ...secondary.filter((media) => media?.source !== 'card'),
-    ...secondary.filter((media) => media?.source === 'card'),
-  ];
-
-  for (const media of ordered) {
-    if (!media?.media_url_https) continue;
-    if (seen.has(media.media_url_https)) continue;
-    merged.push(media);
-    seen.add(media.media_url_https);
-    if (merged.length >= limit) break;
-  }
-
-  return merged;
-}
-
-function detectCarouselLinks(tweet: Tweet): string[] {
-  if (!tweet.card?.binding_values) return [];
-  const bindings = normalizeCardBindings(tweet.card.binding_values);
-  const links = Object.values(bindings)
-    .map((value) => value?.string_value)
-    .filter((value): value is string => isLikelyUrl(value));
-  return [...new Set(links)];
-}
-
-function mergeUrlEntities(entities: TweetEntities | undefined, links: string[]) {
-  if (!entities || links.length === 0) return;
-  const urls = entities.urls || [];
-  links.forEach((link) => {
-    if (!urls.some((url) => url.expanded_url === link || url.url === link)) {
-      urls.push({ url: link, expanded_url: link });
-    }
-  });
-  entities.urls = urls;
-}
-
-function injectCardMedia(tweet: Tweet) {
-  if (!tweet.card?.binding_values) return;
-  const cardMedia = buildCardMediaEntities(tweet);
-  if (cardMedia.media.length === 0) return;
-
-  const existingMedia = tweet.extended_entities?.media || tweet.entities?.media || [];
-  const mergedMedia = mergeMediaEntities(existingMedia, cardMedia.media);
-
-  if (!tweet.extended_entities) tweet.extended_entities = {};
-  tweet.extended_entities.media = mergedMedia;
-  if (!tweet.entities) tweet.entities = {};
-  if (!tweet.entities.media) tweet.entities.media = mergedMedia;
-
-  if (cardMedia.link) {
-    ensureUrlEntity(tweet.entities, cardMedia.link);
-  }
-
-  const carouselLinks = detectCarouselLinks(tweet);
-  mergeUrlEntities(tweet.entities, carouselLinks);
-}
-
-function ensureSponsoredLinks(text: string, tweet: Tweet): string {
-  if (!tweet.card?.binding_values) return text;
-  const carouselLinks = detectCarouselLinks(tweet);
-  const cardLink = detectCardMedia(tweet).link;
-  const links = [...new Set([cardLink, ...carouselLinks].filter(Boolean))] as string[];
-  if (links.length === 0) return text;
-
-  const appendedLinks = links.slice(0, 2).map((link) => `Link: ${link}`);
-  const updatedText = `${text}\n\n${appendedLinks.join('\n')}`.trim();
-  return updatedText;
+  return [...values];
 }
 
 function addTextFallbacks(text: string): string {
@@ -610,54 +473,6 @@ function buildAltTextContext(tweet: Tweet, tweetText: string, tweetMap: Map<stri
 
   if (threadContext) return `Thread above: ${threadContext}.`;
   return currentText;
-}
-
-async function fetchSyndicationMedia(tweetUrl: string): Promise<{ images: string[] }> {
-  try {
-    const normalized = tweetUrl.replace('twitter.com', 'x.com');
-    const res = await axios.get('https://publish.twitter.com/oembed', {
-      params: { url: normalized },
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 10000,
-    });
-    const html = res.data?.html as string | undefined;
-    if (!html) return { images: [] };
-
-    const match = html.match(/status\/(\d+)/);
-    const tweetId = match?.[1];
-    if (!tweetId) return { images: [] };
-
-    const syndicationUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}`;
-    const syndication = await axios.get(syndicationUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-      timeout: 10000,
-    });
-    const data = syndication.data as Record<string, unknown>;
-    const images = (data?.photos as { url?: string }[] | undefined)
-      ?.map((photo) => photo.url)
-      .filter(Boolean) as string[];
-    return { images: images || [] };
-  } catch (err) {
-    return { images: [] };
-  }
-}
-
-function injectSyndicationMedia(tweet: Tweet, syndication: { images: string[] }) {
-  if (syndication.images.length === 0) return;
-  const media = syndication.images.slice(0, 4).map((url) => ({
-    media_url_https: url,
-    type: 'photo' as const,
-    ext_alt_text: 'Image from Twitter',
-    source: 'card' as const,
-  }));
-
-  const existingMedia = tweet.extended_entities?.media || tweet.entities?.media || [];
-  const mergedMedia = mergeMediaEntities(existingMedia, media);
-
-  if (!tweet.extended_entities) tweet.extended_entities = {};
-  tweet.extended_entities.media = mergedMedia;
-  if (!tweet.entities) tweet.entities = {};
-  if (!tweet.entities.media) tweet.entities.media = mergedMedia;
 }
 
 function detectLanguage(text: string): string[] {
@@ -1509,9 +1324,19 @@ async function processTweets(
     // Fallback: Regex for t.co links (if entities failed or missed one)
     const tcoRegex = /https:\/\/t\.co\/[a-zA-Z0-9]+/g;
     const matches = text.match(tcoRegex) || [];
+    // Media t.co links (photos/videos) live in entities.media, not entities.urls.
+    // They must NOT be expanded here: the media is crossposted natively and the
+    // cleanup below only knows the t.co form, so expanding would leave a stray
+    // twitter.com/…/photo/1 link in the post text.
+    const mediaTcoLinks = new Set(
+      (tweet.extended_entities?.media || tweet.entities?.media || [])
+        .map((media) => media.url)
+        .filter(Boolean) as string[],
+    );
     for (const tco of matches) {
       // Avoid re-resolving if we already handled it via entities
       if (urls.some((u) => u.url === tco)) continue;
+      if (mediaTcoLinks.has(tco)) continue;
 
       console.log(`[${twitterUsername}] 🔍 Resolving fallback link: ${tco}`);
       const resolved = await expandUrl(tco);
@@ -1522,16 +1347,10 @@ async function processTweets(
       }
     }
 
-    const isSponsoredCard = detectSponsoredCard(tweet);
+    // Card check stage: recover card data (ads/branded media, polls) the scraper drops
+    const { isSponsoredCard } = await recoverCardData(tweet);
     if (isSponsoredCard) {
-      console.log(`[${twitterUsername}] 🧩 Sponsored/card payload detected. Extracting carousel media...`);
-      injectCardMedia(tweet);
-    } else if (tweet.permanentUrl) {
-      const syndication = await fetchSyndicationMedia(tweet.permanentUrl);
-      if (syndication.images.length > 0) {
-        console.log(`[${twitterUsername}] 🧩 Syndication carousel detected. Extracting media...`);
-        injectSyndicationMedia(tweet, syndication);
-      }
+      console.log(`[${twitterUsername}] 🧩 Sponsored/card payload detected. Card media injected.`);
     }
 
     // 2. Media Handling
@@ -1546,7 +1365,10 @@ async function processTweets(
     for (const media of mediaEntities) {
       if (media.url) {
         mediaLinksToRemove.push(media.url);
-        if (media.expanded_url) mediaLinksToRemove.push(media.expanded_url);
+        if (media.expanded_url) {
+          mediaLinksToRemove.push(media.expanded_url);
+          mediaLinksToRemove.push(media.expanded_url.replace('twitter.com', 'x.com'));
+        }
       }
       if (media.source === 'card' && media.media_url_https) {
         mediaLinksToRemove.push(media.media_url_https);
@@ -1784,6 +1606,18 @@ async function processTweets(
       }
     }
 
+    // Polls can't be mirrored on Bluesky — point readers at the original tweet.
+    // If this pushes the text over the limit, splitText threads it automatically.
+    const pollUrl = (tweet.permanentUrl || `https://x.com/${twitterUsername}/status/${tweetId}`).replace(
+      'twitter.com',
+      'x.com',
+    );
+    const pollNote = buildPollNote(tweet.card, pollUrl);
+    if (pollNote && !text.includes(pollUrl)) {
+      console.log(`[${twitterUsername}] 📊 Poll detected. Linking back to the original tweet.`);
+      text = `${text}\n\n${pollNote}`.trim();
+    }
+
     // 4. Threading and Posting
     const chunks = splitText(text);
     console.log(`[${twitterUsername}] 📝 Splitting text into ${chunks.length} chunks.`);
@@ -1840,7 +1674,11 @@ async function processTweets(
             video: videoBlob,
           };
           if (videoAspectRatio) videoEmbed.aspectRatio = videoAspectRatio;
-          postRecord.embed = videoEmbed;
+          if (quoteEmbed) {
+            postRecord.embed = { $type: 'app.bsky.embed.recordWithMedia', media: videoEmbed, record: quoteEmbed };
+          } else {
+            postRecord.embed = videoEmbed;
+          }
         } else if (images.length > 0) {
           const imagesEmbed = { $type: 'app.bsky.embed.images', images };
           if (quoteEmbed) {
@@ -1852,6 +1690,17 @@ async function processTweets(
           postRecord.embed = quoteEmbed;
         } else if (linkCard) {
           postRecord.embed = linkCard;
+        }
+
+        if (videoBlob || images.length > 0) {
+          const sensitiveLabels = buildSensitiveLabels(tweet, mediaEntities);
+          if (sensitiveLabels.length > 0) {
+            console.log(`[${twitterUsername}] 🔞 Applying self labels: ${sensitiveLabels.join(', ')}`);
+            postRecord.labels = {
+              $type: 'com.atproto.label.defs#selfLabels',
+              values: sensitiveLabels.map((val) => ({ val })),
+            };
+          }
         }
       }
 
@@ -2157,6 +2006,213 @@ const persistProfileSyncResult = (
   return profileSyncStateWriteQueue;
 };
 
+const persistPinnedTweetState = (mappingId: string, pinnedTweetId: string | undefined) => {
+  profileSyncStateWriteQueue = profileSyncStateWriteQueue
+    .then(() => {
+      const config = getConfig();
+      const mapping = config.mappings.find((entry) => entry.id === mappingId);
+      if (!mapping) {
+        return;
+      }
+      mapping.lastPinnedTweetId = pinnedTweetId;
+      saveConfig(config);
+    })
+    .catch((error) => {
+      console.error(`[Scheduler] Failed persisting pinned tweet state for mapping ${mappingId}:`, error);
+    });
+
+  return profileSyncStateWriteQueue;
+};
+
+const resolvePinSourceForMapping = (mapping: AccountMapping): string | null => {
+  return resolveProfileSyncSourceForMapping(mapping) || mapping.twitterUsernames[0] || null;
+};
+
+async function setBlueskyPinnedPost(
+  agent: BskyAgent,
+  ref: { uri: string; cid: string } | null,
+  dryRun: boolean,
+  logPrefix: string,
+): Promise<void> {
+  if (dryRun) {
+    console.log(`${logPrefix} 🧪 [DRY RUN] Would ${ref ? `pin ${ref.uri}` : 'clear pinned post'} on Bluesky.`);
+    return;
+  }
+  await agent.upsertProfile((existing) => {
+    const profile = { ...(existing ?? {}) };
+    if (ref) {
+      profile.pinnedPost = { uri: ref.uri, cid: ref.cid };
+    } else {
+      delete profile.pinnedPost;
+    }
+    return profile;
+  });
+}
+
+// Apply a pinned tweet to the Bluesky profile once the tweet is mirrored.
+// Returns true when the Bluesky pin state now matches `pinnedTweetId`.
+async function applyPinnedTweet(
+  agent: BskyAgent,
+  mapping: AccountMapping,
+  pinnedTweetId: string | undefined,
+  dryRun: boolean,
+  logPrefix: string,
+): Promise<boolean> {
+  if (!pinnedTweetId) {
+    if (!mapping.lastPinnedTweetId) {
+      return true;
+    }
+    console.log(`${logPrefix} 📌 Tweet unpinned on Twitter. Clearing Bluesky pinned post.`);
+    await setBlueskyPinnedPost(agent, null, dryRun, logPrefix);
+    if (!dryRun) {
+      mapping.lastPinnedTweetId = undefined;
+      await persistPinnedTweetState(mapping.id, undefined);
+    }
+    return true;
+  }
+
+  if (pinnedTweetId === mapping.lastPinnedTweetId) {
+    return true;
+  }
+
+  const record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
+  if (record && record.status === 'skipped') {
+    // Pinned retweets/external replies are never mirrored — remember that so we
+    // don't retry (and log) every cycle.
+    console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} was skipped (retweet/external reply). Not pinning.`);
+    if (!dryRun) {
+      mapping.lastPinnedTweetId = pinnedTweetId;
+      await persistPinnedTweetState(mapping.id, pinnedTweetId);
+    }
+    return true;
+  }
+  if (!record || record.status !== 'migrated' || !record.bsky_uri || !record.bsky_cid) {
+    console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} is not mirrored yet. Pin sync deferred.`);
+    return false;
+  }
+
+  console.log(`${logPrefix} 📌 Pinning mirrored post for tweet ${pinnedTweetId} on Bluesky.`);
+  await setBlueskyPinnedPost(agent, { uri: record.bsky_uri, cid: record.bsky_cid }, dryRun, logPrefix);
+  if (!dryRun) {
+    mapping.lastPinnedTweetId = pinnedTweetId;
+    await persistPinnedTweetState(mapping.id, pinnedTweetId);
+  }
+  return true;
+}
+
+// Zero-extra-request pin sync: the timeline fetch already marks the pinned
+// tweet (isPin), so scheduled cycles can mirror pin changes for free.
+async function maybeSyncPinnedTweetFromTimeline(
+  agent: BskyAgent,
+  mapping: AccountMapping,
+  twitterUsername: string,
+  tweets: Tweet[],
+  dryRun: boolean,
+  logPrefix: string,
+): Promise<void> {
+  const pinSource = resolvePinSourceForMapping(mapping);
+  if (!pinSource || pinSource.toLowerCase() !== twitterUsername.toLowerCase()) {
+    return;
+  }
+
+  const pinnedTweet = tweets.find((tweet) => tweet.isPin);
+  const pinnedTweetId = pinnedTweet ? pinnedTweet.id_str || pinnedTweet.id : undefined;
+
+  // isPin only fires when the pinned tweet is inside the fetched window, so its
+  // absence is NOT proof of an unpin (old pins never appear here). Never unpin
+  // from this path — the explicit pin-sync button does an authoritative check.
+  if (!pinnedTweetId) {
+    return;
+  }
+
+  try {
+    await applyPinnedTweet(agent, mapping, pinnedTweetId, dryRun, logPrefix);
+  } catch (error) {
+    console.error(`${logPrefix} ❌ Pin sync failed: ${describeError(error)}`);
+  }
+}
+
+// Explicit "backfill pins" path (web button): fetch the profile's pinned tweet,
+// mirror it first if needed, then pin the mirrored post on Bluesky.
+async function syncPinnedTweetViaProfile(
+  mapping: AccountMapping,
+  dryRun: boolean,
+  sessionKey: string,
+): Promise<string> {
+  const logPrefix = getMappingLogPrefix(mapping);
+  const pinSource = resolvePinSourceForMapping(mapping);
+  if (!pinSource) {
+    return 'No Twitter source account configured.';
+  }
+
+  const scraper = await getTwitterScraper(sessionKey);
+  if (!scraper) {
+    return 'Twitter credentials are not configured.';
+  }
+
+  const agent = await getAgent(mapping);
+  if (!agent) {
+    return 'Bluesky login failed.';
+  }
+
+  const lookup = await fetchPinnedTweetId(scraper, pinSource);
+  if (!lookup.ok) {
+    return `Could not determine @${pinSource}'s pinned tweet (Twitter API lookup failed). Nothing changed.`;
+  }
+  const pinnedTweetId = lookup.pinnedTweetId;
+
+  if (!pinnedTweetId) {
+    await applyPinnedTweet(agent, mapping, undefined, dryRun, logPrefix);
+    return `@${pinSource} has no pinned tweet. Bluesky pin cleared if one was set.`;
+  }
+
+  let record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
+  if (!record || record.status !== 'migrated') {
+    console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} not mirrored yet. Backfilling it now...`);
+    const rawPinned = await scraper.getTweet(pinnedTweetId);
+    if (rawPinned) {
+      // getTweet resolves the whole self-thread; mirror all of it so the pinned
+      // post threads on Bluesky exactly like a live thread would.
+      const seenIds = new Set<string>();
+      const threadTweets = [rawPinned, ...(rawPinned.thread ?? [])]
+        .map(mapScraperTweetToLocalTweet)
+        .filter((threadTweet) => {
+          const threadId = threadTweet.id_str || threadTweet.id;
+          if (!threadId || seenIds.has(threadId)) return false;
+          seenIds.add(threadId);
+          return true;
+        })
+        // processTweets expects timeline order (newest first) and reverses internally
+        .sort((a, b) => (BigInt(b.id_str || b.id || '0') < BigInt(a.id_str || a.id || '0') ? -1 : 1));
+      if (threadTweets.length > 1) {
+        console.log(
+          `${logPrefix} 📌 Pinned tweet is part of a thread (${threadTweets.length} tweets). Mirroring the whole thread.`,
+        );
+      }
+      await processTweets(
+        agent,
+        pinSource,
+        mapping.bskyIdentifier,
+        threadTweets,
+        dryRun,
+        undefined,
+        undefined,
+        sessionKey,
+      );
+      record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
+    }
+  }
+
+  if (!dryRun && (!record || record.status !== 'migrated')) {
+    return `Pinned tweet ${pinnedTweetId} could not be mirrored (it may be a retweet or an external reply).`;
+  }
+
+  const synced = await applyPinnedTweet(agent, mapping, pinnedTweetId, dryRun, logPrefix);
+  return synced
+    ? `Pinned tweet synced for ${mapping.bskyIdentifier}.`
+    : `Pinned tweet ${pinnedTweetId} is not mirrored yet; try a backfill first.`;
+}
+
 async function maybeSyncMappingProfileInBackground(
   mapping: AccountMapping,
   dryRun: boolean,
@@ -2418,6 +2474,8 @@ async function runAccountTask(
               scheduledAccountTimeoutMs,
               `[${twitterUsername}] Scheduled processing timed out after ${Math.round(scheduledAccountTimeoutMs / 1000)}s`,
             );
+
+            await maybeSyncPinnedTweetFromTimeline(agent, mapping, twitterUsername, tweets, dryRun, logPrefix);
           } catch (err) {
             sourceErrors += 1;
             console.error(`${logPrefix} ❌ Error checking @${twitterUsername}: ${describeError(err)}`);
@@ -2442,8 +2500,10 @@ async function runAccountTask(
 import type { AccountMapping } from './config-manager.js';
 import {
   clearBackfill,
+  clearPinSync,
   getNextCheckTime,
   getPendingBackfills,
+  getPendingPinSyncs,
   getSchedulerWakeSignal,
   startServer,
   updateAppStatus,
@@ -2617,6 +2677,25 @@ async function main(): Promise<void> {
     const nextTime = getNextCheckTime();
 
     const isScheduledRunDue = now >= nextTime;
+
+    // Pin syncs are quick one-shot jobs queued from the web UI; run them first.
+    const pendingPinSyncs = getPendingPinSyncs();
+    for (const pinSync of pendingPinSyncs) {
+      const mapping = findMappingById(config.mappings, pinSync.id);
+      clearPinSync(pinSync.id);
+      if (!mapping || !mapping.enabled) continue;
+      const logPrefix = getMappingLogPrefix(mapping);
+      try {
+        updateAppStatus({ state: 'processing', message: `Syncing pinned tweet for ${mapping.bskyIdentifier}...` });
+        const message = await syncPinnedTweetViaProfile(mapping, options.dryRun, 'subbranch-1');
+        console.log(`${logPrefix} 📌 ${message}`);
+        updateAppStatus({ state: 'idle', message });
+      } catch (err) {
+        console.error(`${logPrefix} ❌ Pin sync failed: ${describeError(err)}`);
+        updateAppStatus({ state: 'idle', message: `Pin sync failed for ${mapping.bskyIdentifier}` });
+      }
+    }
+
     const pendingBackfills = getPendingBackfills();
     const wakeSignal = getSchedulerWakeSignal();
     const wakeRequested = wakeSignal > lastWakeSignal;

@@ -854,6 +854,19 @@ let pendingBackfills: PendingBackfill[] = [];
 let backfillSequence = 0;
 let schedulerWakeSignal = 0; // Monotonic counter to wake scheduler loop immediately.
 
+export interface PendingPinSync {
+  id: string;
+  queuedAt: number;
+  requestId: string;
+}
+let pendingPinSyncs: PendingPinSync[] = [];
+
+export const getPendingPinSyncs = (): PendingPinSync[] => [...pendingPinSyncs];
+
+export const clearPinSync = (id: string): void => {
+  pendingPinSyncs = pendingPinSyncs.filter((entry) => entry.id !== id);
+};
+
 interface AppStatus {
   state: 'idle' | 'checking' | 'backfilling' | 'pacing' | 'processing';
   currentAccount?: string;
@@ -2918,6 +2931,41 @@ app.post('/api/backfill/:id', authenticateToken, (req: any, res) => {
     success: true,
     message: `Backfill queued for @${mapping.twitterUsernames.join(', ')}`,
     requestId,
+  });
+});
+
+app.post('/api/pin-sync/:id', authenticateToken, (req: any, res) => {
+  if (!canQueueBackfills(req.user)) {
+    res.status(403).json({ error: 'You do not have permission to sync pinned tweets.' });
+    return;
+  }
+
+  const { id } = req.params;
+  const config = getConfig();
+  const mapping = config.mappings.find((m) => m.id === id);
+
+  if (!mapping) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
+
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have access to this mapping.' });
+    return;
+  }
+
+  if (!Array.isArray(mapping.twitterUsernames) || mapping.twitterUsernames.length === 0) {
+    res.status(400).json({ error: 'Mapping has no Twitter source accounts configured.' });
+    return;
+  }
+
+  pendingPinSyncs = pendingPinSyncs.filter((entry) => entry.id !== id);
+  pendingPinSyncs.push({ id, queuedAt: Date.now(), requestId: randomUUID() });
+  signalSchedulerWake();
+
+  res.json({
+    success: true,
+    message: `Pin sync queued for ${mapping.bskyIdentifier}`,
   });
 });
 
