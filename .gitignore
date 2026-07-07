@@ -11,9 +11,5 @@ npm-debug.log
 data/
 web/dist/
 
-# Swift Package Manager
-macos-dashboard/.build/
-macos-dashboard/.swiftpm/
-.build/
-.swiftpm/
-Packages/
+# Mac Dashboard App
+macos-dashboard/
