@@ -45,6 +45,7 @@ import {
   DropdownMenuSeparator,
 } from './components/ui/dropdown-menu';
 import { Input } from './components/ui/input';
+import { DebouncedInput } from './components/ui/debounced-input';
 import { Label } from './components/ui/label';
 import { NavList } from './components/ui/nav-list';
 import { cn } from './lib/utils';
@@ -803,6 +804,15 @@ function formatCompactNumber(value: number): string {
 }
 
 function App() {
+  useEffect(() => {
+    console.log(
+      "%cTweets-2-Bsky %cReady to syndicate! 🚀\n%cView source & contribute: https://github.com/j4ckxyz/tweets-2-bsky",
+      "color: #0284c7; font-weight: bold; font-size: 14px;",
+      "color: #64748b; font-size: 12px; font-weight: 500;",
+      "color: #94a3b8; font-size: 10px;"
+    );
+  }, []);
+
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
   const [authView, setAuthView] = useState<AuthView>('login');
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
@@ -2935,6 +2945,384 @@ function App() {
     setSelectedAccountMappingIds([]);
   };
 
+  const renderMobileCardList = () => {
+    return (
+      <div className="space-y-4 md:hidden animate-fade-in">
+        {(pagedGroupedMappings[0]?.mappings ?? []).map((mapping) => {
+          const queued = isBackfillQueued(mapping.id);
+          const active = isBackfillActive(mapping.id);
+          const queuePosition = getBackfillEntry(mapping.id)?.position;
+          const profile = getProfileForActor(mapping.bskyIdentifier);
+          const profileHandle = profile?.handle || mapping.bskyIdentifier;
+          const profileName = profile?.displayName || profileHandle;
+          const profileUrl = `https://bsky.app/profile/${profileHandle}`;
+          const canManageThisMapping = canManageMapping(mapping);
+          const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
+          const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
+          const isFediverseBridged = bridgeStatus?.bridged === true;
+          const bridging = bridgingMappingId === mapping.id;
+          const mappingGroup = getMappingGroupMeta(mapping);
+          const syncingProfile = syncingProfileMappingId === mapping.id;
+          const pullingBio = pullingBioMappingId === mapping.id;
+          const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
+
+          return (
+            <div
+              key={`mobile-mapping-${mapping.id}`}
+              className="rounded-lg border border-border bg-card p-4 space-y-3 shadow-sm transition-colors duration-200"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  {canManageThisMapping ? (
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-border"
+                      checked={isSelectedForBulk}
+                      disabled={isAnyBulkAccountsActionBusy}
+                      onChange={(event) =>
+                        toggleAccountMappingSelection(mapping.id, event.target.checked)
+                      }
+                      aria-label={`Select ${mapping.bskyIdentifier}`}
+                    />
+                  ) : null}
+                  <div className="flex items-center gap-1 text-xs font-semibold">
+                    <UserRound className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span>{mapping.owner || 'System'}</span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {active ? (
+                    <Badge variant="warning">Backfilling</Badge>
+                  ) : queued ? (
+                    <Badge variant="warning">
+                      Queued {queuePosition ? `#${queuePosition}` : ''}
+                    </Badge>
+                  ) : (
+                    <Badge variant="success">Active</Badge>
+                  )}
+                  {isFediverseBridged ? (
+                    <Badge variant="success">
+                      <Link2 className="h-3 w-3" />
+                      Bridged
+                    </Badge>
+                  ) : null}
+                  {mapping.hasBotLabel ? (
+                    <Badge variant="outline">Bot</Badge>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="grid gap-3 border-t border-b border-border/50 py-3 sm:grid-cols-2">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                    Twitter Sources
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {mapping.twitterUsernames.map((username) => (
+                      <Badge key={username} variant="secondary">
+                        @{username}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                    Bluesky Target
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {showAccountAvatars && profile?.avatar ? (
+                      <img
+                        className="h-8 w-8 rounded-full border border-border/70 object-cover"
+                        src={profile.avatar}
+                        alt={profileName}
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                        <UserRound className="h-4 w-4" />
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium leading-none mb-0.5">{profileName}</p>
+                      <a
+                        className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                        href={profileUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={`Open @${profileHandle} on Bluesky`}
+                      >
+                        {profileHandle}
+                        <ArrowUpRight className="ml-0.5 h-3 w-3 shrink-0" />
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                <div className="text-xs text-muted-foreground">
+                  {isAdmin && mapping.createdByLabel ? (
+                    <span>Created by: {mapping.createdByLabel}</span>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  {canManageThisMapping && groupOptions.length > 0 ? (
+                    <select
+                      className={cn(selectClassName, 'h-9 w-28 px-1.5 py-1 text-xs')}
+                      value={mappingGroup.key}
+                      disabled={
+                        isBridgeAllBusy ||
+                        isAnyBulkAccountsActionBusy ||
+                        isSyncAllProfilesBusy ||
+                        Boolean(syncingProfileMappingId)
+                      }
+                      title="Move to folder"
+                      onChange={(event) => {
+                        void handleAssignMappingGroup(mapping, event.target.value);
+                      }}
+                    >
+                      <option value={DEFAULT_GROUP_KEY}>
+                        {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
+                      </option>
+                      {groupOptions
+                        .filter((option) => option.key !== DEFAULT_GROUP_KEY)
+                        .map((option) => (
+                          <option key={`group-move-mobile-${mapping.id}-${option.key}`} value={option.key}>
+                            {option.emoji} {option.name}
+                          </option>
+                        ))}
+                    </select>
+                  ) : null}
+                  {canManageThisMapping ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={
+                        isBridgeAllBusy ||
+                        isAnyBulkAccountsActionBusy ||
+                        Boolean(syncingProfileMappingId)
+                      }
+                      onClick={() => startEditMapping(mapping)}
+                    >
+                      Edit
+                    </Button>
+                  ) : null}
+                  {canManageThisMapping ? (
+                    <DropdownMenu
+                      align="end"
+                      triggerClassName="h-9 w-9 px-0"
+                      trigger={<MoreHorizontal className="h-4 w-4" />}
+                      ariaLabel={`More actions for @${profileHandle}`}
+                    >
+                      {mapping.twitterUsernames.length > 1 ? (
+                        <div className="space-y-1 px-3 py-2" data-keep-open="true">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Profile sync source
+                          </p>
+                          <select
+                            className={cn(selectClassName, 'h-8 text-xs')}
+                            value={mapping.profileSyncSourceUsername || ''}
+                            disabled={
+                              isBridgeAllBusy ||
+                              isAnyBulkAccountsActionBusy ||
+                              isSyncAllProfilesBusy ||
+                              Boolean(syncingProfileMappingId) ||
+                              Boolean(bridgingMappingId)
+                            }
+                            onChange={(event) => {
+                              void handleUpdateProfileSyncSource(mapping, event.target.value);
+                            }}
+                          >
+                            <option value="">Select sync source</option>
+                            {mapping.twitterUsernames.map((username) => (
+                              <option
+                                key={`sync-source-mobile-actions-${mapping.id}-${username}`}
+                                value={username}
+                              >
+                                @{username}
+                              </option>
+                            ))}
+                          </select>
+                          <DropdownMenuSeparator />
+                        </div>
+                      ) : null}
+                      <DropdownMenuItem
+                        icon={
+                          syncingProfile ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-4 w-4" />
+                          )
+                        }
+                        disabled={
+                          isBridgeAllBusy ||
+                          isAnyBulkAccountsActionBusy ||
+                          Boolean(syncingProfileMappingId) ||
+                          Boolean(pullingBioMappingId) ||
+                          isSyncAllProfilesBusy ||
+                          Boolean(bridgingMappingId)
+                        }
+                        onClick={() => {
+                          void handleSyncProfileFromTwitter(mapping);
+                        }}
+                      >
+                        Sync Profile
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        icon={
+                          pullingBio ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )
+                        }
+                        disabled={
+                          isBridgeAllBusy ||
+                          isAnyBulkAccountsActionBusy ||
+                          Boolean(syncingProfileMappingId) ||
+                          Boolean(pullingBioMappingId) ||
+                          isSyncAllProfilesBusy ||
+                          Boolean(bridgingMappingId)
+                        }
+                        onClick={() => {
+                          void handlePullTwitterBio(mapping);
+                        }}
+                      >
+                        Pull Twitter Bio
+                      </DropdownMenuItem>
+                      {canUseFediverseBridge && !isFediverseBridged ? (
+                        <DropdownMenuItem
+                          icon={
+                            bridging ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Repeat2 className="h-4 w-4" />
+                            )
+                          }
+                          disabled={
+                            isBridgeAllBusy ||
+                            isAnyBulkAccountsActionBusy ||
+                            Boolean(bridgingMappingId) ||
+                            Boolean(syncingProfileMappingId) ||
+                            isSyncAllProfilesBusy
+                          }
+                          onClick={() => {
+                            void handleBridgeToFediverse(mapping);
+                          }}
+                        >
+                          Bridge to Fediverse
+                        </DropdownMenuItem>
+                      ) : null}
+                      {canQueueBackfillsPermission ? (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            icon={<Plus className="h-4 w-4" />}
+                            disabled={
+                              isBridgeAllBusy ||
+                              isAnyBulkAccountsActionBusy ||
+                              Boolean(syncingProfileMappingId) ||
+                              isSyncAllProfilesBusy
+                            }
+                            onClick={() => {
+                              void requestBackfill(mapping.id, 'normal');
+                            }}
+                          >
+                            Add to queue
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            icon={<Pin className="h-4 w-4" />}
+                            disabled={
+                              isBridgeAllBusy ||
+                              isAnyBulkAccountsActionBusy ||
+                              Boolean(syncingProfileMappingId) ||
+                              isSyncAllProfilesBusy
+                            }
+                            onClick={() => {
+                              void requestPinSync(mapping.id);
+                            }}
+                          >
+                            Sync Pin
+                          </DropdownMenuItem>
+                          {queued && !active ? (
+                            <DropdownMenuItem
+                              disabled={
+                                isBridgeAllBusy ||
+                                isAnyBulkAccountsActionBusy ||
+                                Boolean(syncingProfileMappingId) ||
+                                isSyncAllProfilesBusy
+                              }
+                              onClick={() => {
+                                void cancelQueuedBackfill(mapping.id);
+                              }}
+                            >
+                              Cancel queue
+                            </DropdownMenuItem>
+                          ) : null}
+                          {isAdmin ? (
+                            <DropdownMenuItem
+                              disabled={
+                                isBridgeAllBusy ||
+                                isAnyBulkAccountsActionBusy ||
+                                Boolean(syncingProfileMappingId) ||
+                                isSyncAllProfilesBusy
+                              }
+                              onClick={() => {
+                                void requestBackfill(mapping.id, 'reset');
+                              }}
+                            >
+                              Reset + Backfill
+                            </DropdownMenuItem>
+                          ) : null}
+                        </>
+                      ) : null}
+                      {isAdmin ? (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            destructive
+                            icon={<Trash2 className="h-4 w-4" />}
+                            disabled={
+                              isBridgeAllBusy ||
+                              isAnyBulkAccountsActionBusy ||
+                              Boolean(syncingProfileMappingId) ||
+                              isSyncAllProfilesBusy
+                            }
+                            onClick={() => {
+                              void handleDeleteAllPosts(mapping.id);
+                            }}
+                          >
+                            Delete Posts
+                          </DropdownMenuItem>
+                        </>
+                      ) : null}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        destructive
+                        icon={<Trash2 className="h-4 w-4" />}
+                        disabled={
+                          isBridgeAllBusy ||
+                          isAnyBulkAccountsActionBusy ||
+                          Boolean(syncingProfileMappingId) ||
+                          isSyncAllProfilesBusy
+                        }
+                        onClick={() => {
+                          void handleDeleteMapping(mapping.id);
+                        }}
+                      >
+                        Remove mapping
+                      </DropdownMenuItem>
+                    </DropdownMenu>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   const handleUpdateProfileSyncSource = async (mapping: AccountMapping, selectedSource: string) => {
     if (!authHeaders) {
       return;
@@ -4099,7 +4487,7 @@ function App() {
   if (!token) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
-        <Card className="w-full max-w-md border-border/80 bg-card">
+        <Card className="w-full max-w-md border-border/80 bg-card animate-fade-in">
           <CardHeader className="space-y-1">
             <CardTitle className="text-2xl">Tweets-2-Bsky</CardTitle>
             <CardDescription>
@@ -4229,7 +4617,7 @@ function App() {
                   <button
                     key={tab.id}
                     className={cn(
-                      'inline-flex h-9 touch-manipulation items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm font-medium',
+                      'inline-flex h-10 touch-manipulation items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-4 text-sm font-medium sm:h-9 sm:px-3',
                       isActive
                         ? 'bg-foreground text-background'
                         : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground',
@@ -4340,7 +4728,7 @@ function App() {
             ) : null}
 
             {activeTab === 'overview' ? (
-              <section className="space-y-6">
+              <section className="space-y-6 animate-fade-in">
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                   <Card className="">
                     <CardContent className="p-4">
@@ -4434,7 +4822,7 @@ function App() {
             ) : null}
 
             {activeTab === 'accounts' ? (
-              <section className="grid gap-6 lg:grid-cols-[240px_1fr]">
+              <section className="grid gap-6 lg:grid-cols-[240px_1fr] animate-fade-in">
                 <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
                   <Card>
                     <CardContent className="space-y-0.5 p-2">
@@ -4582,10 +4970,10 @@ function App() {
                   <Card>
                     <CardContent className="space-y-3 p-3">
                       <div className="flex flex-wrap items-center gap-2">
-                        <Input
+                        <DebouncedInput
                           className="max-w-xs"
                           value={accountsSearchQuery}
-                          onChange={(event) => setAccountsSearchQuery(event.target.value)}
+                          onChange={setAccountsSearchQuery}
                           placeholder="Search @username, owner, handle..."
                         />
                         {isAdmin ? (
@@ -4724,7 +5112,7 @@ function App() {
                         </div>
                         <div className="flex items-center gap-2">
                           <select
-                            className={cn(selectClassName, 'h-8 w-20 px-2 py-1 text-xs')}
+                            className={cn(selectClassName, 'h-10 w-20 px-2 py-1 text-xs sm:h-8')}
                             value={accountsPageSize}
                             onChange={(event) =>
                               setAccountsPageSize(Number(event.target.value) || ACCOUNT_PAGE_SIZE_DEFAULT)
@@ -4737,10 +5125,12 @@ function App() {
                             <option value={200}>200</option>
                           </select>
                           <Button
+                            className="h-10 w-10 sm:h-8 sm:w-8"
                             size="icon"
                             variant="outline"
                             disabled={accountsPage <= 1}
                             onClick={() => setAccountsPage((previous) => Math.max(1, previous - 1))}
+                            aria-label="Previous page of accounts"
                           >
                             <ChevronLeft className="h-4 w-4" />
                           </Button>
@@ -4748,10 +5138,12 @@ function App() {
                             {accountsPage}/{accountsPageCount}
                           </span>
                           <Button
+                            className="h-10 w-10 sm:h-8 sm:w-8"
                             size="icon"
                             variant="outline"
                             disabled={accountsPage >= accountsPageCount}
                             onClick={() => setAccountsPage((previous) => Math.min(accountsPageCount, previous + 1))}
+                            aria-label="Next page of accounts"
                           >
                             <ChevronRight className="h-4 w-4" />
                           </Button>
@@ -4800,7 +5192,9 @@ function App() {
                       </CardContent>
                     </Card>
                   ) : (
-                    <Card className="cv-auto overflow-hidden">
+                    <>
+                      {/* Desktop Table View */}
+                      <Card className="cv-auto overflow-hidden hidden md:block">
                       <div className="overflow-x-auto">
                         <table className="min-w-full text-left text-sm">
                           <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
@@ -5211,14 +5605,18 @@ function App() {
                           </tbody>
                         </table>
                       </div>
-                    </Card>
+                      </Card>
+
+                      {/* Mobile Card List View */}
+                      {renderMobileCardList()}
+                    </>
                   )}
                 </div>
               </section>
             ) : null}
 
             {activeTab === 'posts' ? (
-              <section className="space-y-6">
+              <section className="space-y-6 animate-fade-in">
                 <Card className="">
                   <CardHeader className="pb-3">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -5232,10 +5630,10 @@ function App() {
                         <div className="space-y-1">
                           <Label htmlFor="posts-search">Search crossposted posts</Label>
                           <div className="relative">
-                            <Input
+                            <DebouncedInput
                               id="posts-search"
                               value={postsSearchQuery}
-                              onChange={(event) => setPostsSearchQuery(event.target.value)}
+                              onChange={setPostsSearchQuery}
                               placeholder="Search by text, @username, tweet id, or Bluesky handle"
                             />
                             {isSearchingLocalPosts ? (
@@ -5586,7 +5984,7 @@ function App() {
             ) : null}
 
             {activeTab === 'activity' ? (
-              <section className="space-y-6">
+              <section className="space-y-6 animate-fade-in">
                 <Card className="">
                   <CardHeader className="pb-3">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -5715,7 +6113,7 @@ function App() {
             ) : null}
 
             {activeTab === 'settings' ? (
-              <section className="grid gap-6 lg:grid-cols-[200px_1fr]">
+              <section className="grid gap-6 lg:grid-cols-[200px_1fr] animate-fade-in">
                 <Card className="h-fit lg:sticky lg:top-6">
                   <CardContent className="p-2">
                     <NavList
@@ -6386,11 +6784,11 @@ function App() {
             ) : null}
             {isAddAccountSheetOpen ? (
               <div
-                className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-stretch sm:justify-end"
+                className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-stretch sm:justify-end animate-backdrop-fade"
                 onClick={closeAddAccountSheet}
               >
                 <aside
-                  className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-2xl border border-border/80 bg-card shadow-2xl sm:h-full sm:rounded-none sm:rounded-l-2xl"
+                  className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-2xl border border-border/80 bg-card shadow-2xl sm:h-full sm:rounded-none sm:rounded-l-2xl animate-slide-up sm:animate-slide-in-right"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div className="flex items-start justify-between border-b border-border/70 px-5 py-4">
@@ -6795,8 +7193,8 @@ function App() {
             ) : null}
 
             {editingMapping ? (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-                <Card className="w-full max-w-xl border-border/90 bg-card">
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 animate-backdrop-fade">
+                <Card className="w-full max-w-xl border-border/90 bg-card animate-fade-in">
                   <CardHeader>
                     <CardTitle>Edit Mapping</CardTitle>
                     <CardDescription>Update ownership, handles, and target credentials.</CardDescription>

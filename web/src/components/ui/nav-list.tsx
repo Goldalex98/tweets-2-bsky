@@ -12,11 +12,12 @@ interface NavListProps<T extends string> {
   activeId: T;
   onSelect: (id: T) => void;
   className?: string;
+  ariaLabel?: string;
 }
 
-export function NavList<T extends string>({ items, activeId, onSelect, className }: NavListProps<T>) {
+export function NavList<T extends string>({ items, activeId, onSelect, className, ariaLabel }: NavListProps<T>) {
   return (
-    <nav className={cn('flex flex-col gap-0.5', className)}>
+    <nav className={cn('flex flex-col gap-0.5', className)} role="tablist" aria-label={ariaLabel ?? 'Navigation Tabs'}>
       {items.map((item) => {
         const Icon = item.icon;
         const isActive = item.id === activeId;
@@ -24,6 +25,8 @@ export function NavList<T extends string>({ items, activeId, onSelect, className
           <button
             key={item.id}
             type="button"
+            role="tab"
+            aria-selected={isActive}
             onClick={() => onSelect(item.id)}
             className={cn(
               'flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors',

@@ -10,3 +10,10 @@ npm-debug.log
 .DS_Store
 data/
 web/dist/
+
+# Swift Package Manager
+macos-dashboard/.build/
+macos-dashboard/.swiftpm/
+.build/
+.swiftpm/
+Packages/

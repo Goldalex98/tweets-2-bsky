@@ -4,35 +4,35 @@
 
 @layer base {
   :root {
-    --background: 0 0% 99%;
-    --foreground: 0 0% 8%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 8%;
-    --primary: 0 0% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 94%;
-    --secondary-foreground: 0 0% 16%;
-    --muted: 0 0% 96%;
-    --muted-foreground: 0 0% 40%;
-    --border: 0 0% 86%;
-    --input: 0 0% 86%;
-    --ring: 0 0% 25%;
+    --background: 0.99 0.003 248;
+    --foreground: 0.15 0.012 248;
+    --card: 1.0 0 0;
+    --card-foreground: 0.15 0.012 248;
+    --primary: 0.55 0.21 248;
+    --primary-foreground: 0.99 0.003 248;
+    --secondary: 0.95 0.006 248;
+    --secondary-foreground: 0.2 0.015 248;
+    --muted: 0.96 0.005 248;
+    --muted-foreground: 0.45 0.01 248;
+    --border: 0.91 0.008 248;
+    --input: 0.91 0.008 248;
+    --ring: 0.55 0.12 248;
   }
 
   .dark {
-    --background: 0 0% 6%;
-    --foreground: 0 0% 95%;
-    --card: 0 0% 9%;
-    --card-foreground: 0 0% 95%;
-    --primary: 0 0% 96%;
-    --primary-foreground: 0 0% 8%;
-    --secondary: 0 0% 16%;
-    --secondary-foreground: 0 0% 96%;
-    --muted: 0 0% 14%;
-    --muted-foreground: 0 0% 70%;
-    --border: 0 0% 22%;
-    --input: 0 0% 22%;
-    --ring: 0 0% 70%;
+    --background: 0.09 0.008 248;
+    --foreground: 0.95 0.006 248;
+    --card: 0.12 0.01 248;
+    --card-foreground: 0.95 0.006 248;
+    --primary: 0.58 0.2 248;
+    --primary-foreground: 0.09 0.008 248;
+    --secondary: 0.16 0.012 248;
+    --secondary-foreground: 0.95 0.006 248;
+    --muted: 0.14 0.01 248;
+    --muted-foreground: 0.65 0.012 248;
+    --border: 0.18 0.012 248;
+    --input: 0.18 0.012 248;
+    --ring: 0.58 0.15 248;
   }
 
   * {
@@ -68,12 +68,68 @@
   }
 
   .interactive-row {
-    @apply hover:bg-muted/45;
+    @apply hover:bg-muted/45 transition-colors duration-200 ease-out;
   }
 
   /* Skip layout/paint for offscreen rows in long lists (accounts, posts). */
   .cv-auto {
     content-visibility: auto;
     contain-intrinsic-size: auto 200px;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 150ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @keyframes backdropFadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes slideInFromBottom {
+    from {
+      transform: translateY(100%);
+    }
+    to {
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes slideInFromRight {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  .animate-backdrop-fade {
+    animation: backdropFadeIn 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .animate-slide-up {
+    animation: slideInFromBottom 300ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @media (min-width: 640px) {
+    .animate-slide-in-right {
+      animation: slideInFromRight 300ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
   }
 }

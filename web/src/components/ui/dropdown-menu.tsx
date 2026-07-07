@@ -9,6 +9,7 @@ interface DropdownMenuProps {
   triggerClassName?: string;
   contentClassName?: string;
   disabled?: boolean;
+  ariaLabel?: string;
 }
 
 export function DropdownMenu({
@@ -18,6 +19,7 @@ export function DropdownMenu({
   triggerClassName,
   contentClassName,
   disabled,
+  ariaLabel,
 }: DropdownMenuProps) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
@@ -74,6 +76,7 @@ export function DropdownMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
+        aria-label={ariaLabel}
         disabled={disabled}
         onClick={() => setOpen((previous) => !previous)}
         className={cn(
@@ -92,7 +95,7 @@ export function DropdownMenu({
               role="menu"
               style={{ top: position?.top ?? -9999, left: position?.left ?? -9999 }}
               className={cn(
-                'fixed z-50 min-w-[13rem] overflow-hidden rounded-lg border border-border bg-card py-1 text-sm shadow-lg shadow-black/10',
+                'fixed z-50 min-w-[13rem] overflow-hidden rounded-lg border border-border bg-card py-1 text-sm shadow-lg shadow-black/10 animate-fade-in',
                 contentClassName,
               )}
               onClick={(event) => {
