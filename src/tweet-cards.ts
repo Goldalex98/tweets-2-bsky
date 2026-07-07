@@ -327,9 +327,17 @@ export function ensureUrlEntity(entities: TweetEntities | undefined, link?: stri
   }
 }
 
+// Organic link-preview cards (plain OG summary/player cards). They carry one
+// OG image as many size-variant bindings (thumbnail_image_small ..
+// photo_image_full_size_x_large), which the multi-image heuristic in
+// detectSponsoredCard would misread as an ad carousel. These tweets must keep
+// the normal external link-embed path instead of having card media injected.
+const ORGANIC_CARD_NAMES = /^(summary|summary_large_image|player)$/i;
+
 export function detectSponsoredCard(tweet: CardTweet): boolean {
   if (!tweet.card?.binding_values) return false;
   const cardName = tweet.card.name?.toLowerCase() || '';
+  if (ORGANIC_CARD_NAMES.test(cardName)) return false;
   const cardMedia = detectCardMedia(tweet);
   const hasMultipleImages = cardMedia.imageUrls.length > 1;
   const promoKeywords = ['promo', 'unified', 'carousel', 'collection', 'amplify'];
