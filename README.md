@@ -153,6 +153,30 @@ kill "$(cat data/runtime/tweets-2-bsky.pid)"
 
 For some quote-tweet screenshot fallbacks, Chromium is used (bundled in Docker, optional dependency for source installs).
 
+## Crossposting Pipeline (Fetch Sweep + Post Queue)
+
+The daemon splits each cycle into two independent halves so posting never delays detection:
+
+1. **Fetch sweep** (Twitter side): every enabled source account's timeline is checked on the configured interval. All Twitter calls go through one global rate limiter, so the request rate to Twitter is the same no matter how many accounts post at once. New tweets are written to a durable queue (`post_queue` table in `data/database.sqlite`).
+2. **Post workers** (Bluesky side): several accounts post from the queue in parallel (one worker per mapping, so threads stay in order). A slow video upload or long thread on one account never blocks the others.
+
+The queue survives restarts: anything mid-flight when the process dies is re-armed on boot, and duplicates are impossible because the queue and the processed-history table share the same tweet-id key. Tweets that repeatedly fail to post are parked as `failed` (visible in the dashboard, with admin Retry/Clear buttons) instead of retrying forever.
+
+The dashboard's queue numbers read straight from SQLite, so what you see queued is exactly what will post.
+
+Tuning (optional `.env` values, sensible defaults built in):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SCRAPER_MIN_GAP_MS` / `SCRAPER_JITTER_MS` | `800` / `400` | Global minimum gap (+ random jitter) between Twitter API calls. The one knob that controls scraper-account risk. |
+| `FETCH_CONCURRENCY` | `4` | Parallel timeline fetches during a sweep (rate still bounded by the gap above). |
+| `POST_WORKER_CONCURRENCY` | `5` | How many Bluesky accounts post from the queue at once. |
+| `POST_PACING_MIN_MS` / `POST_PACING_MAX_MS` | `3000` / `8000` | Pause between posts within one account (cosmetic pacing; per-account only). |
+| `QUEUE_MAX_ATTEMPTS` | `8` | Retries (with exponential backoff) before a tweet is parked as failed. |
+| `SWEEP_FETCH_TIMEOUT_MS` | `180000` | Watchdog for a single account's timeline fetch. |
+
+Upgrading from an older version needs no manual steps: the queue table is created automatically on first boot and existing history is untouched (Docker users keep the same `data` volume; source installs just run `./update.sh`).
+
 ## CLI Quick Commands
 
 Always run CLI commands as:

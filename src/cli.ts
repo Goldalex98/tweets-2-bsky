@@ -14,7 +14,7 @@ import {
   saveConfig,
   updateTwitterConfig,
 } from './config-manager.js';
-import { dbService } from './db.js';
+import { dbService, postQueueService } from './db.js';
 import {
   applyProfileMirrorSyncState,
   ensureBlueskyBotSelfLabel,
@@ -211,7 +211,7 @@ program
       baseUrl: answers.baseUrl || undefined,
     };
 
-    delete config.geminiApiKey;
+    config.geminiApiKey = undefined; // legacy field; dropped from config.json on save
     saveConfig(config);
     console.log('AI configuration updated.');
   });
@@ -922,6 +922,9 @@ program
     console.log(`Twitter configured: ${Boolean(config.twitter.authToken && config.twitter.ct0)}`);
     console.log(`AI provider: ${config.ai?.provider || 'gemini (default)'}`);
     console.log(`Recent processed tweets: ${recent.length > 0 ? recent.length : 0}`);
+
+    const queue = postQueueService.getCounts();
+    console.log(`Post queue: ${queue.pending} pending, ${queue.processing} posting, ${queue.failed} failed`);
 
     if (recent.length > 0) {
       const last = recent[0];

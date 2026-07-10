@@ -63,7 +63,7 @@ export function setupBrowserDebugLogging(): void {
 
   const events = ['click', 'change', 'input', 'submit'];
 
-  events.forEach((eventName) => {
+  for (const eventName of events) {
     document.addEventListener(
       eventName,
       (event) => {
@@ -71,7 +71,7 @@ export function setupBrowserDebugLogging(): void {
       },
       true,
     );
-  });
+  }
 
   window.addEventListener('focus', () => {
     console.debug(`${DEBUG_PREFIX} window-focus`, { timestamp: new Date().toISOString() });

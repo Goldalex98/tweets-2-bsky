@@ -20,7 +20,7 @@ import {
   getDefaultUserPermissions,
   saveConfig,
 } from './config-manager.js';
-import { dbService } from './db.js';
+import { dbService, postQueueService } from './db.js';
 import type { ProcessedTweet } from './db.js';
 import {
   applyProfileMirrorSyncState,
@@ -2763,6 +2763,7 @@ app.delete('/api/mappings/:id', authenticateToken, (req: any, res) => {
 
   config.mappings = config.mappings.filter((entry) => entry.id !== id);
   pendingBackfills = pendingBackfills.filter((entry) => entry.id !== id);
+  postQueueService.deleteByMappingId(id);
   saveConfig(config);
   res.json({ success: true });
 });
@@ -2842,7 +2843,7 @@ app.post('/api/ai-config', authenticateToken, requireAdmin, (req, res) => {
     baseUrl: baseUrl || undefined,
   };
 
-  delete config.geminiApiKey;
+  config.geminiApiKey = undefined; // legacy field; dropped from config.json on save
 
   saveConfig(config);
   res.json({ success: true });
@@ -2883,6 +2884,26 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
     return true;
   });
 
+  // Post-queue state comes straight from SQLite, so what the dashboard shows
+  // is exactly what the workers will post — no in-memory drift.
+  const queueCounts = postQueueService.getCounts();
+  const scopedQueueMappings = queueCounts.perMapping.filter(
+    (entry) => visibleMappingIds.has(entry.mapping_id) && entry.pending + entry.processing + entry.failed > 0,
+  );
+  const queueSummary = {
+    pending: scopedQueueMappings.reduce((total, entry) => total + entry.pending, 0),
+    processing: scopedQueueMappings.reduce((total, entry) => total + entry.processing, 0),
+    failed: scopedQueueMappings.reduce((total, entry) => total + entry.failed, 0),
+    oldestEnqueuedAt: scopedQueueMappings.reduce<number | null>(
+      (oldest, entry) =>
+        entry.oldest_enqueued_at !== null && (oldest === null || entry.oldest_enqueued_at < oldest)
+          ? entry.oldest_enqueued_at
+          : oldest,
+      null,
+    ),
+    perMapping: scopedQueueMappings,
+  };
+
   res.json({
     lastCheckTime,
     nextCheckTime,
@@ -2894,7 +2915,31 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
     })),
     currentStatus: scopedStatus,
     activeJobs: scopedJobs,
+    queue: queueSummary,
   });
+});
+
+// Detailed post-queue listing, scoped to the mappings the caller can see.
+app.get('/api/queue', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const visibleMappingIds = getVisibleMappingIdSet(config, req.user);
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 200;
+
+  res.json({
+    counts: postQueueService.getCounts().perMapping.filter((entry) => visibleMappingIds.has(entry.mapping_id)),
+    items: postQueueService.listItems({ mappingIds: visibleMappingIds, limit }),
+  });
+});
+
+app.post('/api/queue/retry-failed', authenticateToken, requireAdmin, (_req, res) => {
+  const retried = postQueueService.retryFailed();
+  res.json({ success: true, message: `${retried} failed tweet(s) requeued.` });
+});
+
+app.delete('/api/queue/failed', authenticateToken, requireAdmin, (_req, res) => {
+  const cleared = postQueueService.clearFailed();
+  res.json({ success: true, message: `${cleared} failed tweet(s) removed from the queue.` });
 });
 
 app.get('/api/version', authenticateToken, (_req, res) => {
@@ -2935,6 +2980,7 @@ app.post('/api/run-now', authenticateToken, (req: any, res) => {
 
 app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res) => {
   pendingBackfills = [];
+  postQueueService.cancelPendingBackfills();
   updateAppStatus({
     state: 'idle',
     message: 'All backfills cleared',
@@ -3045,6 +3091,7 @@ app.delete('/api/backfill/:id', authenticateToken, (req: any, res) => {
   }
 
   pendingBackfills = pendingBackfills.filter((entry) => entry.id !== id);
+  postQueueService.cancelPendingBackfills(id);
   signalSchedulerWake();
   res.json({ success: true });
 });

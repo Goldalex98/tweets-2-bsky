@@ -19,18 +19,18 @@ console.log('Running logic tests...\n');
 console.log('Test 1: Twitter URL Manipulation (High Quality Download)');
 {
   const url1 = 'https://pbs.twimg.com/media/ABC123.jpg';
-  const highQuality1 = url1.includes('?') ? url1.replace('?', ':orig?') : url1 + ':orig';
+  const highQuality1 = url1.includes('?') ? url1.replace('?', ':orig?') : `${url1}:orig`;
   assert(highQuality1 === 'https://pbs.twimg.com/media/ABC123.jpg:orig', 'Should append :orig to plain URLs');
 
   const url2 = 'https://pbs.twimg.com/media/ABC123.jpg?format=jpg&name=small';
-  const highQuality2 = url2.includes('?') ? url2.replace('?', ':orig?') : url2 + ':orig';
+  const highQuality2 = url2.includes('?') ? url2.replace('?', ':orig?') : `${url2}:orig`;
   assert(
     highQuality2 === 'https://pbs.twimg.com/media/ABC123.jpg:orig?format=jpg&name=small',
     'Should replace ? with :orig? for query URLs',
   );
 
   const url3 = 'https://pbs.twimg.com/media/DEF456.png?name=large';
-  const highQuality3 = url3.includes('?') ? url3.replace('?', ':orig?') : url3 + ':orig';
+  const highQuality3 = url3.includes('?') ? url3.replace('?', ':orig?') : `${url3}:orig`;
   assert(highQuality3 === 'https://pbs.twimg.com/media/DEF456.png:orig?name=large', 'Should work with PNGs too');
   console.log();
 }
@@ -111,7 +111,8 @@ console.log('Test 4: Aspect Ratio Calculation');
   const getAspectRatio = (mediaSizes, originalInfo) => {
     if (mediaSizes?.large) {
       return { width: mediaSizes.large.w, height: mediaSizes.large.h };
-    } else if (originalInfo) {
+    }
+    if (originalInfo) {
       return { width: originalInfo.width, height: originalInfo.height };
     }
     return undefined;
@@ -152,8 +153,8 @@ console.log('Test 5: Video Variant Sorting (Highest Quality First)');
 // Test 6: Size Formatting
 console.log('Test 6: Size Formatting');
 {
-  const formatSize = (bytes) => (bytes / 1024).toFixed(2) + ' KB';
-  const formatSizeMB = (bytes) => (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  const formatSize = (bytes) => `${(bytes / 1024).toFixed(2)} KB`;
+  const formatSizeMB = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 
   assert(formatSize(1024) === '1.00 KB', '1KB formats correctly');
   assert(formatSize(1536) === '1.50 KB', '1.5KB formats correctly');

@@ -205,7 +205,7 @@ async function callOpenAICompatible(
   };
 
   if (apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
+    headers.Authorization = `Bearer ${apiKey}`;
   }
 
   // OpenRouter specific headers (optional but good practice)

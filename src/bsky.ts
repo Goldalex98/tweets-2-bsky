@@ -25,57 +25,60 @@ export async function getAgent(mapping: {
 }
 
 export async function deleteAllPosts(mappingId: string): Promise<number> {
-    const config = getConfig();
-    const mapping = config.mappings.find(m => m.id === mappingId);
-    if (!mapping) throw new Error('Mapping not found');
+  const config = getConfig();
+  const mapping = config.mappings.find((m) => m.id === mappingId);
+  if (!mapping) throw new Error('Mapping not found');
 
-    const agent = await getAgent(mapping);
-    if (!agent) throw new Error('Failed to authenticate with Bluesky');
+  const agent = await getAgent(mapping);
+  if (!agent) throw new Error('Failed to authenticate with Bluesky');
 
-    let cursor: string | undefined;
-    let deletedCount = 0;
+  let cursor: string | undefined;
+  let deletedCount = 0;
 
-    console.log(`[${mapping.bskyIdentifier}] 🗑️ Starting deletion of all posts...`);
+  console.log(`[${mapping.bskyIdentifier}] 🗑️ Starting deletion of all posts...`);
 
-    // Safety loop limit to prevent infinite loops
-    let loops = 0;
-    while (loops < 1000) {
-        loops++;
-        try {
-            const { data } = await agent.com.atproto.repo.listRecords({
-                repo: agent.session!.did,
-                collection: 'app.bsky.feed.post',
-                limit: 50, // Keep batch size reasonable
-                cursor,
-            });
+  // Safety loop limit to prevent infinite loops
+  let loops = 0;
+  while (loops < 1000) {
+    loops++;
+    try {
+      const { data } = await agent.com.atproto.repo.listRecords({
+        repo: agent.session!.did,
+        collection: 'app.bsky.feed.post',
+        limit: 50, // Keep batch size reasonable
+        cursor,
+      });
 
-            if (data.records.length === 0) break;
+      if (data.records.length === 0) break;
 
-            console.log(`[${mapping.bskyIdentifier}] 🗑️ Deleting batch of ${data.records.length} posts...`);
+      console.log(`[${mapping.bskyIdentifier}] 🗑️ Deleting batch of ${data.records.length} posts...`);
 
-            // Use p-limit like approach or just Promise.all since 50 is manageable
-            await Promise.all(data.records.map(r => 
-                agent.com.atproto.repo.deleteRecord({
-                    repo: agent.session!.did,
-                    collection: 'app.bsky.feed.post',
-                    rkey: r.uri.split('/').pop()!,
-                }).catch(e => console.warn(`Failed to delete record ${r.uri}:`, e))
-            ));
+      // Use p-limit like approach or just Promise.all since 50 is manageable
+      await Promise.all(
+        data.records.map((r) =>
+          agent.com.atproto.repo
+            .deleteRecord({
+              repo: agent.session!.did,
+              collection: 'app.bsky.feed.post',
+              rkey: r.uri.split('/').pop()!,
+            })
+            .catch((e) => console.warn(`Failed to delete record ${r.uri}:`, e)),
+        ),
+      );
 
-            deletedCount += data.records.length;
-            cursor = data.cursor;
-            
-            if (!cursor) break;
-            
-            // Small delay to be nice to the server
-            await new Promise(r => setTimeout(r, 500));
+      deletedCount += data.records.length;
+      cursor = data.cursor;
 
-        } catch (err) {
-            console.error(`[${mapping.bskyIdentifier}] ❌ Error during deletion loop:`, err);
-            throw err;
-        }
+      if (!cursor) break;
+
+      // Small delay to be nice to the server
+      await new Promise((r) => setTimeout(r, 500));
+    } catch (err) {
+      console.error(`[${mapping.bskyIdentifier}] ❌ Error during deletion loop:`, err);
+      throw err;
     }
+  }
 
-    console.log(`[${mapping.bskyIdentifier}] ✅ Deleted ${deletedCount} posts.`);
-    return deletedCount;
+  console.log(`[${mapping.bskyIdentifier}] ✅ Deleted ${deletedCount} posts.`);
+  return deletedCount;
 }

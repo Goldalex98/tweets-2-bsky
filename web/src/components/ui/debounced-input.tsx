@@ -7,12 +7,7 @@ interface DebouncedInputProps extends Omit<React.ComponentProps<typeof Input>, '
   debounce?: number;
 }
 
-export function DebouncedInput({
-  value: initialValue,
-  onChange,
-  debounce = 180,
-  ...props
-}: DebouncedInputProps) {
+export function DebouncedInput({ value: initialValue, onChange, debounce = 180, ...props }: DebouncedInputProps) {
   const [value, setValue] = React.useState(initialValue);
 
   // Sync internal value with external changes (e.g., when query is cleared externally)
@@ -30,11 +25,5 @@ export function DebouncedInput({
     };
   }, [value, onChange, debounce]);
 
-  return (
-    <Input
-      {...props}
-      value={value}
-      onChange={(event) => setValue(event.target.value)}
-    />
-  );
+  return <Input {...props} value={value} onChange={(event) => setValue(event.target.value)} />;
 }

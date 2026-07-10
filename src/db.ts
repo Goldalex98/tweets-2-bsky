@@ -52,7 +52,7 @@ if (tableInfo.length > 0) {
 
     db.transaction(() => {
       // 1. Rename existing table
-      db.exec(`ALTER TABLE processed_tweets RENAME TO processed_tweets_old;`);
+      db.exec('ALTER TABLE processed_tweets RENAME TO processed_tweets_old;');
 
       // 2. Create new table with all columns
       db.exec(`
@@ -119,7 +119,7 @@ if (tableInfo.length > 0) {
       `);
 
       // 4. Drop old table
-      db.exec(`DROP TABLE processed_tweets_old;`);
+      db.exec('DROP TABLE processed_tweets_old;');
     })();
     console.log('✅ Database upgraded successfully.');
   }
@@ -147,6 +147,36 @@ if (tableInfo.length > 0) {
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_twitter_username ON processed_tweets(twitter_username);
   CREATE INDEX IF NOT EXISTS idx_bsky_identifier ON processed_tweets(bsky_identifier);
+`);
+
+// --- Post queue ---
+// Durable buffer between the Twitter fetch sweep and the Bluesky post workers.
+// Rows are deleted once the tweet lands in processed_tweets (that table stays
+// the permanent record); failed rows are kept visible until pruned or cleared.
+// Created with IF NOT EXISTS so existing databases upgrade in place on boot.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS post_queue (
+    twitter_id TEXT NOT NULL,
+    bsky_identifier TEXT NOT NULL,
+    mapping_id TEXT NOT NULL,
+    twitter_username TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'scheduled',
+    request_id TEXT,
+    tweet_json TEXT NOT NULL,
+    tweet_text TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    not_before INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    enqueued_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (twitter_id, bsky_identifier)
+  );
+`);
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_queue_claim ON post_queue(status, not_before, enqueued_at);
+  CREATE INDEX IF NOT EXISTS idx_queue_target ON post_queue(bsky_identifier, status);
+  CREATE INDEX IF NOT EXISTS idx_queue_mapping ON post_queue(mapping_id, status);
 `);
 
 export interface ProcessedTweet {
@@ -420,5 +450,301 @@ export const dbService = {
 
   clearAll() {
     db.prepare('DELETE FROM processed_tweets').run();
+  },
+};
+
+// ============================================================================
+// Post Queue Service
+// ============================================================================
+
+export type QueueItemKind = 'scheduled' | 'backfill';
+export type QueueItemStatus = 'pending' | 'processing' | 'failed';
+
+export interface QueueItem {
+  twitter_id: string;
+  bsky_identifier: string;
+  mapping_id: string;
+  twitter_username: string;
+  kind: QueueItemKind;
+  request_id?: string;
+  tweet_json: string;
+  tweet_text?: string;
+  status: QueueItemStatus;
+  attempts: number;
+  not_before: number;
+  last_error?: string;
+  enqueued_at: number;
+  updated_at: number;
+}
+
+export interface QueueEnqueueInput {
+  twitter_id: string;
+  bsky_identifier: string;
+  mapping_id: string;
+  twitter_username: string;
+  kind: QueueItemKind;
+  request_id?: string;
+  tweet_json: string;
+  tweet_text?: string;
+}
+
+export interface QueueBatch {
+  mapping_id: string;
+  bsky_identifier: string;
+  twitter_username: string;
+  items: QueueItem[];
+}
+
+export interface QueueMappingCounts {
+  mapping_id: string;
+  bsky_identifier: string;
+  pending: number;
+  processing: number;
+  failed: number;
+  oldest_enqueued_at: number | null;
+}
+
+export interface QueueCounts {
+  pending: number;
+  processing: number;
+  failed: number;
+  perMapping: QueueMappingCounts[];
+}
+
+// Twitter ids are numeric snowflakes, so shorter strings are always older.
+// Ordering by (length, value) yields chronological order without BigInt casts.
+const TWEET_ID_ORDER = 'LENGTH(twitter_id) ASC, twitter_id ASC';
+
+const changesCount = (): number => {
+  const row = db.prepare('SELECT changes() AS c').get() as { c: number } | undefined;
+  return row?.c ?? 0;
+};
+
+const rowToQueueItem = (row: any): QueueItem => ({
+  twitter_id: row.twitter_id,
+  bsky_identifier: row.bsky_identifier,
+  mapping_id: row.mapping_id,
+  twitter_username: row.twitter_username,
+  kind: row.kind,
+  request_id: row.request_id ?? undefined,
+  tweet_json: row.tweet_json,
+  tweet_text: row.tweet_text ?? undefined,
+  status: row.status,
+  attempts: row.attempts,
+  not_before: row.not_before,
+  last_error: row.last_error ?? undefined,
+  enqueued_at: row.enqueued_at,
+  updated_at: row.updated_at,
+});
+
+export const postQueueService = {
+  // INSERT OR IGNORE dedupes against everything already queued (any status)
+  // for the same Bluesky target; callers additionally pre-filter against
+  // processed_tweets. Returns how many rows were actually inserted.
+  enqueue(items: QueueEnqueueInput[]): number {
+    if (items.length === 0) return 0;
+    const now = Date.now();
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO post_queue
+        (twitter_id, bsky_identifier, mapping_id, twitter_username, kind, request_id, tweet_json, tweet_text, status, attempts, not_before, enqueued_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+    `);
+    let inserted = 0;
+    const runAll = db.transaction(() => {
+      for (const item of items) {
+        stmt.run(
+          item.twitter_id,
+          item.bsky_identifier.toLowerCase(),
+          item.mapping_id,
+          item.twitter_username.toLowerCase(),
+          item.kind,
+          item.request_id ?? null,
+          item.tweet_json,
+          item.tweet_text ?? null,
+          now,
+          now,
+        );
+        inserted += changesCount();
+      }
+    });
+    runAll();
+    return inserted;
+  },
+
+  // Every queued twitter_id for a Bluesky target regardless of status, so the
+  // sweep treats queued-but-not-yet-posted tweets as already seen.
+  getQueuedIdSet(bskyIdentifier: string): Set<string> {
+    const rows = db
+      .prepare('SELECT twitter_id FROM post_queue WHERE bsky_identifier = ?')
+      .all(bskyIdentifier.toLowerCase()) as { twitter_id: string }[];
+    return new Set(rows.map((row) => row.twitter_id));
+  },
+
+  // Claims the oldest eligible (mapping, source account) group and marks its
+  // pending rows as processing. Groups whose mapping is locked by another
+  // worker (excluded) or no longer enabled (not in allowed) are passed over.
+  claimNextBatch(excludedMappingIds: Set<string>, allowedMappingIds: Set<string>, maxItems = 50): QueueBatch | null {
+    const now = Date.now();
+    const groups = db
+      .prepare(`
+        SELECT mapping_id, twitter_username, bsky_identifier, MIN(enqueued_at) AS oldest
+        FROM post_queue
+        WHERE status = 'pending' AND not_before <= ?
+        GROUP BY mapping_id, twitter_username, bsky_identifier
+        ORDER BY oldest ASC
+      `)
+      .all(now) as { mapping_id: string; twitter_username: string; bsky_identifier: string }[];
+
+    const group = groups.find((g) => !excludedMappingIds.has(g.mapping_id) && allowedMappingIds.has(g.mapping_id));
+    if (!group) return null;
+
+    let items: QueueItem[] = [];
+    const claim = db.transaction(() => {
+      const rows = db
+        .prepare(`
+          SELECT * FROM post_queue
+          WHERE status = 'pending' AND not_before <= ?
+            AND mapping_id = ? AND twitter_username = ? AND bsky_identifier = ?
+          ORDER BY ${TWEET_ID_ORDER}
+          LIMIT ?
+        `)
+        .all(now, group.mapping_id, group.twitter_username, group.bsky_identifier, maxItems) as any[];
+      items = rows.map(rowToQueueItem);
+      const mark = db.prepare(
+        "UPDATE post_queue SET status = 'processing', updated_at = ? WHERE twitter_id = ? AND bsky_identifier = ?",
+      );
+      for (const item of items) {
+        mark.run(now, item.twitter_id, item.bsky_identifier);
+      }
+    });
+    claim();
+
+    if (items.length === 0) return null;
+    return {
+      mapping_id: group.mapping_id,
+      bsky_identifier: group.bsky_identifier,
+      twitter_username: group.twitter_username,
+      items,
+    };
+  },
+
+  markDone(twitterId: string, bskyIdentifier: string): void {
+    db.prepare('DELETE FROM post_queue WHERE twitter_id = ? AND bsky_identifier = ?').run(
+      twitterId,
+      bskyIdentifier.toLowerCase(),
+    );
+  },
+
+  // Failed attempt: exponential backoff (5 min doubling, capped at 6h), then
+  // terminal 'failed' after maxAttempts so a poison tweet can't retry forever.
+  releaseForRetry(item: QueueItem, errorMessage: string, maxAttempts: number): void {
+    const attempts = item.attempts + 1;
+    const now = Date.now();
+    if (attempts >= maxAttempts) {
+      db.prepare(
+        "UPDATE post_queue SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE twitter_id = ? AND bsky_identifier = ?",
+      ).run(attempts, errorMessage.slice(0, 500), now, item.twitter_id, item.bsky_identifier);
+      return;
+    }
+    const backoffMs = Math.min(5 * 60 * 1000 * 2 ** (attempts - 1), 6 * 60 * 60 * 1000);
+    db.prepare(
+      "UPDATE post_queue SET status = 'pending', attempts = ?, not_before = ?, last_error = ?, updated_at = ? WHERE twitter_id = ? AND bsky_identifier = ?",
+    ).run(attempts, now + backoffMs, errorMessage.slice(0, 500), now, item.twitter_id, item.bsky_identifier);
+  },
+
+  // Crash recovery: anything left 'processing' by a previous run goes back to
+  // pending. processed_tweets checks make re-runs idempotent.
+  resetProcessing(): number {
+    db.prepare("UPDATE post_queue SET status = 'pending', updated_at = ? WHERE status = 'processing'").run(Date.now());
+    return changesCount();
+  },
+
+  getCounts(): QueueCounts {
+    const totals = db.prepare('SELECT status, COUNT(*) AS count FROM post_queue GROUP BY status').all() as {
+      status: QueueItemStatus;
+      count: number;
+    }[];
+    const perMapping = db
+      .prepare(`
+        SELECT mapping_id, bsky_identifier,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+          MIN(CASE WHEN status IN ('pending', 'processing') THEN enqueued_at ELSE NULL END) AS oldest_enqueued_at
+        FROM post_queue
+        GROUP BY mapping_id, bsky_identifier
+        ORDER BY oldest_enqueued_at ASC
+      `)
+      .all() as QueueMappingCounts[];
+    const byStatus = new Map(totals.map((row) => [row.status, row.count]));
+    return {
+      pending: byStatus.get('pending') ?? 0,
+      processing: byStatus.get('processing') ?? 0,
+      failed: byStatus.get('failed') ?? 0,
+      perMapping,
+    };
+  },
+
+  // Item listing for the dashboard; tweet_json is omitted to keep payloads small.
+  listItems(options: { mappingIds?: Set<string>; limit?: number } = {}): Omit<QueueItem, 'tweet_json'>[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 200, 1000));
+    const rows = db
+      .prepare(`
+        SELECT twitter_id, bsky_identifier, mapping_id, twitter_username, kind, request_id, tweet_text,
+               status, attempts, not_before, last_error, enqueued_at, updated_at
+        FROM post_queue
+        ORDER BY CASE status WHEN 'processing' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, enqueued_at ASC, ${TWEET_ID_ORDER}
+        LIMIT ?
+      `)
+      .all(limit * 4) as any[];
+    const filtered = options.mappingIds ? rows.filter((row) => options.mappingIds?.has(row.mapping_id)) : rows;
+    return filtered.slice(0, limit).map((row) => {
+      const item = rowToQueueItem({ ...row, tweet_json: '' });
+      const { tweet_json: _omit, ...rest } = item;
+      return rest;
+    });
+  },
+
+  cancelPendingByRequestId(requestId: string): number {
+    db.prepare("DELETE FROM post_queue WHERE status = 'pending' AND request_id = ?").run(requestId);
+    return changesCount();
+  },
+
+  cancelPendingBackfills(mappingId?: string): number {
+    if (mappingId) {
+      db.prepare("DELETE FROM post_queue WHERE status = 'pending' AND kind = 'backfill' AND mapping_id = ?").run(
+        mappingId,
+      );
+    } else {
+      db.prepare("DELETE FROM post_queue WHERE status = 'pending' AND kind = 'backfill'").run();
+    }
+    return changesCount();
+  },
+
+  deleteByMappingId(mappingId: string): number {
+    db.prepare('DELETE FROM post_queue WHERE mapping_id = ?').run(mappingId);
+    return changesCount();
+  },
+
+  deleteByBskyIdentifier(bskyIdentifier: string): number {
+    db.prepare('DELETE FROM post_queue WHERE bsky_identifier = ?').run(bskyIdentifier.toLowerCase());
+    return changesCount();
+  },
+
+  clearFailed(): number {
+    db.prepare("DELETE FROM post_queue WHERE status = 'failed'").run();
+    return changesCount();
+  },
+
+  retryFailed(): number {
+    db.prepare(
+      "UPDATE post_queue SET status = 'pending', attempts = 0, not_before = 0, updated_at = ? WHERE status = 'failed'",
+    ).run(Date.now());
+    return changesCount();
+  },
+
+  purgeFailedOlderThan(maxAgeMs: number): number {
+    db.prepare("DELETE FROM post_queue WHERE status = 'failed' AND updated_at < ?").run(Date.now() - maxAgeMs);
+    return changesCount();
   },
 };

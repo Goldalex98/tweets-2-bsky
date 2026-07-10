@@ -38,6 +38,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
+import { DebouncedInput } from './components/ui/debounced-input';
 import {
   DropdownMenu,
   DropdownMenuItem,
@@ -45,7 +46,6 @@ import {
   DropdownMenuSeparator,
 } from './components/ui/dropdown-menu';
 import { Input } from './components/ui/input';
-import { DebouncedInput } from './components/ui/debounced-input';
 import { Label } from './components/ui/label';
 import { NavList } from './components/ui/nav-list';
 import { cn } from './lib/utils';
@@ -261,6 +261,23 @@ const JOB_KIND_DOT: Record<string, string> = {
   'pin-sync': 'bg-pink-500',
 };
 
+interface QueueMappingCounts {
+  mapping_id: string;
+  bsky_identifier: string;
+  pending: number;
+  processing: number;
+  failed: number;
+  oldest_enqueued_at: number | null;
+}
+
+interface QueueSummary {
+  pending: number;
+  processing: number;
+  failed: number;
+  oldestEnqueuedAt: number | null;
+  perMapping: QueueMappingCounts[];
+}
+
 interface StatusResponse {
   lastCheckTime: number;
   nextCheckTime: number;
@@ -269,6 +286,7 @@ interface StatusResponse {
   pendingBackfills: PendingBackfill[];
   currentStatus: StatusState;
   activeJobs?: ActiveJobView[];
+  queue?: QueueSummary;
 }
 
 interface UserPermissions {
@@ -806,10 +824,10 @@ function formatCompactNumber(value: number): string {
 function App() {
   useEffect(() => {
     console.log(
-      "%cTweets-2-Bsky %cReady to syndicate! 🚀\n%cView source & contribute: https://github.com/j4ckxyz/tweets-2-bsky",
-      "color: #0284c7; font-weight: bold; font-size: 14px;",
-      "color: #64748b; font-size: 12px; font-weight: 500;",
-      "color: #94a3b8; font-size: 10px;"
+      '%cTweets-2-Bsky %cReady to syndicate! 🚀\n%cView source & contribute: https://github.com/j4ckxyz/tweets-2-bsky',
+      'color: #0284c7; font-weight: bold; font-size: 14px;',
+      'color: #64748b; font-size: 12px; font-weight: 500;',
+      'color: #94a3b8; font-size: 10px;',
     );
   }, []);
 
@@ -1578,6 +1596,7 @@ function App() {
     }
   }, [editForm.profileSyncSourceUsername, editTwitterUsers, editingMapping]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberately re-runs when any credential field changes to invalidate the previous validation
   useEffect(() => {
     setValidatedBskyCredentials(null);
   }, [newMapping.bskyIdentifier, newMapping.bskyPassword, newMapping.bskyServiceUrl]);
@@ -1585,6 +1604,8 @@ function App() {
   const pendingBackfills = status?.pendingBackfills ?? [];
   const activeJobs = status?.activeJobs ?? [];
   const currentStatus = status?.currentStatus;
+  const postQueue = status?.queue;
+  const queuedPostCount = (postQueue?.pending ?? 0) + (postQueue?.processing ?? 0);
   const latestActivity = recentActivity[0];
   const selectedMirrorPreview = selectedMirrorSourceUsername
     ? newTwitterMirrorProfiles[normalizeTwitterUsername(selectedMirrorSourceUsername)]
@@ -1855,6 +1876,7 @@ function App() {
     () => Math.max(1, Math.ceil(paginatedMappings.length / Math.max(1, accountsPageSize))),
     [accountsPageSize, paginatedMappings.length],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberately resets pagination whenever a filter or the page size changes
   useEffect(() => {
     setAccountsPage(1);
   }, [accountsPageSize, accountsSearchQuery, selectedFolderKey, accountsCreatorFilter]);
@@ -2255,6 +2277,36 @@ function App() {
       await fetchStatus();
     } catch (error) {
       handleAuthFailure(error, 'Failed to clear backfill queue.');
+    }
+  };
+
+  const retryFailedQueue = async () => {
+    if (!authHeaders) {
+      return;
+    }
+    try {
+      const response = await axios.post('/api/queue/retry-failed', {}, { headers: authHeaders });
+      showNotice('success', response.data?.message || 'Failed tweets requeued.');
+      await fetchStatus();
+    } catch (error) {
+      handleAuthFailure(error, 'Failed to requeue failed tweets.');
+    }
+  };
+
+  const clearFailedQueue = async () => {
+    if (!authHeaders) {
+      return;
+    }
+    const confirmed = window.confirm('Remove all failed tweets from the post queue? They will not be retried.');
+    if (!confirmed) {
+      return;
+    }
+    try {
+      const response = await axios.delete('/api/queue/failed', { headers: authHeaders });
+      showNotice('success', response.data?.message || 'Failed tweets removed.');
+      await fetchStatus();
+    } catch (error) {
+      handleAuthFailure(error, 'Failed to clear failed tweets.');
     }
   };
 
@@ -2979,9 +3031,7 @@ function App() {
                       className="h-4 w-4 rounded border-border"
                       checked={isSelectedForBulk}
                       disabled={isAnyBulkAccountsActionBusy}
-                      onChange={(event) =>
-                        toggleAccountMappingSelection(mapping.id, event.target.checked)
-                      }
+                      onChange={(event) => toggleAccountMappingSelection(mapping.id, event.target.checked)}
                       aria-label={`Select ${mapping.bskyIdentifier}`}
                     />
                   ) : null}
@@ -2994,9 +3044,7 @@ function App() {
                   {active ? (
                     <Badge variant="warning">Backfilling</Badge>
                   ) : queued ? (
-                    <Badge variant="warning">
-                      Queued {queuePosition ? `#${queuePosition}` : ''}
-                    </Badge>
+                    <Badge variant="warning">Queued {queuePosition ? `#${queuePosition}` : ''}</Badge>
                   ) : (
                     <Badge variant="success">Active</Badge>
                   )}
@@ -3006,9 +3054,7 @@ function App() {
                       Bridged
                     </Badge>
                   ) : null}
-                  {mapping.hasBotLabel ? (
-                    <Badge variant="outline">Bot</Badge>
-                  ) : null}
+                  {mapping.hasBotLabel ? <Badge variant="outline">Bot</Badge> : null}
                 </div>
               </div>
 
@@ -3061,9 +3107,7 @@ function App() {
 
               <div className="flex items-center justify-between pt-1">
                 <div className="text-xs text-muted-foreground">
-                  {isAdmin && mapping.createdByLabel ? (
-                    <span>Created by: {mapping.createdByLabel}</span>
-                  ) : null}
+                  {isAdmin && mapping.createdByLabel ? <span>Created by: {mapping.createdByLabel}</span> : null}
                 </div>
                 <div className="flex items-center gap-2">
                   {canManageThisMapping && groupOptions.length > 0 ? (
@@ -3097,11 +3141,7 @@ function App() {
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={
-                        isBridgeAllBusy ||
-                        isAnyBulkAccountsActionBusy ||
-                        Boolean(syncingProfileMappingId)
-                      }
+                      disabled={isBridgeAllBusy || isAnyBulkAccountsActionBusy || Boolean(syncingProfileMappingId)}
                       onClick={() => startEditMapping(mapping)}
                     >
                       Edit
@@ -3135,10 +3175,7 @@ function App() {
                           >
                             <option value="">Select sync source</option>
                             {mapping.twitterUsernames.map((username) => (
-                              <option
-                                key={`sync-source-mobile-actions-${mapping.id}-${username}`}
-                                value={username}
-                              >
+                              <option key={`sync-source-mobile-actions-${mapping.id}-${username}`} value={username}>
                                 @{username}
                               </option>
                             ))}
@@ -3170,11 +3207,7 @@ function App() {
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         icon={
-                          pullingBio ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Download className="h-4 w-4" />
-                          )
+                          pullingBio ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />
                         }
                         disabled={
                           isBridgeAllBusy ||
@@ -3193,11 +3226,7 @@ function App() {
                       {canUseFediverseBridge && !isFediverseBridged ? (
                         <DropdownMenuItem
                           icon={
-                            bridging ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <Repeat2 className="h-4 w-4" />
-                            )
+                            bridging ? <Loader2 className="h-4 w-4 animate-spin" /> : <Repeat2 className="h-4 w-4" />
                           }
                           disabled={
                             isBridgeAllBusy ||
@@ -4676,17 +4705,44 @@ function App() {
               </div>
             ) : null}
 
-            {activeJobs.length > 0 || (currentStatus && currentStatus.state !== 'idle') ? (
+            {activeJobs.length > 0 ||
+            queuedPostCount > 0 ||
+            (postQueue?.failed ?? 0) > 0 ||
+            (currentStatus && currentStatus.state !== 'idle') ? (
               <Card className="mb-6">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
                   <p className="text-sm font-semibold">
                     {activeJobs.length > 0
                       ? `${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} running`
-                      : `${formatState(currentStatus?.state || 'processing')} in progress`}
+                      : queuedPostCount > 0
+                        ? `${queuedPostCount} tweet${queuedPostCount === 1 ? '' : 's'} queued to post`
+                        : (postQueue?.failed ?? 0) > 0
+                          ? `${postQueue?.failed} tweet${postQueue?.failed === 1 ? '' : 's'} failed to post`
+                          : `${formatState(currentStatus?.state || 'processing')} in progress`}
                   </p>
-                  {pendingBackfills.length > 0 ? (
-                    <p className="text-xs text-muted-foreground">{pendingBackfills.length} backfill(s) queued</p>
-                  ) : null}
+                  <div className="flex flex-wrap items-center gap-3">
+                    {activeJobs.length > 0 && queuedPostCount > 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        {postQueue?.processing ?? 0} posting · {postQueue?.pending ?? 0} waiting
+                      </p>
+                    ) : null}
+                    {pendingBackfills.length > 0 ? (
+                      <p className="text-xs text-muted-foreground">{pendingBackfills.length} backfill(s) queued</p>
+                    ) : null}
+                    {(postQueue?.failed ?? 0) > 0 ? (
+                      <p className="text-xs text-red-600 dark:text-red-400">{postQueue?.failed} failed</p>
+                    ) : null}
+                    {isAdmin && (postQueue?.failed ?? 0) > 0 ? (
+                      <span className="flex items-center gap-1">
+                        <Button size="sm" variant="outline" onClick={retryFailedQueue}>
+                          Retry failed
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={clearFailedQueue}>
+                          Clear failed
+                        </Button>
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
                 {activeJobs.length > 0 ? (
                   <ul className="divide-y divide-border">
@@ -4746,8 +4802,13 @@ function App() {
                   </Card>
                   <Card className="">
                     <CardContent className="p-4">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Backfill Queue</p>
-                      <p className="mt-2 text-2xl font-semibold">{pendingBackfills.length}</p>
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Queued Posts</p>
+                      <p className="mt-2 text-2xl font-semibold">{queuedPostCount}</p>
+                      {pendingBackfills.length > 0 ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          +{pendingBackfills.length} backfill fetch{pendingBackfills.length === 1 ? '' : 'es'} pending
+                        </p>
+                      ) : null}
                     </CardContent>
                   </Card>
                   <Card className="">
@@ -5195,416 +5256,419 @@ function App() {
                     <>
                       {/* Desktop Table View */}
                       <Card className="cv-auto overflow-hidden hidden md:block">
-                      <div className="overflow-x-auto">
-                        <table className="min-w-full text-left text-sm">
-                          <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                            <tr>
-                              <th className="w-9 px-2 py-3">
-                                <input
-                                  type="checkbox"
-                                  className="h-3.5 w-3.5 rounded border-border"
-                                  checked={allFilteredManageableSelected}
-                                  disabled={filteredManageableMappingIds.length === 0}
-                                  onChange={(event) => toggleSelectAllFilteredManageable(event.target.checked)}
-                                  aria-label="Select all accounts on this page"
-                                />
-                              </th>
-                              <th className="px-2 py-3">Owner</th>
-                              {isAdmin ? <th className="px-2 py-3">Created By</th> : null}
-                              <th className="px-2 py-3">Twitter Sources</th>
-                              <th className="px-2 py-3">Bluesky Target</th>
-                              <th className="px-2 py-3">Status</th>
-                              <th className="px-2 py-3 text-right">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {(pagedGroupedMappings[0]?.mappings ?? []).map((mapping) => {
-                              const queued = isBackfillQueued(mapping.id);
-                              const active = isBackfillActive(mapping.id);
-                              const queuePosition = getBackfillEntry(mapping.id)?.position;
-                              const profile = getProfileForActor(mapping.bskyIdentifier);
-                              const profileHandle = profile?.handle || mapping.bskyIdentifier;
-                              const profileName = profile?.displayName || profileHandle;
-                              const profileBio = showAccountBios ? profile?.description?.trim() || '' : '';
-                              const profileUrl = `https://bsky.app/profile/${profileHandle}`;
-                              const canManageThisMapping = canManageMapping(mapping);
-                              const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
-                              const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
-                              const isFediverseBridged = bridgeStatus?.bridged === true;
-                              const bridging = bridgingMappingId === mapping.id;
-                              const mappingGroup = getMappingGroupMeta(mapping);
-                              const syncingProfile = syncingProfileMappingId === mapping.id;
-                              const pullingBio = pullingBioMappingId === mapping.id;
-                              const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full text-left text-sm">
+                            <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                              <tr>
+                                <th className="w-9 px-2 py-3">
+                                  <input
+                                    type="checkbox"
+                                    className="h-3.5 w-3.5 rounded border-border"
+                                    checked={allFilteredManageableSelected}
+                                    disabled={filteredManageableMappingIds.length === 0}
+                                    onChange={(event) => toggleSelectAllFilteredManageable(event.target.checked)}
+                                    aria-label="Select all accounts on this page"
+                                  />
+                                </th>
+                                <th className="px-2 py-3">Owner</th>
+                                {isAdmin ? <th className="px-2 py-3">Created By</th> : null}
+                                <th className="px-2 py-3">Twitter Sources</th>
+                                <th className="px-2 py-3">Bluesky Target</th>
+                                <th className="px-2 py-3">Status</th>
+                                <th className="px-2 py-3 text-right">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(pagedGroupedMappings[0]?.mappings ?? []).map((mapping) => {
+                                const queued = isBackfillQueued(mapping.id);
+                                const active = isBackfillActive(mapping.id);
+                                const queuePosition = getBackfillEntry(mapping.id)?.position;
+                                const profile = getProfileForActor(mapping.bskyIdentifier);
+                                const profileHandle = profile?.handle || mapping.bskyIdentifier;
+                                const profileName = profile?.displayName || profileHandle;
+                                const profileBio = showAccountBios ? profile?.description?.trim() || '' : '';
+                                const profileUrl = `https://bsky.app/profile/${profileHandle}`;
+                                const canManageThisMapping = canManageMapping(mapping);
+                                const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
+                                const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
+                                const isFediverseBridged = bridgeStatus?.bridged === true;
+                                const bridging = bridgingMappingId === mapping.id;
+                                const mappingGroup = getMappingGroupMeta(mapping);
+                                const syncingProfile = syncingProfileMappingId === mapping.id;
+                                const pullingBio = pullingBioMappingId === mapping.id;
+                                const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
 
-                              return (
-                                <tr
-                                  key={mapping.id}
-                                  className="interactive-row border-b border-border/60 last:border-0"
-                                >
-                                  <td className="px-2 py-3 align-top">
-                                    {canManageThisMapping ? (
-                                      <input
-                                        type="checkbox"
-                                        className="h-3.5 w-3.5 rounded border-border"
-                                        checked={isSelectedForBulk}
-                                        disabled={isAnyBulkAccountsActionBusy}
-                                        onChange={(event) =>
-                                          toggleAccountMappingSelection(mapping.id, event.target.checked)
-                                        }
-                                        aria-label={`Select ${mapping.bskyIdentifier}`}
-                                      />
-                                    ) : null}
-                                  </td>
-                                  <td className="px-2 py-3 align-top">
-                                    <div className="flex items-center gap-2 font-medium">
-                                      <UserRound className="h-4 w-4 text-muted-foreground" />
-                                      {mapping.owner || 'System'}
-                                    </div>
-                                  </td>
-                                  {isAdmin ? (
-                                    <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                                      {mapping.createdByLabel ||
-                                        mapping.createdByUser?.username ||
-                                        mapping.createdByUser?.email ||
-                                        '--'}
-                                    </td>
-                                  ) : null}
-                                  <td className="px-2 py-3 align-top">
-                                    <div className="flex flex-wrap gap-2">
-                                      {mapping.twitterUsernames.map((username) => (
-                                        <Badge key={username} variant="secondary">
-                                          @{username}
-                                        </Badge>
-                                      ))}
-                                    </div>
-                                  </td>
-                                  <td className="px-2 py-3 align-top">
-                                    <div className="flex items-center gap-2">
-                                      {showAccountAvatars && profile?.avatar ? (
-                                        <img
-                                          className="h-8 w-8 rounded-full border border-border/70 object-cover"
-                                          src={profile.avatar}
-                                          alt={profileName}
-                                          loading="lazy"
-                                          decoding="async"
-                                          fetchPriority="low"
+                                return (
+                                  <tr
+                                    key={mapping.id}
+                                    className="interactive-row border-b border-border/60 last:border-0"
+                                  >
+                                    <td className="px-2 py-3 align-top">
+                                      {canManageThisMapping ? (
+                                        <input
+                                          type="checkbox"
+                                          className="h-3.5 w-3.5 rounded border-border"
+                                          checked={isSelectedForBulk}
+                                          disabled={isAnyBulkAccountsActionBusy}
+                                          onChange={(event) =>
+                                            toggleAccountMappingSelection(mapping.id, event.target.checked)
+                                          }
+                                          aria-label={`Select ${mapping.bskyIdentifier}`}
                                         />
-                                      ) : (
-                                        <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                                          <UserRound className="h-4 w-4" />
-                                        </div>
-                                      )}
-                                      <div className="min-w-0">
-                                        <p className="truncate text-sm font-medium">{profileName}</p>
-                                        <a
-                                          className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                                          href={profileUrl}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          title={`Open @${profileHandle} on Bluesky`}
-                                        >
-                                          {profileHandle}
-                                          <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
-                                        </a>
-                                        {profileBio ? (
-                                          <p
-                                            className="mt-1 overflow-hidden text-xs text-muted-foreground"
-                                            style={{
-                                              display: '-webkit-box',
-                                              WebkitLineClamp: 2,
-                                              WebkitBoxOrient: 'vertical',
-                                            }}
-                                            title={profileBio}
+                                      ) : null}
+                                    </td>
+                                    <td className="px-2 py-3 align-top">
+                                      <div className="flex items-center gap-2 font-medium">
+                                        <UserRound className="h-4 w-4 text-muted-foreground" />
+                                        {mapping.owner || 'System'}
+                                      </div>
+                                    </td>
+                                    {isAdmin ? (
+                                      <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                                        {mapping.createdByLabel ||
+                                          mapping.createdByUser?.username ||
+                                          mapping.createdByUser?.email ||
+                                          '--'}
+                                      </td>
+                                    ) : null}
+                                    <td className="px-2 py-3 align-top">
+                                      <div className="flex flex-wrap gap-2">
+                                        {mapping.twitterUsernames.map((username) => (
+                                          <Badge key={username} variant="secondary">
+                                            @{username}
+                                          </Badge>
+                                        ))}
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-3 align-top">
+                                      <div className="flex items-center gap-2">
+                                        {showAccountAvatars && profile?.avatar ? (
+                                          <img
+                                            className="h-8 w-8 rounded-full border border-border/70 object-cover"
+                                            src={profile.avatar}
+                                            alt={profileName}
+                                            loading="lazy"
+                                            decoding="async"
+                                            fetchPriority="low"
+                                          />
+                                        ) : (
+                                          <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                                            <UserRound className="h-4 w-4" />
+                                          </div>
+                                        )}
+                                        <div className="min-w-0">
+                                          <p className="truncate text-sm font-medium">{profileName}</p>
+                                          <a
+                                            className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                                            href={profileUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            title={`Open @${profileHandle} on Bluesky`}
                                           >
-                                            {profileBio}
-                                          </p>
+                                            {profileHandle}
+                                            <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
+                                          </a>
+                                          {profileBio ? (
+                                            <p
+                                              className="mt-1 overflow-hidden text-xs text-muted-foreground"
+                                              style={{
+                                                display: '-webkit-box',
+                                                WebkitLineClamp: 2,
+                                                WebkitBoxOrient: 'vertical',
+                                              }}
+                                              title={profileBio}
+                                            >
+                                              {profileBio}
+                                            </p>
+                                          ) : null}
+                                        </div>
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-3 align-top">
+                                      <div className="flex flex-wrap items-center gap-1.5">
+                                        {active ? (
+                                          <Badge variant="warning">Backfilling</Badge>
+                                        ) : queued ? (
+                                          <Badge variant="warning">
+                                            Queued {queuePosition ? `#${queuePosition}` : ''}
+                                          </Badge>
+                                        ) : (
+                                          <Badge variant="success">Active</Badge>
+                                        )}
+                                        {isFediverseBridged ? (
+                                          <Badge variant="success">
+                                            <Link2 className="h-3 w-3" />
+                                            Bridged
+                                          </Badge>
+                                        ) : null}
+                                        {mapping.hasBotLabel ? (
+                                          <Badge variant="outline">
+                                            <Bot className="h-3 w-3" />
+                                            Bot
+                                          </Badge>
                                         ) : null}
                                       </div>
-                                    </div>
-                                  </td>
-                                  <td className="px-2 py-3 align-top">
-                                    <div className="flex flex-wrap items-center gap-1.5">
-                                      {active ? (
-                                        <Badge variant="warning">Backfilling</Badge>
-                                      ) : queued ? (
-                                        <Badge variant="warning">
-                                          Queued {queuePosition ? `#${queuePosition}` : ''}
-                                        </Badge>
-                                      ) : (
-                                        <Badge variant="success">Active</Badge>
-                                      )}
-                                      {isFediverseBridged ? (
-                                        <Badge variant="success">
-                                          <Link2 className="h-3 w-3" />
-                                          Bridged
-                                        </Badge>
-                                      ) : null}
-                                      {mapping.hasBotLabel ? (
-                                        <Badge variant="outline">
-                                          <Bot className="h-3 w-3" />
-                                          Bot
-                                        </Badge>
-                                      ) : null}
-                                    </div>
-                                  </td>
-                                  <td className="px-2 py-3 align-top">
-                                    <div className="flex flex-wrap items-center justify-end gap-1.5">
-                                      {canManageThisMapping && canManageGroupsPermission ? (
-                                        <select
-                                          className={cn(selectClassName, 'h-8 w-28 px-1.5 py-1 text-xs')}
-                                          value={mappingGroup.key}
-                                          disabled={
-                                            isBridgeAllBusy ||
-                                            isAnyBulkAccountsActionBusy ||
-                                            isSyncAllProfilesBusy ||
-                                            Boolean(syncingProfileMappingId)
-                                          }
-                                          title="Move to folder"
-                                          onChange={(event) => {
-                                            void handleAssignMappingGroup(mapping, event.target.value);
-                                          }}
-                                        >
-                                          <option value={DEFAULT_GROUP_KEY}>
-                                            {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
-                                          </option>
-                                          {groupOptions
-                                            .filter((option) => option.key !== DEFAULT_GROUP_KEY)
-                                            .map((option) => (
-                                              <option key={`group-move-${mapping.id}-${option.key}`} value={option.key}>
-                                                {option.emoji} {option.name}
-                                              </option>
-                                            ))}
-                                        </select>
-                                      ) : null}
-                                      {canManageThisMapping ? (
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          disabled={
-                                            isBridgeAllBusy ||
-                                            isAnyBulkAccountsActionBusy ||
-                                            Boolean(syncingProfileMappingId)
-                                          }
-                                          onClick={() => startEditMapping(mapping)}
-                                        >
-                                          Edit
-                                        </Button>
-                                      ) : null}
-                                      {canManageThisMapping ? (
-                                        <DropdownMenu
-                                          align="end"
-                                          triggerClassName="h-9 w-9 px-0"
-                                          trigger={<MoreHorizontal className="h-4 w-4" />}
-                                        >
-                                          {mapping.twitterUsernames.length > 1 ? (
-                                            <div className="space-y-1 px-3 py-2" data-keep-open="true">
-                                              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                                                Profile sync source
-                                              </p>
-                                              <select
-                                                className={cn(selectClassName, 'h-8 text-xs')}
-                                                value={mapping.profileSyncSourceUsername || ''}
-                                                disabled={
-                                                  isBridgeAllBusy ||
-                                                  isAnyBulkAccountsActionBusy ||
-                                                  isSyncAllProfilesBusy ||
-                                                  Boolean(syncingProfileMappingId) ||
-                                                  Boolean(bridgingMappingId)
-                                                }
-                                                onChange={(event) => {
-                                                  void handleUpdateProfileSyncSource(mapping, event.target.value);
-                                                }}
-                                              >
-                                                <option value="">Select sync source</option>
-                                                {mapping.twitterUsernames.map((username) => (
-                                                  <option
-                                                    key={`sync-source-${mapping.id}-${username}`}
-                                                    value={username}
-                                                  >
-                                                    @{username}
-                                                  </option>
-                                                ))}
-                                              </select>
-                                              <DropdownMenuSeparator />
-                                            </div>
-                                          ) : null}
-                                          <DropdownMenuItem
-                                            icon={
-                                              syncingProfile ? (
-                                                <Loader2 className="h-4 w-4 animate-spin" />
-                                              ) : (
-                                                <RefreshCw className="h-4 w-4" />
-                                              )
-                                            }
+                                    </td>
+                                    <td className="px-2 py-3 align-top">
+                                      <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                        {canManageThisMapping && canManageGroupsPermission ? (
+                                          <select
+                                            className={cn(selectClassName, 'h-8 w-28 px-1.5 py-1 text-xs')}
+                                            value={mappingGroup.key}
                                             disabled={
                                               isBridgeAllBusy ||
                                               isAnyBulkAccountsActionBusy ||
-                                              Boolean(syncingProfileMappingId) ||
-                                              Boolean(pullingBioMappingId) ||
                                               isSyncAllProfilesBusy ||
-                                              Boolean(bridgingMappingId)
+                                              Boolean(syncingProfileMappingId)
                                             }
-                                            onClick={() => {
-                                              void handleSyncProfileFromTwitter(mapping);
+                                            title="Move to folder"
+                                            onChange={(event) => {
+                                              void handleAssignMappingGroup(mapping, event.target.value);
                                             }}
                                           >
-                                            Sync Profile
-                                          </DropdownMenuItem>
-                                          <DropdownMenuItem
-                                            icon={
-                                              pullingBio ? (
-                                                <Loader2 className="h-4 w-4 animate-spin" />
-                                              ) : (
-                                                <Download className="h-4 w-4" />
-                                              )
-                                            }
+                                            <option value={DEFAULT_GROUP_KEY}>
+                                              {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
+                                            </option>
+                                            {groupOptions
+                                              .filter((option) => option.key !== DEFAULT_GROUP_KEY)
+                                              .map((option) => (
+                                                <option
+                                                  key={`group-move-${mapping.id}-${option.key}`}
+                                                  value={option.key}
+                                                >
+                                                  {option.emoji} {option.name}
+                                                </option>
+                                              ))}
+                                          </select>
+                                        ) : null}
+                                        {canManageThisMapping ? (
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
                                             disabled={
                                               isBridgeAllBusy ||
                                               isAnyBulkAccountsActionBusy ||
-                                              Boolean(syncingProfileMappingId) ||
-                                              Boolean(pullingBioMappingId) ||
-                                              isSyncAllProfilesBusy ||
-                                              Boolean(bridgingMappingId)
+                                              Boolean(syncingProfileMappingId)
                                             }
-                                            onClick={() => {
-                                              void handlePullTwitterBio(mapping);
-                                            }}
+                                            onClick={() => startEditMapping(mapping)}
                                           >
-                                            Pull Twitter Bio
-                                          </DropdownMenuItem>
-                                          {canUseFediverseBridge && !isFediverseBridged ? (
+                                            Edit
+                                          </Button>
+                                        ) : null}
+                                        {canManageThisMapping ? (
+                                          <DropdownMenu
+                                            align="end"
+                                            triggerClassName="h-9 w-9 px-0"
+                                            trigger={<MoreHorizontal className="h-4 w-4" />}
+                                          >
+                                            {mapping.twitterUsernames.length > 1 ? (
+                                              <div className="space-y-1 px-3 py-2" data-keep-open="true">
+                                                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                                  Profile sync source
+                                                </p>
+                                                <select
+                                                  className={cn(selectClassName, 'h-8 text-xs')}
+                                                  value={mapping.profileSyncSourceUsername || ''}
+                                                  disabled={
+                                                    isBridgeAllBusy ||
+                                                    isAnyBulkAccountsActionBusy ||
+                                                    isSyncAllProfilesBusy ||
+                                                    Boolean(syncingProfileMappingId) ||
+                                                    Boolean(bridgingMappingId)
+                                                  }
+                                                  onChange={(event) => {
+                                                    void handleUpdateProfileSyncSource(mapping, event.target.value);
+                                                  }}
+                                                >
+                                                  <option value="">Select sync source</option>
+                                                  {mapping.twitterUsernames.map((username) => (
+                                                    <option
+                                                      key={`sync-source-${mapping.id}-${username}`}
+                                                      value={username}
+                                                    >
+                                                      @{username}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                                <DropdownMenuSeparator />
+                                              </div>
+                                            ) : null}
                                             <DropdownMenuItem
                                               icon={
-                                                bridging ? (
+                                                syncingProfile ? (
                                                   <Loader2 className="h-4 w-4 animate-spin" />
                                                 ) : (
-                                                  <Repeat2 className="h-4 w-4" />
+                                                  <RefreshCw className="h-4 w-4" />
                                                 )
                                               }
                                               disabled={
                                                 isBridgeAllBusy ||
                                                 isAnyBulkAccountsActionBusy ||
-                                                Boolean(bridgingMappingId) ||
+                                                Boolean(syncingProfileMappingId) ||
+                                                Boolean(pullingBioMappingId) ||
+                                                isSyncAllProfilesBusy ||
+                                                Boolean(bridgingMappingId)
+                                              }
+                                              onClick={() => {
+                                                void handleSyncProfileFromTwitter(mapping);
+                                              }}
+                                            >
+                                              Sync Profile
+                                            </DropdownMenuItem>
+                                            <DropdownMenuItem
+                                              icon={
+                                                pullingBio ? (
+                                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                                ) : (
+                                                  <Download className="h-4 w-4" />
+                                                )
+                                              }
+                                              disabled={
+                                                isBridgeAllBusy ||
+                                                isAnyBulkAccountsActionBusy ||
+                                                Boolean(syncingProfileMappingId) ||
+                                                Boolean(pullingBioMappingId) ||
+                                                isSyncAllProfilesBusy ||
+                                                Boolean(bridgingMappingId)
+                                              }
+                                              onClick={() => {
+                                                void handlePullTwitterBio(mapping);
+                                              }}
+                                            >
+                                              Pull Twitter Bio
+                                            </DropdownMenuItem>
+                                            {canUseFediverseBridge && !isFediverseBridged ? (
+                                              <DropdownMenuItem
+                                                icon={
+                                                  bridging ? (
+                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                  ) : (
+                                                    <Repeat2 className="h-4 w-4" />
+                                                  )
+                                                }
+                                                disabled={
+                                                  isBridgeAllBusy ||
+                                                  isAnyBulkAccountsActionBusy ||
+                                                  Boolean(bridgingMappingId) ||
+                                                  Boolean(syncingProfileMappingId) ||
+                                                  isSyncAllProfilesBusy
+                                                }
+                                                onClick={() => {
+                                                  void handleBridgeToFediverse(mapping);
+                                                }}
+                                              >
+                                                Bridge to Fediverse
+                                              </DropdownMenuItem>
+                                            ) : null}
+                                            {canQueueBackfillsPermission ? (
+                                              <>
+                                                <DropdownMenuSeparator />
+                                                <DropdownMenuItem
+                                                  icon={<Plus className="h-4 w-4" />}
+                                                  disabled={
+                                                    isBridgeAllBusy ||
+                                                    isAnyBulkAccountsActionBusy ||
+                                                    Boolean(syncingProfileMappingId) ||
+                                                    isSyncAllProfilesBusy
+                                                  }
+                                                  onClick={() => {
+                                                    void requestBackfill(mapping.id, 'normal');
+                                                  }}
+                                                >
+                                                  Add to queue
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem
+                                                  icon={<Pin className="h-4 w-4" />}
+                                                  disabled={
+                                                    isBridgeAllBusy ||
+                                                    isAnyBulkAccountsActionBusy ||
+                                                    Boolean(syncingProfileMappingId) ||
+                                                    isSyncAllProfilesBusy
+                                                  }
+                                                  onClick={() => {
+                                                    void requestPinSync(mapping.id);
+                                                  }}
+                                                >
+                                                  Sync Pin
+                                                </DropdownMenuItem>
+                                                {queued && !active ? (
+                                                  <DropdownMenuItem
+                                                    disabled={
+                                                      isBridgeAllBusy ||
+                                                      isAnyBulkAccountsActionBusy ||
+                                                      Boolean(syncingProfileMappingId) ||
+                                                      isSyncAllProfilesBusy
+                                                    }
+                                                    onClick={() => {
+                                                      void cancelQueuedBackfill(mapping.id);
+                                                    }}
+                                                  >
+                                                    Cancel queue
+                                                  </DropdownMenuItem>
+                                                ) : null}
+                                                {isAdmin ? (
+                                                  <DropdownMenuItem
+                                                    disabled={
+                                                      isBridgeAllBusy ||
+                                                      isAnyBulkAccountsActionBusy ||
+                                                      Boolean(syncingProfileMappingId) ||
+                                                      isSyncAllProfilesBusy
+                                                    }
+                                                    onClick={() => {
+                                                      void requestBackfill(mapping.id, 'reset');
+                                                    }}
+                                                  >
+                                                    Reset + Backfill
+                                                  </DropdownMenuItem>
+                                                ) : null}
+                                              </>
+                                            ) : null}
+                                            {isAdmin ? (
+                                              <>
+                                                <DropdownMenuSeparator />
+                                                <DropdownMenuItem
+                                                  destructive
+                                                  icon={<Trash2 className="h-4 w-4" />}
+                                                  disabled={
+                                                    isBridgeAllBusy ||
+                                                    isAnyBulkAccountsActionBusy ||
+                                                    Boolean(syncingProfileMappingId) ||
+                                                    isSyncAllProfilesBusy
+                                                  }
+                                                  onClick={() => {
+                                                    void handleDeleteAllPosts(mapping.id);
+                                                  }}
+                                                >
+                                                  Delete Posts
+                                                </DropdownMenuItem>
+                                              </>
+                                            ) : null}
+                                            <DropdownMenuSeparator />
+                                            <DropdownMenuItem
+                                              destructive
+                                              icon={<Trash2 className="h-4 w-4" />}
+                                              disabled={
+                                                isBridgeAllBusy ||
+                                                isAnyBulkAccountsActionBusy ||
                                                 Boolean(syncingProfileMappingId) ||
                                                 isSyncAllProfilesBusy
                                               }
                                               onClick={() => {
-                                                void handleBridgeToFediverse(mapping);
+                                                void handleDeleteMapping(mapping.id);
                                               }}
                                             >
-                                              Bridge to Fediverse
+                                              Remove mapping
                                             </DropdownMenuItem>
-                                          ) : null}
-                                          {canQueueBackfillsPermission ? (
-                                            <>
-                                              <DropdownMenuSeparator />
-                                              <DropdownMenuItem
-                                                icon={<Plus className="h-4 w-4" />}
-                                                disabled={
-                                                  isBridgeAllBusy ||
-                                                  isAnyBulkAccountsActionBusy ||
-                                                  Boolean(syncingProfileMappingId) ||
-                                                  isSyncAllProfilesBusy
-                                                }
-                                                onClick={() => {
-                                                  void requestBackfill(mapping.id, 'normal');
-                                                }}
-                                              >
-                                                Add to queue
-                                              </DropdownMenuItem>
-                                              <DropdownMenuItem
-                                                icon={<Pin className="h-4 w-4" />}
-                                                disabled={
-                                                  isBridgeAllBusy ||
-                                                  isAnyBulkAccountsActionBusy ||
-                                                  Boolean(syncingProfileMappingId) ||
-                                                  isSyncAllProfilesBusy
-                                                }
-                                                onClick={() => {
-                                                  void requestPinSync(mapping.id);
-                                                }}
-                                              >
-                                                Sync Pin
-                                              </DropdownMenuItem>
-                                              {queued && !active ? (
-                                                <DropdownMenuItem
-                                                  disabled={
-                                                    isBridgeAllBusy ||
-                                                    isAnyBulkAccountsActionBusy ||
-                                                    Boolean(syncingProfileMappingId) ||
-                                                    isSyncAllProfilesBusy
-                                                  }
-                                                  onClick={() => {
-                                                    void cancelQueuedBackfill(mapping.id);
-                                                  }}
-                                                >
-                                                  Cancel queue
-                                                </DropdownMenuItem>
-                                              ) : null}
-                                              {isAdmin ? (
-                                                <DropdownMenuItem
-                                                  disabled={
-                                                    isBridgeAllBusy ||
-                                                    isAnyBulkAccountsActionBusy ||
-                                                    Boolean(syncingProfileMappingId) ||
-                                                    isSyncAllProfilesBusy
-                                                  }
-                                                  onClick={() => {
-                                                    void requestBackfill(mapping.id, 'reset');
-                                                  }}
-                                                >
-                                                  Reset + Backfill
-                                                </DropdownMenuItem>
-                                              ) : null}
-                                            </>
-                                          ) : null}
-                                          {isAdmin ? (
-                                            <>
-                                              <DropdownMenuSeparator />
-                                              <DropdownMenuItem
-                                                destructive
-                                                icon={<Trash2 className="h-4 w-4" />}
-                                                disabled={
-                                                  isBridgeAllBusy ||
-                                                  isAnyBulkAccountsActionBusy ||
-                                                  Boolean(syncingProfileMappingId) ||
-                                                  isSyncAllProfilesBusy
-                                                }
-                                                onClick={() => {
-                                                  void handleDeleteAllPosts(mapping.id);
-                                                }}
-                                              >
-                                                Delete Posts
-                                              </DropdownMenuItem>
-                                            </>
-                                          ) : null}
-                                          <DropdownMenuSeparator />
-                                          <DropdownMenuItem
-                                            destructive
-                                            icon={<Trash2 className="h-4 w-4" />}
-                                            disabled={
-                                              isBridgeAllBusy ||
-                                              isAnyBulkAccountsActionBusy ||
-                                              Boolean(syncingProfileMappingId) ||
-                                              isSyncAllProfilesBusy
-                                            }
-                                            onClick={() => {
-                                              void handleDeleteMapping(mapping.id);
-                                            }}
-                                          >
-                                            Remove mapping
-                                          </DropdownMenuItem>
-                                        </DropdownMenu>
-                                      ) : null}
-                                    </div>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
+                                          </DropdownMenu>
+                                        ) : null}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
                       </Card>
 
                       {/* Mobile Card List View */}
@@ -6783,10 +6847,12 @@ function App() {
               </section>
             ) : null}
             {isAddAccountSheetOpen ? (
+              // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-dismiss; keyboard users close via the sheet's Close button
               <div
                 className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-stretch sm:justify-end animate-backdrop-fade"
                 onClick={closeAddAccountSheet}
               >
+                {/* biome-ignore lint/a11y/useKeyWithClickEvents: click handler only stops backdrop propagation, it is not an interaction */}
                 <aside
                   className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-2xl border border-border/80 bg-card shadow-2xl sm:h-full sm:rounded-none sm:rounded-l-2xl animate-slide-up sm:animate-slide-in-right"
                   onClick={(event) => event.stopPropagation()}

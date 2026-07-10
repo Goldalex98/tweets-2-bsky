@@ -86,7 +86,8 @@ interface ImageEmbed {
   aspectRatio?: AspectRatio;
 }
 
-import { dbService } from './db.js';
+import { dbService, postQueueService } from './db.js';
+import type { QueueBatch } from './db.js';
 
 // ============================================================================
 // State Management
@@ -178,6 +179,60 @@ const sessionCookies = new Map<string, { authToken: string; ct0: string }>();
 let useBackupCredentials = false;
 const lastCreatedAtByBsky = new Map<string, number>();
 const SUBBRANCH_COUNT = 5;
+
+// --- Pipeline tunables (env-overridable) ---
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number(process.env[name]);
+  if (Number.isFinite(raw)) return Math.min(max, Math.max(min, Math.round(raw)));
+  return fallback;
+}
+
+// How many timeline fetches run concurrently during a sweep. All sessions
+// share one Twitter login, so the global scraper gap below is what actually
+// bounds the request rate — this only hides per-request latency.
+const FETCH_CONCURRENCY = envInt('FETCH_CONCURRENCY', 4, 1, 16);
+// How many Bluesky accounts post from the queue at once. Media downloads can
+// buffer hundreds of MB each, so keep this aligned with available RAM.
+const POST_WORKER_CONCURRENCY = envInt('POST_WORKER_CONCURRENCY', 5, 1, 16);
+// Pause between posted tweets within one account. Bluesky's own rate limit is
+// ~1,666 posts/hour per account, so this is cosmetic pacing, not protection —
+// and since it now runs inside a per-account worker it never delays others.
+const POST_PACING_MIN_MS = envInt('POST_PACING_MIN_MS', 3000, 0, 120_000);
+const POST_PACING_MAX_MS = Math.max(envInt('POST_PACING_MAX_MS', 8000, 0, 300_000), POST_PACING_MIN_MS);
+// Retries per queued tweet before it is parked as failed (visible in the UI).
+const QUEUE_MAX_ATTEMPTS = envInt('QUEUE_MAX_ATTEMPTS', 8, 1, 50);
+// Minimum spacing between Twitter API calls across the whole process, plus
+// random jitter. This is the single knob that controls scraper-account risk:
+// every timeline fetch and tweet lookup waits for a slot here.
+const SCRAPER_MIN_GAP_MS = envInt('SCRAPER_MIN_GAP_MS', 800, 0, 60_000);
+const SCRAPER_JITTER_MS = envInt('SCRAPER_JITTER_MS', 400, 0, 60_000);
+
+// Timestamped logging for the pipeline halves, so sweep cadence and queue
+// latency can be read straight off the logs (PM2/Docker don't always add
+// their own timestamps).
+const logPipeline = (tag: 'Sweep' | 'Queue', message: string, isError = false): void => {
+  const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const line = `[${stamp}] [${tag}] ${message}`;
+  if (isError) console.error(line);
+  else console.log(line);
+};
+
+const formatDurationMs = (ms: number): string => {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
+};
+
+let scraperNextSlotMs = 0;
+async function acquireScraperSlot(): Promise<void> {
+  const gap = SCRAPER_MIN_GAP_MS + Math.floor(Math.random() * (SCRAPER_JITTER_MS + 1));
+  const now = Date.now();
+  const slot = Math.max(now, scraperNextSlotMs);
+  scraperNextSlotMs = slot + gap;
+  if (slot > now) {
+    await new Promise((resolve) => setTimeout(resolve, slot - now));
+  }
+}
 
 function getUniqueCreatedAtIso(bskyIdentifier: string, desiredMs: number): string {
   const key = bskyIdentifier.toLowerCase();
@@ -277,6 +332,7 @@ type PinnedTweetLookup = { ok: true; pinnedTweetId?: string } | { ok: false };
 async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<PinnedTweetLookup> {
   // Preferred path, in case the scraper exposes it again in a future version
   try {
+    await acquireScraperSlot();
     const profile = await scraper.getProfile(username);
     if (profile.pinnedTweetIds && profile.pinnedTweetIds.length > 0) {
       return { ok: true, pinnedTweetId: profile.pinnedTweetIds[0] };
@@ -290,8 +346,10 @@ async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<P
   if (!urlTemplate || !credentials) return { ok: false };
 
   try {
+    await acquireScraperSlot();
     const userId = await scraper.getUserIdByScreenName(username);
     const url = urlTemplate.replace(/%22userId%22%3A%22\d+%22/, `%22userId%22%3A%22${userId}%22`);
+    await acquireScraperSlot();
     const res = await axios.get(url, {
       timeout: 15000,
       headers: {
@@ -613,7 +671,7 @@ async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: strin
         }
       }
     } catch (err) {
-      console.warn(`[UPLOAD] ⚠️ Optimization failed:`, (err as Error).message);
+      console.warn('[UPLOAD] ⚠️ Optimization failed:', (err as Error).message);
     }
 
     // Bluesky rejects image blobs over the embed size limit at post time; uploading
@@ -653,12 +711,12 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
   const executablePath = browserPaths.find((p) => fs.existsSync(p));
 
   if (!executablePath) {
-    console.warn(`[SCREENSHOT] ⏩ Skipping screenshot (no Chrome/Chromium found at common paths).`);
+    console.warn('[SCREENSHOT] ⏩ Skipping screenshot (no Chrome/Chromium found at common paths).');
     return null;
   }
 
   console.log(`[SCREENSHOT] 📸 Capturing screenshot for: ${tweetUrl} using ${executablePath}`);
-  let browser;
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
   try {
     browser = await puppeteer.launch({
       executablePath,
@@ -702,7 +760,7 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
       // Small extra wait for images inside iframe
       await new Promise((r) => setTimeout(r, 2000));
     } catch (e) {
-      console.warn(`[SCREENSHOT] ⚠️ Timeout waiting for tweet iframe, taking screenshot anyway.`);
+      console.warn('[SCREENSHOT] ⚠️ Timeout waiting for tweet iframe, taking screenshot anyway.');
     }
 
     const element = await page.$('#container');
@@ -717,7 +775,7 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
       }
     }
   } catch (err) {
-    console.error(`[SCREENSHOT] ❌ Error capturing tweet:`, (err as Error).message);
+    console.error('[SCREENSHOT] ❌ Error capturing tweet:', (err as Error).message);
   } finally {
     if (browser) await browser.close();
   }
@@ -725,7 +783,7 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
 }
 
 async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<BlobRef> {
-  console.log(`[VIDEO] ⏳ Polling for processing completion (this can take a minute)...`);
+  console.log('[VIDEO] ⏳ Polling for processing completion (this can take a minute)...');
   let attempts = 0;
   let blob: BlobRef | undefined;
 
@@ -758,7 +816,7 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<
 
     if (statusData.jobStatus.blob) {
       blob = statusData.jobStatus.blob;
-      console.log(`[VIDEO] 🎉 Video processing complete! Blob ref obtained.`);
+      console.log('[VIDEO] 🎉 Video processing complete! Blob ref obtained.');
     } else if (state === 'JOB_STATE_FAILED') {
       throw new Error(`Video processing failed: ${statusData.jobStatus.error || 'Unknown error'}`);
     } else {
@@ -860,7 +918,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
       lxm: 'com.atproto.repo.uploadBlob',
       exp: Math.floor(Date.now() / 1000) + 60 * 30,
     });
-    console.log(`[VIDEO] ✅ Service auth token obtained.`);
+    console.log('[VIDEO] ✅ Service auth token obtained.');
 
     const token = serviceAuth.token;
 
@@ -893,7 +951,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
           uploadResponse.status === 503 ||
           errorJson.error === 'Server does not have enough capacity to handle uploads'
         ) {
-          console.warn(`[VIDEO] ⚠️ Server overloaded (503). Skipping video upload and falling back to link.`);
+          console.warn('[VIDEO] ⚠️ Server overloaded (503). Skipping video upload and falling back to link.');
           throw new Error('VIDEO_FALLBACK_503');
         }
 
@@ -906,7 +964,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
           (errorJson.jobStatus && errorJson.jobStatus.error === 'unconfirmed_email')
         ) {
           console.error(
-            `[VIDEO] 🛑 BLUESKY ERROR: Your email is unconfirmed. You MUST verify your email on Bluesky to upload videos.`,
+            '[VIDEO] 🛑 BLUESKY ERROR: Your email is unconfirmed. You MUST verify your email on Bluesky to upload videos.',
           );
           throw new Error('Bluesky Email Unconfirmed - Video Upload Rejected');
         }
@@ -929,7 +987,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
     // 3. Poll for processing status
     return await pollForVideoProcessing(agent, jobStatus.jobId);
   } catch (err) {
-    console.error(`[VIDEO] ❌ Error in uploadVideoToBluesky:`, (err as Error).message);
+    console.error('[VIDEO] ❌ Error in uploadVideoToBluesky:', (err as Error).message);
     throw err;
   }
 }
@@ -1006,9 +1064,8 @@ function addTwitterHandleLinkFacets(text: string, facets?: any[]): any[] | undef
   const existingFacets = facets ?? [];
   const newFacets: any[] = [];
   const regex = /@([A-Za-z0-9_]{1,15})/g;
-  let match: RegExpExecArray | null;
 
-  while ((match = regex.exec(text))) {
+  for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
     const handle = match[1];
     if (!handle) continue;
 
@@ -1060,6 +1117,7 @@ async function fetchUserTweets(
   let retries = 3;
   while (retries > 0) {
     try {
+      await acquireScraperSlot();
       const tweets: Tweet[] = [];
       const generator = client.getTweets(username, limit);
       let consecutiveProcessedCount = 0;
@@ -1107,12 +1165,12 @@ async function fetchUserTweets(
 
         // Attempt credential switch if we have backups
         if (await switchCredentials()) {
-          console.log(`🔄 Retrying with new credentials...`);
+          console.log('🔄 Retrying with new credentials...');
           continue; // Retry loop with new credentials
         }
 
         if (retries > 0) {
-          console.log(`Waiting 5s before retry...`);
+          console.log('Waiting 5s before retry...');
           await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
@@ -1253,6 +1311,7 @@ async function processTweets(
         try {
           const scraper = await getTwitterScraper(sessionKey);
           if (scraper) {
+            await acquireScraperSlot();
             const parentRaw = await scraper.getTweet(replyStatusId);
             if (parentRaw) {
               const parentTweet = mapScraperTweetToLocalTweet(parentRaw);
@@ -1403,9 +1462,9 @@ async function processTweets(
         const url = media.media_url_https;
         if (!url) continue;
         try {
-          const highQualityUrl = url.includes('?') ? url.replace('?', ':orig?') : url + ':orig';
+          const highQualityUrl = url.includes('?') ? url.replace('?', ':orig?') : `${url}:orig`;
           console.log(`[${twitterUsername}] 📥 Downloading image (high quality): ${path.basename(highQualityUrl)}`);
-          updateAppStatus({ message: `Downloading high quality image...` });
+          updateAppStatus({ message: 'Downloading high quality image...' });
           const { buffer, mimeType } = await downloadMedia(highQualityUrl);
 
           let blob: BlobRef;
@@ -1416,7 +1475,7 @@ async function processTweets(
             blob = { ref: { toString: () => 'mock-blob' }, mimeType, size: buffer.length } as any;
           } else {
             console.log(`[${twitterUsername}] 📤 Uploading image to Bluesky...`);
-            updateAppStatus({ message: `Uploading image to Bluesky...` });
+            updateAppStatus({ message: 'Uploading image to Bluesky...' });
             blob = await uploadToBluesky(agent, buffer, mimeType);
           }
 
@@ -1435,7 +1494,7 @@ async function processTweets(
           console.error(`[${twitterUsername}] ❌ High quality upload failed:`, (err as Error).message);
           try {
             console.log(`[${twitterUsername}] 🔄 Retrying with standard quality...`);
-            updateAppStatus({ message: `Retrying with standard quality...` });
+            updateAppStatus({ message: 'Retrying with standard quality...' });
             const { buffer, mimeType } = await downloadMedia(url);
             const blob = await uploadToBluesky(agent, buffer, mimeType);
             images.push({ alt: media.ext_alt_text || 'Image from Twitter', image: blob, aspectRatio });
@@ -1483,7 +1542,7 @@ async function processTweets(
                     size: buffer.length,
                   } as any;
                 } else {
-                  updateAppStatus({ message: `Uploading video to Bluesky...` });
+                  updateAppStatus({ message: 'Uploading video to Bluesky...' });
                   videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
                 }
                 videoAspectRatio = aspectRatio;
@@ -1515,11 +1574,11 @@ async function processTweets(
       const cardLinks = detectCarouselLinks(tweet);
       const cardPrimaryLink = detectCardMedia(tweet).link;
       const requestedLinks = [cardPrimaryLink, ...cardLinks].filter(Boolean) as string[];
-      requestedLinks.forEach((link) => {
+      for (const link of requestedLinks) {
         if (!urls.some((u) => u.expanded_url === link || u.url === link)) {
           urls.push({ url: link, expanded_url: link });
         }
-      });
+      }
     }
     text = text.replace(/\n\s*\n/g, '\n\n').trim();
     text = addTextFallbacks(text);
@@ -1812,8 +1871,9 @@ async function processTweets(
       mirroredCount++;
     }
 
-    // Add a random delay between 5s and 15s to be more human-like
-    const wait = Math.floor(Math.random() * 10000) + 5000;
+    // Human-like pause between posts. This only delays the current account's
+    // queue worker — other accounts keep posting in parallel.
+    const wait = POST_PACING_MIN_MS + Math.floor(Math.random() * (POST_PACING_MAX_MS - POST_PACING_MIN_MS + 1));
     console.log(`[${twitterUsername}] 😴 Pacing: Waiting ${wait / 1000}s before next tweet.`);
     updateJob(mirrorJobId, {
       message: `Mirrored tweet ${tweetId}. Pacing ${Math.round(wait / 1000)}s before the next one`,
@@ -1828,6 +1888,368 @@ async function processTweets(
 
 import { getAgent } from './bsky.js';
 
+// ============================================================================
+// Fetch Sweep + Post Queue Workers (daemon mode)
+//
+// The daemon splits work into two independent halves:
+//   1. Fetch sweep — Twitter-side only. Checks every source account's
+//      timeline (rate-limited by acquireScraperSlot) and drops new tweets
+//      into the durable post_queue table. Fast and cheap, so the configured
+//      check interval actually holds regardless of how much is being posted.
+//   2. Post workers — Bluesky-side only. Drain the queue with one worker per
+//      mapping (threads stay ordered) and several mappings in parallel, so a
+//      slow video upload or a long thread never delays other accounts.
+// One-shot CLI modes (--run-once, --dry-run, --backfill-mapping,
+// --import-history) keep the original inline fetch→post path.
+// ============================================================================
+
+// Filters a fetched timeline down to enqueueable tweets and inserts them.
+// Retweets are recorded as skipped immediately so they never occupy queue
+// space; author-mismatch entries (stray timeline injections) are dropped.
+function enqueueTweetsForMapping(
+  mapping: AccountMapping,
+  twitterUsername: string,
+  tweets: Tweet[],
+  kind: 'scheduled' | 'backfill',
+  requestId?: string,
+): number {
+  const inputs = [];
+  for (const tweet of tweets) {
+    const tweetId = tweet.id_str || tweet.id;
+    if (!tweetId) continue;
+    const author = tweet.user?.screen_name?.toLowerCase();
+    if (author && author !== twitterUsername.toLowerCase()) continue;
+    const isRetweet = tweet.isRetweet || tweet.retweeted_status_id_str || (tweet.text || '').startsWith('RT @');
+    if (isRetweet) {
+      saveProcessedTweet(twitterUsername, mapping.bskyIdentifier, tweetId, { skipped: true, text: tweet.text });
+      continue;
+    }
+    inputs.push({
+      twitter_id: tweetId,
+      bsky_identifier: mapping.bskyIdentifier,
+      mapping_id: mapping.id,
+      twitter_username: twitterUsername,
+      kind,
+      request_id: requestId,
+      tweet_json: JSON.stringify(tweet),
+      tweet_text: (tweet.full_text || tweet.text || '').slice(0, 300),
+    });
+  }
+  return postQueueService.enqueue(inputs);
+}
+
+// Fetch-only pass over one source account. Returns tweets that are neither in
+// processed_tweets nor already sitting in the queue.
+async function sweepAccountForNewTweets(
+  mapping: AccountMapping,
+  twitterUsername: string,
+  sessionKey: string,
+): Promise<Tweet[]> {
+  const seenIds = new Set(Object.keys(loadProcessedTweets(mapping.bskyIdentifier)));
+  for (const id of postQueueService.getQueuedIdSet(mapping.bskyIdentifier)) {
+    seenIds.add(id);
+  }
+
+  const tweets = await fetchUserTweets(twitterUsername, 50, seenIds, sessionKey);
+  if (tweets.length === 0) return [];
+
+  // The fetched window carries the isPin flag, so pin changes sync for free.
+  await maybeSyncPinnedTweetFromTimeline(mapping, twitterUsername, tweets, false, getMappingLogPrefix(mapping));
+
+  return tweets.filter((tweet) => {
+    const tweetId = tweet.id_str || tweet.id;
+    return Boolean(tweetId) && !seenIds.has(String(tweetId));
+  });
+}
+
+// Sweep every enabled source account and enqueue whatever is new. Returns the
+// number of tweets queued.
+async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
+  const accounts: { mapping: AccountMapping; twitterUsername: string }[] = [];
+  for (const mapping of mappings) {
+    if (!mapping.enabled) continue;
+    for (const twitterUsername of mapping.twitterUsernames) {
+      if (twitterUsername) accounts.push({ mapping, twitterUsername });
+    }
+  }
+  if (accounts.length === 0) {
+    logPipeline('Sweep', 'ℹ️ No enabled source accounts to check.');
+    return 0;
+  }
+
+  const fetchTimeoutMs = envInt('SWEEP_FETCH_TIMEOUT_MS', 180_000, 30_000, 1_800_000);
+  const startedAt = Date.now();
+  logPipeline('Sweep', `🔎 Checking ${accounts.length} source account(s) (concurrency ${FETCH_CONCURRENCY}).`);
+
+  let cursor = 0;
+  let enqueuedTotal = 0;
+  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, accounts.length) }, async (_, slot) => {
+    const sessionKey = `sweep-${slot + 1}`;
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= accounts.length) break;
+      const ref = accounts[index];
+      if (!ref) continue;
+      const { mapping, twitterUsername } = ref;
+      const checkJobId = `check:${mapping.id}:${twitterUsername.toLowerCase()}`;
+      try {
+        updateJob(checkJobId, {
+          kind: 'checking',
+          account: twitterUsername,
+          target: mapping.bskyIdentifier,
+          mappingId: mapping.id,
+          message: 'Checking for new tweets',
+        });
+        const fresh = await withTimeout(
+          sweepAccountForNewTweets(mapping, twitterUsername, sessionKey),
+          fetchTimeoutMs,
+          `[${twitterUsername}] Sweep fetch timed out after ${Math.round(fetchTimeoutMs / 1000)}s`,
+        );
+        if (fresh.length > 0) {
+          const inserted = enqueueTweetsForMapping(mapping, twitterUsername, fresh, 'scheduled');
+          enqueuedTotal += inserted;
+          if (inserted > 0) {
+            logPipeline(
+              'Sweep',
+              `📬 @${twitterUsername} → ${mapping.bskyIdentifier}: queued ${inserted} new tweet(s).`,
+            );
+          }
+        }
+      } catch (err) {
+        logPipeline('Sweep', `❌ @${twitterUsername} → ${mapping.bskyIdentifier}: ${describeError(err)}`, true);
+      } finally {
+        updateJob(checkJobId, null);
+      }
+    }
+  });
+  await Promise.all(workers);
+
+  // Daily housekeeping self-gates on 24h timestamps, so this is a cheap no-op
+  // on almost every sweep.
+  for (const mapping of mappings) {
+    if (!mapping.enabled) continue;
+    const logPrefix = getMappingLogPrefix(mapping);
+    try {
+      await maybeSyncMappingProfileInBackground(mapping, false, logPrefix);
+      await maybeSyncPinnedTweetDaily(mapping, false, 'sweep-1', logPrefix);
+    } catch (err) {
+      console.error(`${logPrefix} ❌ Daily sync failed: ${describeError(err)}`);
+    }
+  }
+
+  const counts = postQueueService.getCounts();
+  logPipeline(
+    'Sweep',
+    `✅ Swept ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; ` +
+      `queued ${enqueuedTotal} new tweet(s). Queue now: ${counts.pending} pending, ${counts.processing} posting, ${counts.failed} failed.`,
+  );
+  return enqueuedTotal;
+}
+
+// Fetch phase of a queued backfill: pull history for one source account and
+// hand it to the post queue instead of posting inline.
+async function fetchAndEnqueueBackfill(
+  mapping: AccountMapping,
+  twitterUsername: string,
+  limit: number,
+  ignoreCancellation: boolean,
+  requestId: string | undefined,
+  sessionKey: string,
+): Promise<void> {
+  const backfillJobId = `backfill:${mapping.bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`;
+  updateJob(backfillJobId, {
+    kind: 'backfilling',
+    account: twitterUsername,
+    target: mapping.bskyIdentifier,
+    mappingId: mapping.id,
+    message: `Fetching up to ${limit || 100} tweets from the timeline`,
+  });
+
+  try {
+    const client = await getTwitterScraper(sessionKey);
+    if (!client) {
+      console.error(`[${twitterUsername}] Twitter credentials not set. Cannot backfill.`);
+      return;
+    }
+
+    const seenIds = new Set(Object.keys(loadProcessedTweets(mapping.bskyIdentifier)));
+    for (const id of postQueueService.getQueuedIdSet(mapping.bskyIdentifier)) {
+      seenIds.add(id);
+    }
+
+    const fetchLimit = limit || 100;
+    const found: Tweet[] = [];
+    await acquireScraperSlot();
+    const generator = client.getTweets(twitterUsername, fetchLimit);
+    for await (const scraperTweet of generator) {
+      if (!ignoreCancellation) {
+        const stillPending = getPendingBackfills().some(
+          (b) => b.id === mapping.id && (!requestId || b.requestId === requestId),
+        );
+        if (!stillPending) {
+          console.log(`[${twitterUsername}] 🛑 Backfill cancelled.`);
+          return;
+        }
+      }
+      const tweet = mapScraperTweetToLocalTweet(scraperTweet);
+      const tweetId = tweet.id_str || tweet.id;
+      if (!tweetId || seenIds.has(tweetId)) continue;
+      seenIds.add(tweetId);
+      found.push(tweet);
+      if (found.length >= fetchLimit) break;
+    }
+
+    const queued = enqueueTweetsForMapping(mapping, twitterUsername, found, 'backfill', requestId);
+    console.log(`[${twitterUsername}] 📬 Backfill queued ${queued} tweet(s) for ${mapping.bskyIdentifier}.`);
+  } catch (err) {
+    console.error(`[${twitterUsername}] ❌ Backfill fetch failed: ${describeError(err)}`);
+  } finally {
+    updateJob(backfillJobId, null);
+  }
+}
+
+// --- Post workers ---
+
+const activePostMappings = new Set<string>();
+let postWorkersStarted = false;
+
+function queueBatchTimeoutMs(itemCount: number): number {
+  // Pacing plus media work make big batches legitimately slow; scale the
+  // watchdog with batch size so it only catches genuine hangs.
+  return Math.max(resolveScheduledAccountTimeoutMs(), itemCount * 120_000);
+}
+
+async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionKey: string): Promise<void> {
+  const logPrefix = getMappingLogPrefix(mapping);
+  let batchError = 'Tweet was not posted (see logs for details)';
+  const startedAt = Date.now();
+  const oldestEnqueuedAt = Math.min(...batch.items.map((item) => item.enqueued_at));
+  logPipeline(
+    'Queue',
+    `▶️ @${batch.twitter_username} → ${mapping.bskyIdentifier}: posting ${batch.items.length} tweet(s) ` +
+      `(oldest waited ${formatDurationMs(startedAt - oldestEnqueuedAt)} in queue).`,
+  );
+
+  try {
+    const agent = await getAgent(mapping);
+    if (!agent) {
+      throw new Error('Bluesky login failed');
+    }
+
+    const tweets: Tweet[] = [];
+    for (const item of batch.items) {
+      try {
+        tweets.push(JSON.parse(item.tweet_json) as Tweet);
+      } catch {
+        console.error(`${logPrefix} ⚠️ Corrupt queued payload for tweet ${item.twitter_id}; it will be retried out.`);
+      }
+    }
+
+    // Queue batches arrive oldest-first; processTweets expects timeline order
+    // (newest first) and reverses internally.
+    tweets.reverse();
+
+    await withTimeout(
+      processTweets(
+        agent,
+        batch.twitter_username,
+        batch.bsky_identifier,
+        tweets,
+        false,
+        undefined,
+        undefined,
+        sessionKey,
+      ),
+      queueBatchTimeoutMs(batch.items.length),
+      `[${batch.twitter_username}] Posting batch timed out`,
+    );
+  } catch (err) {
+    batchError = describeError(err);
+    console.error(`${logPrefix} ❌ Post batch failed: ${batchError}`);
+  } finally {
+    // Settle every claimed row. processed_tweets is the source of truth:
+    // whatever landed there is done, everything else retries with backoff.
+    let posted = 0;
+    let skipped = 0;
+    let retrying = 0;
+    let parked = 0;
+    for (const item of batch.items) {
+      const record = dbService.getTweet(item.twitter_id, item.bsky_identifier);
+      if (record) {
+        postQueueService.markDone(item.twitter_id, item.bsky_identifier);
+        if (record.status === 'migrated') posted += 1;
+        else skipped += 1;
+      } else {
+        postQueueService.releaseForRetry(item, batchError, QUEUE_MAX_ATTEMPTS);
+        if (item.attempts + 1 >= QUEUE_MAX_ATTEMPTS) parked += 1;
+        else retrying += 1;
+      }
+    }
+    const parts = [`${posted} posted`];
+    if (skipped > 0) parts.push(`${skipped} skipped`);
+    if (retrying > 0) parts.push(`${retrying} will retry`);
+    if (parked > 0) parts.push(`${parked} parked as failed`);
+    logPipeline(
+      'Queue',
+      `${retrying + parked > 0 ? '⚠️' : '✅'} @${batch.twitter_username} → ${mapping.bskyIdentifier}: ` +
+        `${parts.join(', ')} in ${formatDurationMs(Date.now() - startedAt)}.`,
+      retrying + parked > 0,
+    );
+  }
+}
+
+function startPostWorkers(): void {
+  if (postWorkersStarted) return;
+  postWorkersStarted = true;
+  logPipeline('Queue', `🚚 Post workers started (up to ${POST_WORKER_CONCURRENCY} accounts posting in parallel).`);
+
+  void (async () => {
+    while (true) {
+      let launched = false;
+      try {
+        const config = getConfig();
+        const allowedMappingIds = new Set(config.mappings.filter((m) => m.enabled).map((m) => m.id));
+
+        while (activePostMappings.size < POST_WORKER_CONCURRENCY) {
+          const batch = postQueueService.claimNextBatch(activePostMappings, allowedMappingIds);
+          if (!batch) break;
+          const mapping = config.mappings.find((m) => m.id === batch.mapping_id);
+          if (!mapping) {
+            // Mapping was deleted while its tweets sat in the queue.
+            postQueueService.deleteByMappingId(batch.mapping_id);
+            continue;
+          }
+
+          activePostMappings.add(mapping.id);
+          launched = true;
+          // Same job id processTweets uses, so its progress updates land here.
+          const jobId = `mirror:${batch.bsky_identifier}:${batch.twitter_username}`;
+          updateJob(jobId, {
+            kind: 'mirroring',
+            account: batch.twitter_username,
+            target: mapping.bskyIdentifier,
+            mappingId: mapping.id,
+            message: `Posting ${batch.items.length} queued tweet(s)`,
+            processedCount: 0,
+            totalCount: batch.items.length,
+          });
+
+          void runPostBatch(mapping, batch, 'post-worker')
+            .catch((err) => logPipeline('Queue', `❌ Post worker crashed: ${describeError(err)}`, true))
+            .finally(() => {
+              activePostMappings.delete(mapping.id);
+              updateJob(jobId, null);
+            });
+        }
+      } catch (err) {
+        logPipeline('Queue', `❌ Worker scheduler error: ${describeError(err)}`, true);
+      }
+      await new Promise((resolve) => setTimeout(resolve, launched ? 250 : 1000));
+    }
+  })();
+}
+
 async function importHistory(
   twitterUsername: string,
   bskyIdentifier: string,
@@ -1836,6 +2258,9 @@ async function importHistory(
   ignoreCancellation = false,
   requestId?: string,
   sessionKey = 'default',
+  // 'queue' hands the fetched tweets to the durable post queue (daemon mode);
+  // 'inline' posts them before returning (CLI one-shots and dry runs).
+  delivery: 'inline' | 'queue' = 'inline',
 ): Promise<void> {
   const config = getConfig();
   const mapping = config.mappings.find((m) =>
@@ -1843,6 +2268,11 @@ async function importHistory(
   );
   if (!mapping) {
     console.error(`No mapping found for twitter username: ${twitterUsername}`);
+    return;
+  }
+
+  if (delivery === 'queue' && !dryRun) {
+    await fetchAndEnqueueBackfill(mapping, twitterUsername, limit, ignoreCancellation, requestId, sessionKey);
     return;
   }
 
@@ -1871,7 +2301,7 @@ async function importHistory(
   const processedTweets = loadProcessedTweets(bskyIdentifier);
 
   console.log(`Fetching tweets for ${twitterUsername}...`);
-  updateAppStatus({ message: `Fetching tweets...` });
+  updateAppStatus({ message: 'Fetching tweets...' });
   const backfillJobId = `backfill:${bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`;
   updateJob(backfillJobId, {
     kind: 'backfilling',
@@ -1889,6 +2319,7 @@ async function importHistory(
         // limit defaults to 15 in function signature, but for history import we might want more.
         // However, the generator will fetch as much as we ask.
         const fetchLimit = limit || 100;
+        await acquireScraperSlot();
         const generator = client.getTweets(twitterUsername, fetchLimit);
 
         for await (const scraperTweet of generator) {
@@ -2144,6 +2575,7 @@ async function setBlueskyPinnedPost(
     if (ref) {
       profile.pinnedPost = { uri: ref.uri, cid: ref.cid };
     } else {
+      // biome-ignore lint/performance/noDelete: the key must be absent from the atproto record; an explicit undefined could still trip lexicon validation
       delete profile.pinnedPost;
     }
     return profile;
@@ -2204,7 +2636,6 @@ async function applyPinnedTweet(
 // Zero-extra-request pin sync: the timeline fetch already marks the pinned
 // tweet (isPin), so scheduled cycles can mirror pin changes for free.
 async function maybeSyncPinnedTweetFromTimeline(
-  agent: BskyAgent,
   mapping: AccountMapping,
   twitterUsername: string,
   tweets: Tweet[],
@@ -2223,6 +2654,15 @@ async function maybeSyncPinnedTweetFromTimeline(
   // absence is NOT proof of an unpin (old pins never appear here). Never unpin
   // from this path — the explicit pin-sync button does an authoritative check.
   if (!pinnedTweetId) {
+    return;
+  }
+  if (pinnedTweetId === mapping.lastPinnedTweetId) {
+    return;
+  }
+
+  // Only log in to Bluesky once we know the pin actually changed.
+  const agent = await getAgent(mapping);
+  if (!agent) {
     return;
   }
 
@@ -2285,6 +2725,7 @@ async function syncPinnedTweetViaProfile(
     let record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
     if (!record || record.status !== 'migrated') {
       console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} not mirrored yet. Backfilling it now...`);
+      await acquireScraperSlot();
       const rawPinned = await scraper.getTweet(pinnedTweetId);
       if (rawPinned) {
         // getTweet resolves the whole self-thread; mirror all of it so the pinned
@@ -2423,6 +2864,7 @@ async function runAccountTask(
   backfillRequest?: PendingBackfill,
   dryRun = false,
   sessionKey = 'default',
+  backfillDelivery: 'inline' | 'queue' = 'inline',
 ) {
   const logPrefix = getMappingLogPrefix(mapping);
   const existingTask = activeTasks.get(mapping.id);
@@ -2528,6 +2970,7 @@ async function runAccountTask(
                 false,
                 backfillReq.requestId,
                 sessionKey,
+                backfillDelivery,
               ),
               backfillAccountTimeoutMs,
               `[${twitterUsername}] Backfill timed out after ${Math.round(backfillAccountTimeoutMs / 1000)}s`,
@@ -2551,11 +2994,14 @@ async function runAccountTask(
           state: 'idle',
           processedCount: accountCount,
           totalCount: accountCount,
-          message: `Backfill complete for ${mapping.bskyIdentifier}`,
+          message:
+            backfillDelivery === 'queue'
+              ? `Backfill queued for ${mapping.bskyIdentifier}; posting continues in the background`
+              : `Backfill complete for ${mapping.bskyIdentifier}`,
           backfillMappingId: undefined,
           backfillRequestId: undefined,
         });
-        console.log(`${logPrefix} Backfill complete.`);
+        console.log(`${logPrefix} Backfill ${backfillDelivery === 'queue' ? 'fetch queued' : 'complete'}.`);
       } else {
         updateAppStatus({ backfillMappingId: undefined, backfillRequestId: undefined });
         const scheduledAccountTimeoutMs = resolveScheduledAccountTimeoutMs();
@@ -2613,7 +3059,7 @@ async function runAccountTask(
               `[${twitterUsername}] Scheduled processing timed out after ${Math.round(scheduledAccountTimeoutMs / 1000)}s`,
             );
 
-            await maybeSyncPinnedTweetFromTimeline(agent, mapping, twitterUsername, tweets, dryRun, logPrefix);
+            await maybeSyncPinnedTweetFromTimeline(mapping, twitterUsername, tweets, dryRun, logPrefix);
           } catch (err) {
             sourceErrors += 1;
             console.error(`${logPrefix} ❌ Error checking @${twitterUsername}: ${describeError(err)}`);
@@ -2793,7 +3239,32 @@ async function main(): Promise<void> {
   }
 
   console.log(`Scheduler started. Base interval: ${config.checkIntervalMinutes} minutes.`);
+  console.log(
+    `Pipeline config: fetch concurrency ${FETCH_CONCURRENCY}, scraper gap ${SCRAPER_MIN_GAP_MS}+${SCRAPER_JITTER_MS}ms jitter, ` +
+      `post workers ${POST_WORKER_CONCURRENCY}, pacing ${POST_PACING_MIN_MS}-${POST_PACING_MAX_MS}ms, max attempts ${QUEUE_MAX_ATTEMPTS}.`,
+  );
   updateLastCheckTime(); // Initialize next time
+
+  // Durable queue startup: re-arm anything a previous run left mid-flight and
+  // drop failed rows old enough that nobody is coming back for them.
+  const recovered = postQueueService.resetProcessing();
+  if (recovered > 0) {
+    logPipeline('Queue', `♻️ Recovered ${recovered} in-flight tweet(s) from a previous run.`);
+  }
+  postQueueService.purgeFailedOlderThan(14 * 24 * 60 * 60 * 1000);
+  // Drop rows whose mapping was deleted while the app was down — nothing can
+  // ever claim them.
+  const knownMappingIds = new Set(getConfig().mappings.map((mapping) => mapping.id));
+  for (const entry of postQueueService.getCounts().perMapping) {
+    if (!knownMappingIds.has(entry.mapping_id)) {
+      postQueueService.deleteByMappingId(entry.mapping_id);
+    }
+  }
+  const startupCounts = postQueueService.getCounts();
+  if (startupCounts.pending > 0) {
+    logPipeline('Queue', `📬 ${startupCounts.pending} tweet(s) already queued; post workers will resume.`);
+  }
+  startPostWorkers();
 
   let deferredScheduledRun = false;
   let lastWakeSignal = getSchedulerWakeSignal();
@@ -2882,12 +3353,12 @@ async function main(): Promise<void> {
 
       const backfillTasks = selectedBackfills.map(async (backfill, branchIndex) => {
         const mapping = findMappingById(config.mappings, backfill.id);
-        if (mapping && mapping.enabled) {
+        if (mapping?.enabled) {
           const limit = backfill.limit || 15;
           console.log(
             `[Scheduler] 🚧 Backfill subbranch ${branchIndex + 1}/${SUBBRANCH_COUNT}: ${mapping.bskyIdentifier} (limit ${limit})`,
           );
-          await runAccountTask(mapping, backfill, options.dryRun, `subbranch-${branchIndex + 1}`);
+          await runAccountTask(mapping, backfill, options.dryRun, `subbranch-${branchIndex + 1}`, 'queue');
         } else {
           clearBackfill(backfill.id, backfill.requestId);
         }
@@ -2918,8 +3389,9 @@ async function main(): Promise<void> {
       deferredScheduledRun = false;
       updateLastCheckTime();
 
-      await runMappingsWithSubbranches(config.mappings, options.dryRun, 'scheduled');
-      console.log(`[Scheduler] ✅ All subbranches for this cycle complete.`);
+      // Fetch-only sweep: new tweets land in the post queue and the workers
+      // post them in parallel, so the next check is never blocked by posting.
+      await runFetchSweep(config.mappings);
 
       updateAppStatus({ state: 'idle', message: 'Scheduled checks complete' });
     }
