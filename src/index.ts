@@ -1695,6 +1695,12 @@ async function processTweets(
       text = `${text}\n\n${pollNote}`.trim();
     }
 
+    // Prefix source account on thread roots only so multi-source → one Bluesky
+    // mappings stay attributable without stamping every reply in a thread.
+    if (!replyParentInfo) {
+      text = `Source: @${twitterUsername} on X\n\n${text}`.trim();
+    }
+
     // 4. Threading and Posting
     const chunks = splitText(text);
     console.log(`[${twitterUsername}] 📝 Splitting text into ${chunks.length} chunks.`);
