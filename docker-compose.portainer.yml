@@ -1,0 +1,33 @@
+services:
+  tweets-2-bsky:
+    image: ghcr.io/goldalex98/tweets-2-bsky:latest
+    pull_policy: always
+
+    container_name: tweets-2-bsky
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    environment:
+      TWEETS2BSKY_DATA_DIR: /app/data
+      JWT_SECRET: ${JWT_SECRET}
+      TZ: America/New_York
+
+    expose:
+      - "3000"
+
+    volumes:
+      - tweets2bsky_data:/app/data
+
+    networks:
+      - proxy
+
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+volumes:
+  tweets2bsky_data:
+    name: tweets2bsky_data
+
+networks:
+  proxy:
+    external: true
