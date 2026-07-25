@@ -36,16 +36,43 @@ interface DbLike {
   pragma?: (sql: string) => unknown;
 }
 
+function renameSyncWithRetry(from: string, to: string, attempts = 8): void {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (error) {
+      lastError = error;
+      // Windows often holds a brief exclusive lock after process start; retry
+      // with a short busy-wait before declaring the restore unrecoverable.
+      const waitUntil = Date.now() + 40 * attempt;
+      while (Date.now() < waitUntil) {
+        // intentional busy-wait: module load cannot await
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 if (fs.existsSync(PENDING_DB_RESTORE_PATH)) {
   const previousPath = `${DB_PATH}.pre-restore-${Date.now()}.bak`;
-  if (fs.existsSync(DB_PATH)) fs.renameSync(DB_PATH, previousPath);
+  if (fs.existsSync(DB_PATH)) renameSyncWithRetry(DB_PATH, previousPath);
   try {
-    fs.renameSync(PENDING_DB_RESTORE_PATH, DB_PATH);
+    renameSyncWithRetry(PENDING_DB_RESTORE_PATH, DB_PATH);
     for (const suffix of ['-wal', '-shm']) fs.rmSync(`${DB_PATH}${suffix}`, { force: true });
     console.warn(`♻️ Applied staged database restore. Previous database: ${previousPath}`);
   } catch (error) {
-    if (fs.existsSync(previousPath) && !fs.existsSync(DB_PATH)) fs.renameSync(previousPath, DB_PATH);
-    throw new Error(`Could not apply staged database restore: ${(error as Error).message}`);
+    if (fs.existsSync(previousPath) && !fs.existsSync(DB_PATH)) {
+      try {
+        renameSyncWithRetry(previousPath, DB_PATH);
+      } catch {
+        // Keep the original failure; operator must stop the service and swap manually.
+      }
+    }
+    throw new Error(
+      `Could not apply staged database restore: ${(error as Error).message}. If the database file is locked (common on Windows), stop every tweets-2-bsky process, then rename ${PENDING_DB_RESTORE_PATH} over ${DB_PATH} and restart.`,
+    );
   }
 }
 

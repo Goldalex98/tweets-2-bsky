@@ -21,8 +21,10 @@ import {
   applyRestoreBundle,
   createBackupBundle,
   getBackupStorageStatus,
+  isRestoreRestartRequired,
   validateBackupBundle,
 } from './backup-service.js';
+import { assertProductionEncryptionConfigured } from './secret-storage.js';
 import { clearCachedAgent, deleteAllPosts } from './bsky.js';
 import { previewTextCapability, testAIProvider } from './ai-manager.js';
 import { contentSha256 } from './content-dedup.js';
@@ -197,9 +199,10 @@ const POST_VIEW_CACHE_TTL_MS = 60_000;
 const PROFILE_CACHE_TTL_MS = 5 * 60_000;
 const RESERVED_UNGROUPED_KEY = 'ungrouped';
 const SERVER_STARTED_AT = Date.now();
-const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MIN_LENGTH = 12;
 const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000;
-const AUTH_RATE_MAX_ATTEMPTS = 30;
+// In-process only: each replica has its own counter. Tighten at the reverse proxy for multi-instance deploys.
+const AUTH_RATE_MAX_ATTEMPTS = 10;
 const AUTH_COOKIE_NAME = 't2b_session';
 const CSRF_COOKIE_NAME = 't2b_csrf';
 const DEFAULT_BODY_LIMIT = '128kb';
@@ -276,6 +279,7 @@ function resolveJwtSecret(): string {
 }
 
 const JWT_SECRET = resolveJwtSecret();
+assertProductionEncryptionConfigured();
 
 interface CacheEntry<T> {
   value: T;
@@ -1090,8 +1094,16 @@ function buildEnrichedPost(activity: ProcessedTweet, postView: AppViewPost | und
 }
 
 // In-memory state for triggers and scheduling
-let lastCheckTime = 0;
-let nextCheckTime = getNextCheckTimestamp(Date.now(), getSchedulerIntervalMinutes(getConfig()));
+let lastCheckTime = (() => {
+  const maxSourceCheck = runtimeStateService
+    .listSources()
+    .reduce((max, state) => Math.max(max, state.lastCheckAt ?? 0), 0);
+  return maxSourceCheck > 0 ? maxSourceCheck : 0;
+})();
+let nextCheckTime = getNextCheckTimestamp(
+  lastCheckTime || Date.now(),
+  getSchedulerIntervalMinutes(getConfig()),
+);
 export interface PendingBackfill {
   id: string;
   sourceUsernames?: string[];
@@ -1252,6 +1264,35 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// After restore apply, config is live but SQLite swap waits for restart. Block
+// mutating APIs so workers cannot run new config against the old database.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (!req.path.startsWith('/api')) {
+    next();
+    return;
+  }
+  if (!isRestoreRestartRequired()) {
+    next();
+    return;
+  }
+  const method = req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    next();
+    return;
+  }
+  if (method === 'POST' && (req.path === '/api/logout' || req.path === '/api/login')) {
+    next();
+    return;
+  }
+  res.status(503).json({
+    error: {
+      code: 'RESTART_REQUIRED',
+      message:
+        'A database restore is pending. Restart the service to finish applying it before making changes.',
+    },
+  });
+});
+
 const getPublicHealth = () => {
   const database = databaseHealthService.check();
   let scheduler: 'running' | 'disabled' | 'error' = 'error';
@@ -1260,11 +1301,13 @@ const getPublicHealth = () => {
   } catch {
     scheduler = 'error';
   }
+  const restartRequired = isRestoreRestartRequired();
   return {
     status: database.status === 'ok' && scheduler !== 'error' ? ('ok' as const) : ('error' as const),
     uptimeSeconds: Math.max(0, Math.floor((Date.now() - SERVER_STARTED_AT) / 1000)),
     database: database.status,
     scheduler,
+    restartRequired,
   };
 };
 
@@ -1275,10 +1318,12 @@ app.get('/healthz', (_req, res) => {
 
 app.get('/readyz', (_req, res) => {
   const health = getPublicHealth();
-  res.status(health.status === 'ok' ? 200 : 503).json({
-    status: health.status === 'ok' ? 'ready' : 'not-ready',
+  const ready = health.status === 'ok' && !health.restartRequired;
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not-ready',
     database: health.database,
     scheduler: health.scheduler,
+    restartRequired: health.restartRequired,
   });
 });
 
@@ -2426,6 +2471,7 @@ const settingsRouterDependencies = {
   },
   getNextCheckTimestamp,
   signalSchedulerWake,
+  isRestoreRestartRequired,
   getErrorMessage,
   validateWebhookTarget,
   sanitizeError: (error: unknown) =>
@@ -2564,60 +2610,73 @@ app.get('/api/auth/bootstrap-status', (_req, res) => {
   res.json({ bootstrapOpen: config.users.length === 0 });
 });
 
-app.post('/api/register', authRateLimiter, async (req, res) => {
-  const config = getConfig();
-  if (config.users.length > 0) {
-    res.status(403).json({ error: 'Registration is disabled. Ask an admin to create your account.' });
-    return;
-  }
+let bootstrapRegisterChain: Promise<void> = Promise.resolve();
 
-  const email = normalizeEmail(req.body?.email);
-  const username = normalizeUsername(req.body?.username);
-  const password = req.body?.password;
+app.post('/api/register', authRateLimiter, (req, res) => {
+  const work = bootstrapRegisterChain.then(async () => {
+    const config = getConfig();
+    if (config.users.length > 0) {
+      res.status(403).json({ error: 'Registration is disabled. Ask an admin to create your account.' });
+      return;
+    }
 
-  if (!email && !username) {
-    res.status(400).json({ error: 'Username or email is required.' });
-    return;
-  }
+    const email = normalizeEmail(req.body?.email);
+    const username = normalizeUsername(req.body?.username);
+    const password = req.body?.password;
 
-  const passwordError = validatePassword(password);
-  if (passwordError) {
-    res.status(400).json({ error: passwordError });
-    return;
-  }
+    if (!email && !username) {
+      res.status(400).json({ error: 'Username or email is required.' });
+      return;
+    }
 
-  const uniqueIdentityError = ensureUniqueIdentity(config, undefined, username, email);
-  if (uniqueIdentityError) {
-    res.status(400).json({ error: uniqueIdentityError });
-    return;
-  }
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      res.status(400).json({ error: passwordError });
+      return;
+    }
 
-  const nowIso = new Date().toISOString();
-  const newUser: WebUser = {
-    id: randomUUID(),
-    username,
-    email,
-    passwordHash: await bcrypt.hash(password, 10),
-    tokenVersion: 0,
-    role: 'admin',
-    permissions: { ...ADMIN_USER_PERMISSIONS },
-    createdAt: nowIso,
-    updatedAt: nowIso,
-  };
+    const uniqueIdentityError = ensureUniqueIdentity(config, undefined, username, email);
+    if (uniqueIdentityError) {
+      res.status(400).json({ error: uniqueIdentityError });
+      return;
+    }
 
-  config.users.push(newUser);
+    const nowIso = new Date().toISOString();
+    const newUser: WebUser = {
+      id: randomUUID(),
+      username,
+      email,
+      passwordHash: await bcrypt.hash(password, 10),
+      tokenVersion: 0,
+      role: 'admin',
+      permissions: { ...ADMIN_USER_PERMISSIONS },
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
 
-  if (config.mappings.length > 0) {
-    config.mappings = config.mappings.map((mapping) => ({
-      ...mapping,
-      createdByUserId: mapping.createdByUserId || newUser.id,
-      owner: mapping.owner || getUserPublicLabel(newUser),
-    }));
-  }
+    config.users.push(newUser);
 
-  saveConfig(config);
+    if (config.mappings.length > 0) {
+      config.mappings = config.mappings.map((mapping) => ({
+        ...mapping,
+        createdByUserId: mapping.createdByUserId || newUser.id,
+        owner: mapping.owner || getUserPublicLabel(newUser),
+      }));
+    }
 
-  res.json({ success: true });
+    saveConfig(config);
+
+    res.json({ success: true });
+  });
+  bootstrapRegisterChain = work.then(
+    () => undefined,
+    () => undefined,
+  );
+  void work.catch((error: unknown) => {
+    if (!res.headersSent) {
+      sendSafeError(res, 500, 'REGISTER_FAILED', error);
+    }
+  });
 });
 
 app.post('/api/login', authRateLimiter, async (req, res) => {

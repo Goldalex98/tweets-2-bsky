@@ -18,6 +18,7 @@ export interface SettingsRouterDependencies {
   setNextCheckTime(value: number): void;
   getNextCheckTimestamp(now: number, intervalMinutes: number): number;
   signalSchedulerWake(reason: 'reschedule'): void;
+  isRestoreRestartRequired?(): boolean;
   getErrorMessage(error: unknown, fallback: string): string;
   validateWebhookTarget(url: string, allowPrivate: boolean): Promise<unknown>;
   sanitizeError(error: unknown): string;
@@ -47,6 +48,7 @@ export function buildSchedulerSettingsResponse(dependencies: SettingsRouterDepen
     runOnStartup: config.scheduler.runOnStartup,
     lastCheckTime: runtime.lastCheckTime || null,
     nextCheckTime: config.scheduler.enabled ? runtime.nextCheckTime : null,
+    restartRequired: dependencies.isRestoreRestartRequired?.() ?? false,
     enabledSourceCount,
     estimatedChecksPerHour: config.scheduler.enabled
       ? Math.round((enabledSourceCount * 60) / intervalMinutes)

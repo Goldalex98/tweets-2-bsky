@@ -115,7 +115,17 @@ export default function DashboardApp() {
   const [schedulerSaving, setSchedulerSaving] = useState(false);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [confirmation, setConfirmation] = useState<ConfirmationState | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
   const noticeTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    void fetch('/readyz')
+      .then(async (response) => {
+        const payload = (await response.json()) as { restartRequired?: boolean };
+        if (payload.restartRequired) setRestartRequired(true);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const showNotice = useCallback((tone: Notice['tone'], message: string) => {
     setNotice({ tone, message });
@@ -862,15 +872,34 @@ export default function DashboardApp() {
 
   if (!session.token) {
     return (
-      <AuthScreen
-        view={session.authView}
-        bootstrapOpen={session.bootstrapOpen}
-        loading={session.loading}
-        error={session.error}
-        onViewChange={session.setAuthView}
-        onLogin={session.login}
-        onRegister={session.register}
-      />
+      <div className="min-h-screen bg-muted/20 text-foreground">
+        {restartRequired ? (
+          <div className="mx-auto max-w-lg px-4 pt-6">
+            <RecoveryBanners
+              notices={[
+                {
+                  id: 'restart-required',
+                  severity: 'danger',
+                  title: 'Restart required',
+                  detail:
+                    'A backup restore staged a new database. Restart the service to finish applying it before making changes.',
+                  actionLabel: 'Dismiss',
+                  onAction: () => undefined,
+                },
+              ]}
+            />
+          </div>
+        ) : null}
+        <AuthScreen
+          view={session.authView}
+          bootstrapOpen={session.bootstrapOpen}
+          loading={session.loading}
+          error={session.error}
+          onViewChange={session.setAuthView}
+          onLogin={session.login}
+          onRegister={session.register}
+        />
+      </div>
     );
   }
 
@@ -916,6 +945,20 @@ export default function DashboardApp() {
     return notices;
   }, []);
 
+  if (restartRequired || settings.scheduler?.restartRequired) {
+    recoveryNotices.unshift({
+      id: 'restart-required',
+      severity: 'danger',
+      title: 'Restart required',
+      detail:
+        'A backup restore staged a new database. Restart the service to finish applying it. Configuration changes stay blocked until then.',
+      actionLabel: 'Open data settings',
+      onAction: () => {
+        setActiveTab('settings');
+        setSettingsSection('data');
+      },
+    });
+  }
   // Wrapped through `run` so a rejected mutation never escapes as an unhandled
   // promise from BlueskyAccountsSection's fire-and-forget call sites.
   const blueskyAccountActions = {
@@ -1400,15 +1443,16 @@ export default function DashboardApp() {
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (!file) return;
-          void askConfirmation({ title: 'Restore backup?', description: 'Current configuration and runtime data may be replaced.', confirmLabel: 'Restore backup', destructive: true }).then((ok) => {
+          void askConfirmation({ title: 'Restore backup?', description: 'Current configuration and runtime data may be replaced. You will need to restart the service afterward.', confirmLabel: 'Restore backup', destructive: true }).then((ok) => {
             if (!ok) return;
             void run(async () => {
               const version = settings.scheduler;
               if (!version) throw new Error('Settings are still loading; retry the restore in a moment.');
               const bundle = JSON.parse(await file.text());
-              await api.post('/api/backup/restore/apply', withConfigVersion({ bundle }, version));
-              await Promise.all([destinations.fetchDestinations(), settings.refresh(), activity.refresh()]);
-            }, 'Backup restored.');
+              const response = await api.post<{ restartRequired?: boolean }>('/api/backup/restore/apply', withConfigVersion({ bundle }, version));
+              if (response.data?.restartRequired !== false) setRestartRequired(true);
+              showNotice('success', 'Backup restored. Restart the service now to finish applying the database.');
+            });
           });
           event.target.value = '';
         }}

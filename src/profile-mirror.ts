@@ -5,6 +5,8 @@ import axios from 'axios';
 import sharp from 'sharp';
 import { getConfig } from './config-manager.js';
 import type { ProfileMutationDecision } from './profile-policy.js';
+import { fetchPublicHttps } from './public-http-fetch.js';
+import { resolveWebhookTarget, sendPinnedHttpsRequest } from './webhook.js';
 
 const PROFILE_IMAGE_MAX_BYTES = 1_000_000;
 const PROFILE_IMAGE_TARGET_BYTES = 950 * 1024;
@@ -272,15 +274,6 @@ const stripTrackingParamsFromUrl = (rawUrl: string): string => {
   }
 };
 
-const resolveRedirectUrl = (response: unknown): string | undefined => {
-  if (!isRecord(response)) {
-    return undefined;
-  }
-  const request = isRecord(response.request) ? response.request : undefined;
-  const res = request && isRecord(request.res) ? request.res : undefined;
-  return normalizeOptionalString(res?.responseUrl);
-};
-
 const decodeEscapedUrlValue = (value: string): string => {
   return value
     .replace(/\\\//g, '/')
@@ -314,44 +307,40 @@ const extractRedirectUrlFromHtml = (html: string): string | undefined => {
 
 const expandShortUrl = async (shortUrl: string): Promise<string> => {
   try {
-    const head = await axios.head(shortUrl, {
+    const head = await fetchPublicHttps(shortUrl, {
+      method: 'HEAD',
+      timeoutMs: 8_000,
       maxRedirects: 8,
-      timeout: 8_000,
+      maxResponseBytes: 8 * 1024,
       headers: URL_EXPANSION_HEADERS,
-      validateStatus: (status) => status >= 200 && status < 400,
     });
-    const resolvedByHead = resolveRedirectUrl(head);
-    if (resolvedByHead && resolvedByHead !== shortUrl) {
-      return resolvedByHead;
+    if (head.url && head.url !== shortUrl) {
+      return head.url;
     }
   } catch {
     // Fall through to GET-based resolver.
   }
 
   try {
-    const get = await axios.get<string>(shortUrl, {
+    const get = await fetchPublicHttps(shortUrl, {
+      method: 'GET',
+      timeoutMs: 8_000,
       maxRedirects: 8,
-      timeout: 8_000,
+      maxResponseBytes: 512 * 1024,
       headers: URL_EXPANSION_HEADERS,
-      maxContentLength: 512 * 1024,
-      validateStatus: (status) => status >= 200 && status < 400,
     });
-
-    const resolvedByGet = resolveRedirectUrl(get);
-    if (resolvedByGet && resolvedByGet !== shortUrl) {
-      return resolvedByGet;
+    if (get.url && get.url !== shortUrl) {
+      return get.url;
     }
-
-    const html = typeof get.data === 'string' ? get.data : '';
+    const html = get.body.toString('utf8');
     const resolvedFromHtml = extractRedirectUrlFromHtml(html);
     if (resolvedFromHtml) {
       return resolvedFromHtml;
     }
+    return get.url || shortUrl;
   } catch {
     return shortUrl;
   }
-
-  return shortUrl;
 };
 
 const expandAndNormalizeTwitterBioLinks = async (biography?: string): Promise<string | undefined> => {
@@ -903,14 +892,22 @@ export const getFediverseBridgeStatus = async (args: {
 };
 
 const uploadProfileImage = async (agent: BskyAgent, url: string, kind: ProfileImageKind): Promise<BlobRef> => {
-  const response = await axios.get<ArrayBuffer>(url, {
-    responseType: 'arraybuffer',
-    timeout: 20_000,
-    maxContentLength: 10 * 1024 * 1024,
+  const resolved = await resolveWebhookTarget(url, false);
+  const response = await sendPinnedHttpsRequest({
+    target: resolved.target,
+    ...(resolved.pinnedAddress ? { pinnedAddress: resolved.pinnedAddress } : {}),
+    ...(resolved.family ? { family: resolved.family } : {}),
+    method: 'GET',
+    headers: { 'user-agent': 'tweets-2-bsky-profile/1' },
+    timeoutMs: 20_000,
+    maxResponseBytes: 10 * 1024 * 1024,
   });
+  if (response.status !== 200) {
+    throw new Error(`Profile image request returned HTTP ${response.status}.`);
+  }
 
-  const mimeType = detectImageMimeType(response.headers?.['content-type'], url);
-  const sourceBuffer = Buffer.from(response.data);
+  const mimeType = detectImageMimeType(response.headers['content-type'], url);
+  const sourceBuffer = response.body;
   const processed = await compressProfileImage(sourceBuffer, mimeType, kind);
   const { data } = await agent.uploadBlob(processed.buffer, {
     encoding: processed.mimeType,

@@ -129,6 +129,16 @@ export const systemWebhookDependencies: WebhookDependencies = {
 
 const BLOCKED_HOSTNAMES = new Set(['localhost', 'localhost.localdomain']);
 
+function isBlockedWebhookHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return (
+    BLOCKED_HOSTNAMES.has(host) ||
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local')
+  );
+}
+
 /** Bun may keep IPv6 brackets in `URL.hostname`; Node/WHATWG strip them. */
 export function unwrapIpLiteralHostname(hostname: string): string {
   if (hostname.startsWith('[') && hostname.endsWith(']')) {
@@ -177,7 +187,7 @@ export async function resolveWebhookTarget(
   }
   if (target.protocol !== 'https:') throw new Error('Webhook URL must use HTTPS.');
   if (target.username || target.password) throw new Error('Webhook URL must not contain credentials.');
-  if (BLOCKED_HOSTNAMES.has(target.hostname.toLowerCase())) {
+  if (isBlockedWebhookHostname(target.hostname)) {
     if (!allowPrivate) throw new Error('Webhook URL resolves to a private network.');
     return { target };
   }
