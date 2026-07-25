@@ -251,17 +251,21 @@ async function mockDashboard(page: Page) {
   return mutations;
 }
 
+function sourcesField(page: Page) {
+  return page.getByRole('textbox', { name: 'X Sources', exact: true });
+}
+
 test('cookie session, CSRF, and aggregate onboarding stay mutation-safe', async ({ page }) => {
   const mutations = await mockDashboard(page);
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Overview', level: 1 })).toBeVisible();
 
   await page.getByRole('button', { name: 'Run now' }).click();
   await expect.poll(() => mutations.find((entry) => entry.path === '/api/run-now')?.csrf).toBe('mock-csrf');
 
   await page.getByRole('button', { name: 'Add Bluesky destination' }).click();
   await expect(page.getByRole('dialog', { name: 'Create Bluesky Destination' })).toBeVisible();
-  await page.getByLabel('X Sources').fill('@alpha\nbeta, alpha');
+  await sourcesField(page).fill('@alpha\nbeta, alpha');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('button', { name: 'Next' }).click();
   await page.getByRole('button', { name: 'Next' }).click();
@@ -282,9 +286,9 @@ test('aggregate onboarding sends the attribution and profile policy chosen in th
 
   const dialog = page.getByRole('dialog', { name: 'Create Bluesky Destination' });
   await expect(dialog).toBeVisible();
-  await expect(page.getByLabel('X Sources')).toBeFocused();
+  await expect(sourcesField(page)).toBeFocused();
 
-  await page.getByLabel('X Sources').fill('alpha beta gamma');
+  await sourcesField(page).fill('alpha beta gamma');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('button', { name: 'Next' }).click();
   await page.getByRole('button', { name: 'Next' }).click();
@@ -317,7 +321,7 @@ test('a one-to-one destination keeps attribution off unless the operator opts in
   await page.goto('/');
   await page.getByRole('button', { name: 'Add Bluesky destination' }).click();
 
-  await page.getByLabel('X Sources').fill('alpha');
+  await sourcesField(page).fill('alpha');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('button', { name: 'Next' }).click();
   await page.getByRole('button', { name: 'Next' }).click();
@@ -358,6 +362,9 @@ test('responsive keyboard and operational redaction smoke', async ({ page }) => 
   await mockDashboard(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
+  // Headless Chromium ignores Tab until the document has been focused.
+  await expect(page.getByRole('heading', { name: 'Overview', level: 1 })).toBeVisible();
+  await page.locator('body').focus();
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus')).toBeVisible();
 

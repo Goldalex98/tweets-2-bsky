@@ -574,7 +574,7 @@ export default function DashboardApp() {
       <div className="mx-auto grid max-w-[1600px] gap-6 px-4 py-6 lg:grid-cols-[220px_1fr]">
         <Card className="h-fit lg:sticky lg:top-24"><CardContent className="p-2"><NavList items={dashboardTabs} activeId={activeTab} onSelect={setActiveTab} ariaLabel="Dashboard navigation" /></CardContent></Card>
         <main className="min-w-0">
-          <div className="mb-5"><h1 className="text-2xl font-semibold">{dashboardTabs.find((tab) => tab.id === activeTab)?.label}</h1></div>
+          <div className="mb-5"><h1 id="page-title" className="text-2xl font-semibold">{dashboardTabs.find((tab) => tab.id === activeTab)?.label}</h1></div>
           {notice ? <div role={notice.tone === 'error' ? 'alert' : 'status'} className={`mb-4 rounded-md border p-3 text-sm ${notice.tone === 'error' ? 'border-red-300 text-red-700 dark:text-red-300' : ''}`}>{notice.message}</div> : null}
           <OperationsStatus
             jobs={activity.status?.activeJobs || []}

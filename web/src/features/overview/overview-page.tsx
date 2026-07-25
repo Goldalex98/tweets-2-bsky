@@ -57,8 +57,7 @@ export function OverviewPage({
   }
 
   return (
-    <section className="space-y-6 animate-fade-in" aria-labelledby="overview-title">
-      <h2 id="overview-title" className="sr-only">Overview</h2>
+    <section className="space-y-6 animate-fade-in" aria-labelledby="page-title">
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <Metric label="Mapped Accounts" value={mappings.length} />
         <Metric label="Bot-Labeled" value={mappings.filter((mapping) => mapping.hasBotLabel === true).length} />

@@ -54,6 +54,7 @@ Cursor agent shells on Windows sometimes omit the user `Path` even when Bun is i
    ```
 3. Do not switch the project to npm/Node because of a stale agent `PATH`.
 4. Windows Bun installs often ship only `bun.exe` (no `bunx` shim). Prefer `bun x <pkg>` over `bunx`. If `bunx` is missing, use `bun x`, or create `%USERPROFILE%\.bun\bin\bunx.exe` as a hardlink/copy of `bun.exe` (Bun switches to bunx mode from argv0).
+5. Do not run Playwright under Bun on Windows (`TimeoutError: launch ... remote-debugging-pipe`). Use `bun run test:e2e`, which delegates to Node via `scripts/run-playwright.ts`.
 
 ## Generated and sensitive paths
 

@@ -19,6 +19,8 @@ bun run build
 
 E2E tests build and serve the dashboard locally, use an isolated browser context, and intercept every application API. X, Bluesky, AI/provider, webhook, and media calls are mocked; no real credentials or Internet access are required. Playwright traces, screenshots, and videos are retained only on failure and are ignored by Git.
 
+On Windows, `bun run test:e2e` launches Playwright under Node (not Bun) because Bun cannot complete the browser CDP pipe handshake. Install Node, or set `PLAYWRIGHT_NODE` to a `node.exe` path — see `TROUBLESHOOTING.md`.
+
 ## Release validation
 
 `bun run release:validate` runs the copied-volume migration matrix, database migration/checkpoint tests, backup/restore tests, health/queue tests, and mocked E2E suite. Add `--docker` where Docker is available:

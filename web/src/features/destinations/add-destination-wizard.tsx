@@ -103,7 +103,7 @@ function SourcesStep(props: AddDestinationWizardProps) {
         </p>
         <Button onClick={props.onAddSources} disabled={!props.sourceInput.trim()}>Add</Button>
       </div>
-      <ul className="flex flex-wrap gap-2" aria-label={`Selected X sources (${props.sources.length})`}>
+      <ul className="flex flex-wrap gap-2" aria-label={`Selected sources (${props.sources.length})`}>
         {props.sources.map((username) => (
           <li key={username} className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm">
             @{username}

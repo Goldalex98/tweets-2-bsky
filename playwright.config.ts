@@ -18,10 +18,7 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: {
-        ...devices['Desktop Chrome'],
-        channel: process.platform === 'win32' && !process.env.CI ? 'msedge' : undefined,
-      },
+      use: { ...devices['Desktop Chrome'] },
     },
   ],
   webServer: {

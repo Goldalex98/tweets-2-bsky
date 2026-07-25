@@ -195,6 +195,18 @@ bun run test:e2e
 CI uses `playwright install chromium --with-deps`. Browser traces and
 screenshots appear only after failures under ignored test artifact paths.
 
+### Playwright launch times out on Windows (`Timeout 30000ms exceeded`)
+
+If the call log shows `<launched> pid=...` and then hangs with no further browser
+output, Bun is driving Playwright. On Windows, Bun's child-process pipes cannot
+complete Playwright's `--remote-debugging-pipe` handshake (bundled Chromium and
+system Edge both hang the same way).
+
+`bun run test:e2e` runs Playwright under real Node on Windows via
+`scripts/run-playwright.ts`. Prefer a Node on `PATH`, or set `PLAYWRIGHT_NODE` to
+a `node.exe` (Cursor ships one under
+`%LOCALAPPDATA%\Programs\cursor\resources\app\resources\helpers\node.exe`).
+
 ### Docker: updating image
 In Docker mode, update by pulling a newer image and recreating the container with the same volume.
 `/api/update` / `update.sh` are source-install workflows.
