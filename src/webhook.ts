@@ -129,8 +129,16 @@ export const systemWebhookDependencies: WebhookDependencies = {
 
 const BLOCKED_HOSTNAMES = new Set(['localhost', 'localhost.localdomain']);
 
+/** Bun may keep IPv6 brackets in `URL.hostname`; Node/WHATWG strip them. */
+export function unwrapIpLiteralHostname(hostname: string): string {
+  if (hostname.startsWith('[') && hostname.endsWith(']')) {
+    return hostname.slice(1, -1);
+  }
+  return hostname;
+}
+
 export function isPrivateNetworkAddress(address: string): boolean {
-  const normalized = address.toLowerCase().split('%')[0] ?? '';
+  const normalized = unwrapIpLiteralHostname(address).toLowerCase().split('%')[0] ?? '';
   if (normalized === '::1' || normalized === '::' || normalized.startsWith('fe80:')) return true;
   if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
   if (normalized.startsWith('::ffff:')) return isPrivateNetworkAddress(normalized.slice(7));
@@ -174,9 +182,10 @@ export async function resolveWebhookTarget(
     return { target };
   }
   if (allowPrivate) return { target };
-  const literalFamily = isIP(target.hostname);
+  const hostLiteral = unwrapIpLiteralHostname(target.hostname);
+  const literalFamily = isIP(hostLiteral);
   const addresses = literalFamily
-    ? [{ address: target.hostname, family: literalFamily }]
+    ? [{ address: hostLiteral, family: literalFamily }]
     : await resolver(target.hostname);
   if (addresses.length === 0 || addresses.some((entry) => isPrivateNetworkAddress(entry.address))) {
     throw new Error('Webhook URL resolves to a private network.');

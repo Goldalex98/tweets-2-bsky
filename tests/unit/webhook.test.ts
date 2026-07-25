@@ -7,6 +7,7 @@ import {
   isPrivateNetworkAddress,
   resolveWebhookTarget,
   sendPinnedHttpsRequest,
+  unwrapIpLiteralHostname,
   validateWebhookTarget,
 } from '../../src/webhook.js';
 
@@ -48,11 +49,21 @@ describe('webhook notifications', () => {
     expect(isPrivateNetworkAddress('127.0.0.1')).toBe(true);
     expect(isPrivateNetworkAddress('10.2.3.4')).toBe(true);
     expect(isPrivateNetworkAddress('8.8.8.8')).toBe(false);
+    expect(isPrivateNetworkAddress('::1')).toBe(true);
+    expect(isPrivateNetworkAddress('[::1]')).toBe(true);
+    expect(unwrapIpLiteralHostname('[::1]')).toBe('::1');
     await expect(validateWebhookTarget('http://example.test/x', false, async () => [])).rejects.toThrow('HTTPS');
     await expect(
       validateWebhookTarget('https://internal.test/x', false, async () => [
         { address: '192.168.1.5', family: 4 },
       ]),
+    ).rejects.toThrow('private network');
+    // Bracketed IPv6 literals must be classified offline — Bun keeps brackets in
+    // URL.hostname, and DNS for "[::1]" can ENOTFOUND on Linux CI runners.
+    await expect(
+      validateWebhookTarget('https://[::1]/x', false, async () => {
+        throw new Error('resolver must not be called for IPv6 literals');
+      }),
     ).rejects.toThrow('private network');
     expect(
       (
