@@ -101,6 +101,25 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     [],
   );
 
+  /**
+   * Repoint a destination at a managed Bluesky account. Mirror history stays
+   * with the destination, so the new account only receives future posts.
+   */
+  const linkBlueskyAccount = useCallback(
+    async (mapping: AccountMapping, bskyAccountId: string) => {
+      const response = await withConflictRefresh(() =>
+        api.patch<{ destination: AccountMapping }>(
+          `/api/destinations/${mapping.id}/bluesky-account`,
+          withConfigVersion({ bskyAccountId }, mapping),
+        ),
+      );
+      const updated = response.data.destination;
+      setMappings((current) => current.map((entry) => (entry.id === mapping.id ? updated : entry)));
+      return updated;
+    },
+    [withConflictRefresh],
+  );
+
   const updateDestination = useCallback(
     async (mapping: AccountMapping, payload: object) => {
       const response = await withConflictRefresh(() =>
@@ -260,6 +279,7 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     fetchDestinations,
     fetchGroups,
     createDestination,
+    linkBlueskyAccount,
     updateDestination,
     syncSources,
     patchSource,

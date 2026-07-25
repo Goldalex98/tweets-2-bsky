@@ -255,6 +255,16 @@ Fix: open the destination editor → Operations → **Mark as reviewed**. Non-ad
 
 By design. App passwords live under Settings → Bluesky accounts. The destination Overview tab shows a read-only linked-account card (handle, DID, service URL, credential status). Use **Manage in Settings** to rotate or validate the password.
 
+### Need to change which Bluesky account a destination posts to
+
+Open the destination editor → Overview → **Posting account**, pick an account, and confirm. Only accounts that are not already linked to another destination appear, because a managed account backs at most one destination. Switching keeps the destination's queue and mirror history, so already-mirrored posts are not delivered again to the new account.
+
+If the account you want is already linked elsewhere, the request returns `409 ACCOUNT_ALREADY_LINKED`; move or delete that other destination first. If no accounts are listed, add one under Settings → Bluesky accounts.
+
+### Create-destination wizard only offers new credentials
+
+The wizard's Bluesky step defaults to the existing-account picker, but falls back to the credential form when no unlinked managed accounts exist. Add an account under Settings → Bluesky accounts to populate the picker, or continue with credentials: they are validated and saved as a managed account before the destination is linked, so nothing stays as an unmanaged inline password. Entering credentials for an account that already exists returns `409 ACCOUNT_EXISTS` — select that account instead.
+
 ### Polls look different on Bluesky
 
 Bluesky has no poll embed. Mirrored poll posts become a text note (choices + link

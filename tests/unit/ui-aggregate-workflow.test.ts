@@ -39,6 +39,21 @@ test('destination onboarding exposes aggregate review and safe backfill defaults
   expect(settingsSource).toContain('value.intervalMinutes');
 });
 
+test('destination onboarding can reuse a managed Bluesky account', () => {
+  expect(destinationWizardSource).toContain('Use an existing Bluesky account');
+  expect(destinationWizardSource).toContain('Connect a new Bluesky account');
+  expect(destinationWizardSource).toContain('BlueskyAccountSelect');
+  expect(destinationWizardSource).toContain('Settings → Bluesky accounts');
+});
+
+test('the destination editor can repoint a destination at another managed account', () => {
+  expect(destinationAccountCardSource).toContain('BlueskyAccountSelect');
+  expect(destinationAccountCardSource).toContain('Switch account');
+  expect(destinationAccountCardSource).toContain('Link account');
+  // Repointing uses the dedicated link route, never the credential route.
+  expect(destinationHookSource).toContain('/bluesky-account');
+});
+
 test('source edits stay isolated and credentials leave the destination editor', () => {
   expect(destinationHookSource).toContain('/sources/${encodeURIComponent(username)}');
   expect(destinationHookSource).not.toContain('/credentials');

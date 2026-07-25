@@ -15,6 +15,7 @@ import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { NavList, type NavListItem } from '../../components/ui/nav-list';
 import { normalizeTwitterUsername, validateAttributionTemplate } from '../../lib/dashboard-utils';
+import type { BlueskyAccountView } from '../bluesky-accounts/types';
 import { ConnectionList } from './connection-list';
 import { ContentPolicyPanel } from './content-policy-panel';
 import { DestinationAccountCard } from './destination-account-card';
@@ -56,6 +57,10 @@ interface EditDestinationDialogProps {
   parseSummary: SourceParseSummary;
   busy: boolean;
   canReviewMigration: boolean;
+  /** Managed accounts that are unlinked, plus this destination's own account. */
+  blueskyAccounts?: readonly BlueskyAccountView[];
+  canChangeAccount?: boolean;
+  onChangeAccount?(accountId: string): void;
   onClose(): void;
   onSubmit(event: FormEvent<HTMLFormElement>): void;
   onFormChange(update: (current: MappingFormState) => MappingFormState): void;
@@ -240,7 +245,14 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
           >
             {props.mapping && activeSection === 'overview' ? (
               <div className="space-y-5">
-                <DestinationAccountCard mapping={props.mapping} onManageAccount={requestManageAccount} />
+                <DestinationAccountCard
+                  mapping={props.mapping}
+                  accounts={props.blueskyAccounts}
+                  canChangeAccount={props.canChangeAccount}
+                  busy={props.busy}
+                  onManageAccount={requestManageAccount}
+                  onChangeAccount={props.onChangeAccount}
+                />
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
                     <Label htmlFor="edit-owner">Owner</Label>

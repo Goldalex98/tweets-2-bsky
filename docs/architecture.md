@@ -99,6 +99,8 @@ A Source represents one normalized X, webhook, or API identity and its source-sp
 
 A Destination represents exactly one Bluesky identity and queue/history key. Credentials are resolved from the linked `BlueskyAccount`. Credential validation remains read-only against Bluesky.
 
+A destination may be repointed at a different managed account with `PATCH /api/destinations/:id/bluesky-account`. The target account must not already be linked elsewhere, identity fields are copied from the account, any legacy inline password is dropped, and `storageKey` is deliberately left untouched so queue and processed-history rows stay with the destination: the newly linked account receives future posts only. Destination creation (`POST /api/destinations`) accepts either `bskyAccountId` for an existing unlinked account or `bskyIdentifier` + `bskyPassword`, which is validated and saved as a new managed account before linking. Destinations are therefore never created with an unmanaged inline credential.
+
 ### Route
 
 A Route connects one Source to one Destination and holds relationship-specific controls such as enabled state, routing, moderation, duplicate suppression, and immediate/digest delivery. Multiple routes feed an aggregate destination without duplicating destination credentials.

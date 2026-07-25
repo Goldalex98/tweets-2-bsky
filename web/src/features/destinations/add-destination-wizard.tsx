@@ -9,8 +9,12 @@ import {
   describeAttribution,
   validateAttributionTemplate,
 } from '../../lib/dashboard-utils';
+import type { BlueskyAccountView } from '../bluesky-accounts/types';
+import { BlueskyAccountSelect } from './bluesky-account-select';
 import { AttributionPolicyFields, ProfileMutationField } from './policy-controls';
 import type { MappingFormState, SourceParseSummary } from './types';
+
+export type NewDestinationAccountMode = 'existing' | 'new';
 
 interface AddDestinationWizardProps {
   open: boolean;
@@ -21,6 +25,14 @@ interface AddDestinationWizardProps {
   form: MappingFormState;
   busy: boolean;
   validating: boolean;
+  /** Managed accounts that are not linked to a destination yet. */
+  blueskyAccounts: readonly BlueskyAccountView[];
+  accountsLoading: boolean;
+  accountMode: NewDestinationAccountMode;
+  accountId: string;
+  onAccountModeChange(mode: NewDestinationAccountMode): void;
+  onAccountIdChange(accountId: string): void;
+  onManageAccounts(): void;
   onClose(): void;
   onSourceInputChange(value: string): void;
   onAddSources(): void;
@@ -136,27 +148,124 @@ function CreateStep(props: AddDestinationWizardProps) {
   );
 }
 
+function selectedWizardAccount(props: AddDestinationWizardProps): BlueskyAccountView | undefined {
+  return props.blueskyAccounts.find((account) => account.id === props.accountId);
+}
+
 function CredentialsStep(props: AddDestinationWizardProps) {
+  const useExisting = props.accountMode === 'existing';
+  const selected = selectedWizardAccount(props);
+  const noAccounts = !props.accountsLoading && props.blueskyAccounts.length === 0;
   return (
     <div className="space-y-4">
-      <div><h3 className="font-semibold">Bluesky credentials</h3><p className="text-sm text-muted-foreground">Validation is read-only and never changes the account profile.</p></div>
-      <Label htmlFor="new-bsky-identifier">Bluesky Identifier</Label>
-      <Input id="new-bsky-identifier" data-autofocus value={props.form.bskyIdentifier} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyIdentifier: event.target.value }))} required />
-      <Label htmlFor="new-bsky-password">Bluesky App Password</Label>
-      <Input id="new-bsky-password" type="password" value={props.form.bskyPassword} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyPassword: event.target.value }))} required />
-      <Label htmlFor="new-bsky-service">Bluesky Service URL</Label>
-      <Input id="new-bsky-service" value={props.form.bskyServiceUrl} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyServiceUrl: event.target.value }))} />
+      <div>
+        <h3 className="font-semibold">Bluesky account</h3>
+        <p className="text-sm text-muted-foreground">
+          Destinations post through a managed Bluesky account. Accounts and their app passwords are managed in
+          Settings → Bluesky accounts. Validation is read-only and never changes the account profile.
+        </p>
+      </div>
+      <fieldset className="space-y-2">
+        <legend className="mb-2 text-sm font-medium">How should this destination authenticate?</legend>
+        <label className="flex items-start gap-2 rounded-md border p-3 text-sm" htmlFor="new-bsky-mode-existing">
+          <input
+            id="new-bsky-mode-existing"
+            type="radio"
+            name="new-bsky-account-mode"
+            className="mt-1"
+            checked={useExisting}
+            onChange={() => props.onAccountModeChange('existing')}
+          />
+          <span>
+            <span className="block font-medium">Use an existing Bluesky account</span>
+            <span className="block text-xs text-muted-foreground">
+              Choose an account already saved in Settings. Accounts linked to another destination are not listed.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 rounded-md border p-3 text-sm" htmlFor="new-bsky-mode-new">
+          <input
+            id="new-bsky-mode-new"
+            type="radio"
+            name="new-bsky-account-mode"
+            className="mt-1"
+            checked={!useExisting}
+            onChange={() => props.onAccountModeChange('new')}
+          />
+          <span>
+            <span className="block font-medium">Connect a new Bluesky account</span>
+            <span className="block text-xs text-muted-foreground">
+              Enter credentials once. The account is saved to Settings → Bluesky accounts and linked to this
+              destination.
+            </span>
+          </span>
+        </label>
+      </fieldset>
+      {useExisting ? (
+        <div className="space-y-2">
+          <Label htmlFor="new-bsky-account">Bluesky account</Label>
+          {props.accountsLoading ? <p className="text-xs text-muted-foreground">Loading accounts…</p> : null}
+          {noAccounts ? (
+            <div className="space-y-2 rounded-md border border-dashed p-3">
+              <p className="text-sm">No unlinked Bluesky accounts are available.</p>
+              <p className="text-xs text-muted-foreground">
+                Add one in Settings → Bluesky accounts, or switch to “Connect a new Bluesky account” above.
+              </p>
+              <Button type="button" variant="outline" size="sm" onClick={props.onManageAccounts}>
+                Open Bluesky accounts
+              </Button>
+            </div>
+          ) : (
+            <>
+              <BlueskyAccountSelect
+                id="new-bsky-account"
+                accounts={props.blueskyAccounts}
+                value={props.accountId}
+                onChange={props.onAccountIdChange}
+              />
+              {selected && !selected.credentialConfigured ? (
+                <p role="alert" className="text-xs text-amber-600">
+                  This account has no app password saved. Rotate it in Settings → Bluesky accounts before posting.
+                </p>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <Label htmlFor="new-bsky-identifier">Bluesky Identifier</Label>
+          <Input id="new-bsky-identifier" data-autofocus value={props.form.bskyIdentifier} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyIdentifier: event.target.value }))} required />
+          <Label htmlFor="new-bsky-password">Bluesky App Password</Label>
+          <Input id="new-bsky-password" type="password" value={props.form.bskyPassword} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyPassword: event.target.value }))} required />
+          <Label htmlFor="new-bsky-service">Bluesky Service URL</Label>
+          <Input id="new-bsky-service" value={props.form.bskyServiceUrl} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyServiceUrl: event.target.value }))} />
+          <p className="text-xs text-muted-foreground">
+            These credentials are stored as a managed account in Settings → Bluesky accounts, not on the destination.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
 
 function ReviewStep(props: AddDestinationWizardProps) {
   const allowProfileMutation = props.form.profileManagement.allowProfileMutation;
+  const selected = selectedWizardAccount(props);
+  const useExisting = props.accountMode === 'existing';
+  const handle = useExisting
+    ? selected?.canonicalHandle || selected?.loginIdentifier || 'not selected'
+    : props.form.bskyIdentifier;
   return (
     <div className="space-y-4">
       <h3 className="font-semibold">Verify &amp; Create</h3>
       <div className="rounded-md border p-4 text-sm">
-        <p><strong>Destination:</strong> @{props.form.bskyIdentifier}</p>
+        <p><strong>Destination:</strong> @{handle}</p>
+        <p>
+          <strong>Bluesky account:</strong>{' '}
+          {useExisting
+            ? 'Existing managed account from Settings'
+            : 'New managed account saved to Settings → Bluesky accounts'}
+        </p>
         <p><strong>X Sources ({props.sources.length}):</strong> {props.sources.map((source) => `@${source}`).join(', ')}</p>
         <p><strong>Backfill:</strong> None (request separately after creation)</p>
         <p><strong>Attribution:</strong> {describeAttribution(props.form.postingPolicy.attribution.mode, props.sources.length)}</p>

@@ -95,6 +95,9 @@ async function mockDashboard(page: Page) {
       destinations = [created];
       return json(route, created, 201);
     }
+    // A fresh install has no managed accounts; tests that need them register
+    // their own route so the wizard opens on the account picker instead.
+    if (path === '/api/bluesky-accounts' && method === 'GET') return json(route, []);
     if (path === '/api/groups') return json(route, []);
     if (path === '/api/version') return json(route, { version: '3.0.0', startedAt: Date.now() });
     if (path === '/api/twitter-config') {
@@ -268,6 +271,95 @@ function sourcesField(page: Page) {
   return page.getByRole('textbox', { name: 'X Sources', exact: true });
 }
 
+const managedAccounts = [
+  {
+    ...version,
+    id: 'account-1',
+    serviceUrl: 'https://bsky.social',
+    loginIdentifier: 'osint-mirrors.bsky.social',
+    canonicalHandle: 'osint-mirrors.bsky.social',
+    did: 'did:plc:mock',
+    createdAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+    updatedAtConfig: version.updatedAt,
+    credentialConfigured: true,
+    linkedDestinationId: 'destination-1',
+    health: { consecutiveFailures: 0 },
+  },
+  {
+    ...version,
+    id: 'account-2',
+    label: 'Spare mirror',
+    serviceUrl: 'https://bsky.social',
+    loginIdentifier: 'spare-mirror.bsky.social',
+    canonicalHandle: 'spare-mirror.bsky.social',
+    did: 'did:plc:spare',
+    createdAt: '2026-07-02T00:00:00.000Z',
+    updatedAt: '2026-07-02T00:00:00.000Z',
+    updatedAtConfig: version.updatedAt,
+    credentialConfigured: true,
+    linkedDestinationId: null,
+    health: null,
+  },
+];
+
+async function mockManagedAccounts(page: Page) {
+  await page.route('**/api/bluesky-accounts', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return json(route, managedAccounts);
+  });
+}
+
+function linkedDestination(accountId: 'account-1' | 'account-2') {
+  const account = managedAccounts.find((entry) => entry.id === accountId);
+  if (!account) throw new Error(`Unknown mock account ${accountId}`);
+  return {
+    ...version,
+    id: 'destination-1',
+    twitterUsernames: ['alpha'],
+    pausedTwitterUsernames: [],
+    bskyIdentifier: account.loginIdentifier,
+    bskyCanonicalHandle: account.canonicalHandle,
+    bskyDid: account.did,
+    bskyServiceUrl: account.serviceUrl,
+    bskyAccountId: account.id,
+    credentialConfigured: true,
+    blueskyAccount: {
+      id: account.id,
+      loginIdentifier: account.loginIdentifier,
+      canonicalHandle: account.canonicalHandle,
+      did: account.did,
+      serviceUrl: account.serviceUrl,
+      credentialConfigured: true,
+      health: { consecutiveFailures: 0 },
+    },
+    enabled: true,
+    destinationState: 'enabled',
+    postingPolicy,
+    profileManagement,
+    aiOverrides: {
+      imageAltText: 'inherit',
+      textCapabilities: {
+        translation: 'inherit',
+        summarization: 'inherit',
+        cleanup: 'inherit',
+        hashtags: 'inherit',
+      },
+    },
+    moderationPolicy: {
+      blockKeywords: [],
+      blockDomains: [],
+      blockSourceUsernames: [],
+      sensitiveContent: 'allow',
+      dryRun: false,
+    },
+    duplicateSuppression: { enabled: false, windowHours: 24, perceptualImageHash: false },
+    sources: [{ username: 'alpha', routeId: 'route_alpha', state: 'enabled', delivery: { mode: 'immediate' } }],
+    queue: null,
+    runtime: null,
+  };
+}
+
 test('cookie session, CSRF, and aggregate onboarding stay mutation-safe', async ({ page }) => {
   const mutations = await mockDashboard(page);
   await page.goto('/');
@@ -390,6 +482,90 @@ test('responsive keyboard and operational redaction smoke', async ({ page }) => 
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Add Bluesky destination' })).toBeFocused();
+});
+
+test('the wizard links an existing managed account instead of collecting a password', async ({ page }) => {
+  const mutations = await mockDashboard(page);
+  await mockManagedAccounts(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Add Bluesky destination' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Create Bluesky Destination' });
+  await sourcesField(page).fill('delta');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+
+  // Reusing a managed account is the default and no password is requested.
+  await expect(dialog.getByLabel('Use an existing Bluesky account')).toBeChecked();
+  await expect(dialog.getByLabel('Bluesky App Password')).toHaveCount(0);
+  await expect(dialog.getByText('managed in Settings → Bluesky accounts')).toBeVisible();
+
+  // Only the unlinked account is offered, alongside the placeholder option.
+  const picker = dialog.getByLabel('Bluesky account', { exact: true });
+  await expect(picker.locator('option')).toHaveCount(2);
+  await picker.selectOption('account-2');
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect(dialog.getByText('Existing managed account from Settings')).toBeVisible();
+  await page.getByRole('button', { name: 'Create Destination' }).click();
+
+  const created = () => mutations.find((entry) => entry.path === '/api/destinations');
+  await expect.poll(() => created()?.body).toMatchObject({ bskyAccountId: 'account-2' });
+  expect(created()?.body).not.toHaveProperty('bskyPassword');
+  // An already-validated account does not need the onboarding credential check.
+  expect(mutations.some((entry) => entry.path === '/api/onboarding/bsky-credentials')).toBe(false);
+
+  // The new-credentials path is still available and states where it is saved.
+  await page.getByRole('button', { name: 'Add Bluesky destination' }).click();
+  await sourcesField(page).fill('epsilon');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await dialog.getByLabel('Connect a new Bluesky account').check();
+  await expect(dialog.getByLabel('Bluesky App Password')).toBeVisible();
+  await expect(
+    dialog.getByText('stored as a managed account in Settings → Bluesky accounts'),
+  ).toBeVisible();
+});
+
+test('the destination editor repoints a destination at another managed account', async ({ page }) => {
+  await mockDashboard(page);
+  await mockManagedAccounts(page);
+  await page.route('**/api/destinations', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return json(route, [linkedDestination('account-1')]);
+  });
+  // Registered after mockDashboard, so this handler wins and records the body.
+  let switchRequest: unknown;
+  await page.route('**/api/destinations/destination-1/bluesky-account', async (route) => {
+    switchRequest = route.request().postDataJSON?.() ?? null;
+    return json(route, {
+      ...version,
+      success: true,
+      changed: true,
+      previousAccountId: 'account-1',
+      destination: linkedDestination('account-2'),
+    });
+  });
+
+  await page.goto('/accounts?destinationId=destination-1&section=overview');
+  const dialog = page.getByRole('dialog', { name: 'Edit Bluesky Destination' });
+  await expect(dialog.getByText('Linked Bluesky account')).toBeVisible();
+  await expect(dialog.getByRole('definition').filter({ hasText: '@osint-mirrors.bsky.social' })).toBeVisible();
+
+  // The picker offers unlinked accounts plus the current link, never a password.
+  const picker = dialog.getByLabel('Posting account');
+  await expect(picker.locator('option')).toHaveCount(3);
+  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
+  await picker.selectOption('account-2');
+  await dialog.getByRole('button', { name: 'Switch account' }).click();
+
+  const confirm = page.getByRole('dialog', { name: 'Switch Bluesky account?' });
+  await expect(confirm).toContainText('not posted again');
+  await confirm.getByRole('button', { name: 'Switch account' }).click();
+
+  await expect.poll(() => switchRequest).toMatchObject({ bskyAccountId: 'account-2' });
+  await expect(page.getByText('Destination now posts to @spare-mirror.bsky.social')).toBeVisible();
 });
 
 test('destination editor uses section navigation and dismisses migration review', async ({ page }) => {

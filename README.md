@@ -194,6 +194,8 @@ Operational endpoints:
 - `GET /api/health/details` and `GET /api/metrics` require dashboard authentication.
 - `GET /api/metrics/prometheus` is admin-only and available when `ENABLE_PROMETHEUS_METRICS=true`.
 - `GET/POST /api/bluesky-accounts` manages posting identities (list/create); validate, rotate, and delete use `/api/bluesky-accounts/:id/*`.
+- `POST /api/destinations` links an existing account with `bskyAccountId`, or validates `bskyIdentifier` + `bskyPassword` and saves them as a new managed account before linking.
+- `PATCH /api/destinations/:id/bluesky-account` repoints a destination at another unlinked managed account, keeping its queue and mirror history.
 - `POST /api/destinations/bulk/state`, `/api/destinations/bulk/folder`, and `/api/destinations/bulk/backfill` apply multi-destination actions (max 50).
 
 Generic webhook notifications can be configured under Settings or with `bun run cli -- notifications`.

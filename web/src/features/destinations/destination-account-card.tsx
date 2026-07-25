@@ -1,10 +1,19 @@
+import { useEffect, useState } from 'react';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
+import { Label } from '../../components/ui/label';
+import type { BlueskyAccountView } from '../bluesky-accounts/types';
+import { BlueskyAccountSelect } from './bluesky-account-select';
 import type { AccountMapping } from './types';
 
 interface DestinationAccountCardProps {
   mapping: AccountMapping;
+  /** Managed accounts that are unlinked, plus this destination's own account. */
+  accounts?: readonly BlueskyAccountView[];
+  canChangeAccount?: boolean;
+  busy?: boolean;
   onManageAccount(): void;
+  onChangeAccount?(accountId: string): void;
 }
 
 function formatEpoch(value?: number): string | null {
@@ -23,8 +32,74 @@ function accountHealthLabel(lastErrorCategory?: string, credentialConfigured?: b
   return { label: 'Missing password', variant: 'warning' };
 }
 
-export function DestinationAccountCard({ mapping, onManageAccount }: DestinationAccountCardProps) {
+function AccountSwitcher({
+  mapping,
+  accounts,
+  busy,
+  onChangeAccount,
+}: {
+  mapping: AccountMapping;
+  accounts: readonly BlueskyAccountView[];
+  busy?: boolean;
+  onChangeAccount(accountId: string): void;
+}) {
+  const linkedId = mapping.bskyAccountId ?? '';
+  const [selected, setSelected] = useState(linkedId);
+
+  useEffect(() => {
+    setSelected(linkedId);
+  }, [linkedId]);
+
+  return (
+    <div className="space-y-2 rounded-md border border-dashed p-3">
+      <Label htmlFor="destination-bsky-account">Posting account</Label>
+      <p id="destination-bsky-account-hint" className="text-xs text-muted-foreground">
+        Accounts are added and their app passwords rotated in Settings → Bluesky accounts. Only accounts that are not
+        already linked to another destination can be chosen. Mirror history stays with this destination, so a newly
+        linked account receives future posts only.
+      </p>
+      {accounts.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          No managed Bluesky accounts are available. Add one in Settings → Bluesky accounts first.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          <BlueskyAccountSelect
+            id="destination-bsky-account"
+            describedById="destination-bsky-account-hint"
+            accounts={accounts}
+            value={selected}
+            disabled={busy}
+            onChange={setSelected}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={busy || selected === '' || selected === linkedId}
+            onClick={() => onChangeAccount(selected)}
+          >
+            {linkedId ? 'Switch account' : 'Link account'}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function DestinationAccountCard(props: DestinationAccountCardProps) {
+  const { mapping, onManageAccount } = props;
   const account = mapping.blueskyAccount;
+  const onChangeAccount = props.onChangeAccount;
+  const switcher =
+    props.canChangeAccount && onChangeAccount ? (
+      <AccountSwitcher
+        mapping={mapping}
+        accounts={props.accounts ?? []}
+        busy={props.busy}
+        onChangeAccount={onChangeAccount}
+      />
+    ) : null;
 
   if (account) {
     const handle = account.canonicalHandle || account.loginIdentifier;
@@ -79,6 +154,7 @@ export function DestinationAccountCard({ mapping, onManageAccount }: Destination
             </div>
           ) : null}
         </dl>
+        {switcher}
         <Button type="button" variant="outline" size="sm" onClick={onManageAccount}>
           Manage in Settings
         </Button>
@@ -93,9 +169,11 @@ export function DestinationAccountCard({ mapping, onManageAccount }: Destination
           <p className="font-semibold">Linked account record missing</p>
           <p className="text-sm text-muted-foreground">
             This destination references account <code className="text-xs">{mapping.bskyAccountId}</code>, but that
-            managed account could not be loaded. Open Settings → Bluesky accounts to repair it.
+            managed account could not be loaded. Open Settings → Bluesky accounts to repair it, or link this
+            destination to a different account below.
           </p>
         </div>
+        {switcher}
         <Button type="button" variant="outline" size="sm" onClick={onManageAccount}>
           Manage in Settings
         </Button>
@@ -108,9 +186,9 @@ export function DestinationAccountCard({ mapping, onManageAccount }: Destination
       <div>
         <p className="font-semibold">Legacy destination identity</p>
         <p className="text-sm text-muted-foreground">
-          This destination uses a legacy inline credential and is not linked to a managed Bluesky account. Add it
-          under Settings → Bluesky accounts to manage its password there. App passwords are never displayed in this
-          editor.
+          This destination uses a legacy inline credential and is not linked to a managed Bluesky account. Add the
+          account under Settings → Bluesky accounts, then link it below so its password is managed there. App
+          passwords are never displayed in this editor.
         </p>
       </div>
       <dl className="grid gap-2 text-sm sm:grid-cols-2">
@@ -135,6 +213,7 @@ export function DestinationAccountCard({ mapping, onManageAccount }: Destination
           </dd>
         </div>
       </dl>
+      {switcher}
       <Button type="button" variant="outline" size="sm" onClick={onManageAccount}>
         Open Bluesky accounts
       </Button>

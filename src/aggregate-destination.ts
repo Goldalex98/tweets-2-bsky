@@ -1,4 +1,4 @@
-import type { AccountMapping } from './config/schemas.js';
+import type { AccountMapping, BlueskyAccount } from './config/schemas.js';
 import {
   getCanonicalDestinationKey,
   normalizeBlueskyServiceUrl,
@@ -28,6 +28,25 @@ export function applyValidatedDestinationIdentity(
     bskyServiceUrl: normalizeBlueskyServiceUrl(validation.serviceUrl),
     bskyDid: validation.did.trim(),
     bskyCanonicalHandle: validation.handle.trim().replace(/^@+/, '').toLowerCase(),
+  };
+}
+
+/**
+ * Point a destination at a managed Bluesky account. The account owns identity
+ * and credentials once linked, so every identity field is taken from it and the
+ * legacy inline password is dropped. `storageKey` is deliberately untouched:
+ * queue and processed-tweet rows stay attached to the destination, so switching
+ * accounts never re-mirrors already-delivered tweets.
+ */
+export function applyBlueskyAccountLink(mapping: AccountMapping, account: BlueskyAccount): AccountMapping {
+  return {
+    ...mapping,
+    bskyAccountId: account.id,
+    bskyIdentifier: account.loginIdentifier,
+    bskyPassword: account.appPassword,
+    bskyServiceUrl: normalizeBlueskyServiceUrl(account.serviceUrl),
+    bskyDid: account.did,
+    bskyCanonicalHandle: account.canonicalHandle,
   };
 }
 

@@ -10,6 +10,7 @@ import express, { type NextFunction, type Request, type RequestHandler, type Res
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import {
   addDestinationSources,
+  applyBlueskyAccountLink,
   applyValidatedDestinationIdentity,
   findDuplicateActiveDestination,
   getSourceDependencies,
@@ -34,6 +35,13 @@ import {
   rotateBlueskyAccountCredentials,
   validateExistingBlueskyAccount,
 } from './services/bluesky-account-service.js';
+import {
+  applyValidatedAccountIdentity,
+  createBlueskyAccount,
+  findBlueskyAccount,
+  findBlueskyAccountByIdentity,
+  findDestinationForAccount,
+} from './config/bluesky-accounts.js';
 import { createBlueskyAccountsRouter } from './routes/bluesky-accounts-router.js';
 import { createBulkDestinationsRouter } from './routes/bulk-destinations-router.js';
 import {
@@ -41,6 +49,7 @@ import {
   type AccountMapping,
   type AITextCapability,
   type AppConfig,
+  type BlueskyAccount,
   type DuplicateSuppressionPolicy,
   type ModerationPolicy,
   type PostingPolicy,
@@ -78,6 +87,7 @@ import {
 } from './http-concurrency.js';
 import {
   authRuntimeStateService,
+  blueskyAccountRuntimeService,
   databaseHealthService,
   dbService,
   duplicateFingerprintService,
@@ -3773,6 +3783,74 @@ app.patch(
   }),
 );
 
+app.patch(
+  ['/api/destinations/:id/bluesky-account', '/api/mappings/:id/bluesky-account'],
+  authenticateToken,
+  asAuthedHandler((req, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to update this destination.' });
+    return;
+  }
+  const accountId = normalizeOptionalString(req.body?.bskyAccountId);
+  if (!accountId) {
+    res.status(400).json({ error: 'A Bluesky account is required.' });
+    return;
+  }
+  const account = findBlueskyAccount(config, accountId);
+  if (!account) {
+    res.status(404).json({ error: 'Bluesky account not found.' });
+    return;
+  }
+  if (mapping.bskyAccountId === account.id) {
+    res.json({
+      success: true,
+      changed: false,
+      destination: sanitizeMapping(mapping, createUserLookupById(config), req.user),
+      ...getConfigVersion(config),
+    });
+    return;
+  }
+  const linked = findDestinationForAccount(config, account.id);
+  if (linked && linked.id !== mapping.id) {
+    res.status(409).json({
+      error: `That Bluesky account is already linked to another destination (${linked.bskyCanonicalHandle || linked.bskyIdentifier}).`,
+      code: 'ACCOUNT_ALREADY_LINKED',
+      destinationId: linked.id,
+    });
+    return;
+  }
+  const candidate = applyBlueskyAccountLink(mapping, account);
+  const duplicate = findDuplicateActiveDestination(config.mappings, candidate, mapping.id);
+  if (duplicate) {
+    res.status(409).json(getDuplicateDestinationPayload(duplicate));
+    return;
+  }
+  const previousAccountId = mapping.bskyAccountId;
+  clearCachedAgent(mapping);
+  clearCachedAgent(candidate);
+  const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+  config.mappings[index] = candidate;
+  saveConfig(config);
+  // Re-project so the response carries the persisted account summary and revision.
+  const fresh = getConfig();
+  const refreshed = fresh.mappings.find((entry) => entry.id === mapping.id) ?? candidate;
+  res.json({
+    success: true,
+    changed: true,
+    previousAccountId: previousAccountId ?? null,
+    destination: sanitizeMapping(refreshed, createUserLookupById(fresh), req.user),
+    ...getConfigVersion(fresh),
+  });
+  }),
+);
+
 app.get('/api/groups', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   res.json(getAccessibleGroups(config, req.user));
@@ -4008,28 +4086,75 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHand
     return;
   }
 
-  const bskyIdentifier = normalizeOptionalString(req.body?.bskyIdentifier);
-  const bskyPassword = typeof req.body?.bskyPassword === 'string' ? req.body.bskyPassword : undefined;
-  if (!bskyIdentifier || !bskyPassword) {
-    res.status(400).json({ error: 'Bluesky identifier and app password are required.' });
-    return;
-  }
-  let destinationValidation: Awaited<ReturnType<typeof validateBlueskyCredentials>>;
-  try {
-    destinationValidation = await validateBlueskyCredentials({
-      bskyIdentifier,
-      bskyPassword,
-      bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl),
+  // Credentials belong to a managed Bluesky account, so a destination is either
+  // linked to an existing unlinked account or to one created here from the
+  // supplied credentials. Inline destination passwords remain legacy-only.
+  let linkedAccount: BlueskyAccount;
+  let accountCreated = false;
+  const requestedAccountId = normalizeOptionalString(req.body?.bskyAccountId);
+  if (requestedAccountId) {
+    const existingAccount = findBlueskyAccount(config, requestedAccountId);
+    if (!existingAccount) {
+      res.status(404).json({ error: 'Bluesky account not found.' });
+      return;
+    }
+    const alreadyLinked = findDestinationForAccount(config, existingAccount.id);
+    if (alreadyLinked) {
+      res.status(409).json({
+        error: `That Bluesky account is already linked to another destination (${alreadyLinked.bskyCanonicalHandle || alreadyLinked.bskyIdentifier}).`,
+        code: 'ACCOUNT_ALREADY_LINKED',
+        destinationId: alreadyLinked.id,
+      });
+      return;
+    }
+    linkedAccount = existingAccount;
+  } else {
+    const bskyIdentifier = normalizeOptionalString(req.body?.bskyIdentifier);
+    const bskyPassword = typeof req.body?.bskyPassword === 'string' ? req.body.bskyPassword : undefined;
+    if (!bskyIdentifier || !bskyPassword) {
+      res.status(400).json({ error: 'Select an existing Bluesky account or provide an identifier and app password.' });
+      return;
+    }
+    let destinationValidation: Awaited<ReturnType<typeof validateBlueskyCredentials>>;
+    try {
+      destinationValidation = await validateBlueskyCredentials({
+        bskyIdentifier,
+        bskyPassword,
+        bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl),
+      });
+    } catch (error) {
+      res.status(400).json({ error: getErrorMessage(error, 'Failed to validate Bluesky credentials.') });
+      return;
+    }
+    const duplicateAccount = findBlueskyAccountByIdentity(config, {
+      did: destinationValidation.did,
+      serviceUrl: destinationValidation.serviceUrl,
+      loginIdentifier: destinationValidation.handle,
     });
-  } catch (error) {
-    res.status(400).json({ error: getErrorMessage(error, 'Failed to validate Bluesky credentials.') });
-    return;
+    if (duplicateAccount) {
+      res.status(409).json({
+        error: `A Bluesky account for ${duplicateAccount.canonicalHandle ?? duplicateAccount.loginIdentifier} already exists. Select it instead of entering credentials again.`,
+        code: 'ACCOUNT_EXISTS',
+        bskyAccountId: duplicateAccount.id,
+      });
+      return;
+    }
+    linkedAccount = applyValidatedAccountIdentity(
+      createBlueskyAccount({
+        loginIdentifier: bskyIdentifier,
+        appPassword: bskyPassword,
+        serviceUrl: normalizeOptionalString(req.body?.bskyServiceUrl),
+        label: normalizeOptionalString(req.body?.bskyAccountLabel),
+      }),
+      destinationValidation,
+    );
+    accountCreated = true;
   }
   const duplicate = findDuplicateActiveDestination(config.mappings, {
-    bskyIdentifier: destinationValidation.handle,
-    bskyCanonicalHandle: destinationValidation.handle,
-    bskyDid: destinationValidation.did,
-    bskyServiceUrl: destinationValidation.serviceUrl,
+    bskyIdentifier: linkedAccount.loginIdentifier,
+    bskyCanonicalHandle: linkedAccount.canonicalHandle,
+    bskyDid: linkedAccount.did,
+    bskyServiceUrl: linkedAccount.serviceUrl,
   });
   if (duplicate) {
     res.status(409).json(getDuplicateDestinationPayload(duplicate));
@@ -4078,13 +4203,13 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHand
     return;
   }
 
-  const newMapping = applyValidatedDestinationIdentity({
+  const newMapping = applyBlueskyAccountLink({
     id: randomUUID(),
     twitterUsernames,
     pausedTwitterUsernames: [],
-    bskyIdentifier: destinationValidation.handle,
-    bskyPassword,
-    bskyServiceUrl: destinationValidation.serviceUrl,
+    bskyIdentifier: linkedAccount.loginIdentifier,
+    bskyPassword: linkedAccount.appPassword,
+    bskyServiceUrl: linkedAccount.serviceUrl,
     enabled: true,
     owner,
     groupName: normalizedGroupName || undefined,
@@ -4097,16 +4222,25 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHand
     profileManagement,
     profileSyncSourceUsername: profileManagement.profileSync.sourceUsername,
     hasBotLabel: false,
-  }, destinationValidation);
+  }, linkedAccount);
 
+  if (accountCreated) {
+    config.blueskyAccounts.push(linkedAccount);
+  }
   ensureGroupExists(config, normalizedGroupName, normalizedGroupEmoji);
   config.mappings.push(newMapping);
   saveConfig(config);
+  if (accountCreated) {
+    blueskyAccountRuntimeService.recordSuccess(linkedAccount.id, 'validate');
+  }
 
+  const fresh = getConfig();
+  const created = fresh.mappings.find((entry) => entry.id === newMapping.id) ?? newMapping;
   res.json({
-    ...sanitizeMapping(newMapping, createUserLookupById(config), req.user),
+    ...sanitizeMapping(created, createUserLookupById(fresh), req.user),
     sourceParsing,
     automaticBackfill: false,
+    accountCreated,
   });
 }));
 

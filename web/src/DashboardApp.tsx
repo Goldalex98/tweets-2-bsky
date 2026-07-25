@@ -23,7 +23,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useActivityPolling } from './features/activity/use-activity-polling';
 import type { ActivityLog, EnrichedPost, LocalPostSearchResult, QueueItemView } from './features/activity/types';
 import { useBlueskyAccounts } from './features/bluesky-accounts/use-bluesky-accounts';
-import { AddDestinationWizard } from './features/destinations/add-destination-wizard';
+import {
+  AddDestinationWizard,
+  type NewDestinationAccountMode,
+} from './features/destinations/add-destination-wizard';
 import { summarizeDestinationHealth } from './features/destinations/destination-health';
 import { DestinationsPage } from './features/destinations/destinations-page';
 import { EditDestinationDialog } from './features/destinations/edit-destination-dialog';
@@ -243,6 +246,14 @@ export default function DashboardApp() {
   const [newSourceInput, setNewSourceInput] = useState('');
   const [newSourceSummary, setNewSourceSummary] = useState<SourceParseSummary>({ duplicates: [], invalid: [] });
   const [validatingCredentials, setValidatingCredentials] = useState(false);
+  const [newAccountMode, setNewAccountMode] = useState<NewDestinationAccountMode>('existing');
+  const [newAccountId, setNewAccountId] = useState('');
+
+  /** Managed accounts that no destination claims yet. */
+  const unlinkedBlueskyAccounts = useMemo(
+    () => blueskyAccounts.accounts.filter((account) => account.linkedDestinationId === null),
+    [blueskyAccounts.accounts],
+  );
 
   const resetAdd = useCallback(() => {
     setNewMapping({ ...defaultMappingForm(), owner: session.user?.username || session.user?.email || '' });
@@ -251,12 +262,16 @@ export default function DashboardApp() {
     setNewSourceSummary({ duplicates: [], invalid: [] });
     setAddStep(1);
     setValidatingCredentials(false);
-  }, [session.user?.email, session.user?.username]);
+    setNewAccountMode(unlinkedBlueskyAccounts.length > 0 ? 'existing' : 'new');
+    setNewAccountId('');
+  }, [session.user?.email, session.user?.username, unlinkedBlueskyAccounts.length]);
 
   const openAdd = () => {
     if (!canCreateMappings) return showNotice('error', 'You do not have permission to add mappings.');
     resetAdd();
     setAddOpen(true);
+    // The picker must reflect accounts added since the last dashboard load.
+    void blueskyAccounts.refresh();
   };
   const closeAdd = () => {
     setAddOpen(false);
@@ -300,6 +315,11 @@ export default function DashboardApp() {
   const advanceAdd = async () => {
     if (addStep === 1 && newSources.length === 0) return showNotice('error', 'Add at least one Twitter username.');
     if (addStep < 3) return setAddStep((current) => current + 1);
+    if (newAccountMode === 'existing') {
+      // The account was validated when it was added in Settings.
+      if (!newAccountId) return showNotice('error', 'Select a Bluesky account for this destination.');
+      return setAddStep(4);
+    }
     if (!newMapping.bskyIdentifier.trim() || !newMapping.bskyPassword.trim()) {
       return showNotice('error', 'Bluesky identifier and app password are required.');
     }
@@ -320,20 +340,27 @@ export default function DashboardApp() {
 
   const createDestination = () => {
     const allowProfileMutation = newMapping.profileManagement.allowProfileMutation;
+    const useExistingAccount = newAccountMode === 'existing';
     void run(async () => {
       await destinations.createDestination({
         owner: newMapping.owner.trim(),
         twitterUsernames: newSources,
-        bskyIdentifier: newMapping.bskyIdentifier.trim(),
-        bskyPassword: newMapping.bskyPassword,
-        bskyServiceUrl: newMapping.bskyServiceUrl.trim(),
+        // Either link an existing managed account or hand over credentials for
+        // the server to save as a new managed account.
+        ...(useExistingAccount
+          ? { bskyAccountId: newAccountId }
+          : {
+              bskyIdentifier: newMapping.bskyIdentifier.trim(),
+              bskyPassword: newMapping.bskyPassword,
+              bskyServiceUrl: newMapping.bskyServiceUrl.trim(),
+            }),
         groupName: newMapping.groupName.trim(),
         groupEmoji: newMapping.groupEmoji.trim(),
         postingPolicy: newMapping.postingPolicy,
         profileManagement: newMapping.profileManagement,
       });
       closeAdd();
-      await destinations.fetchDestinations();
+      await Promise.all([destinations.fetchDestinations(), blueskyAccounts.refresh()]);
     }, allowProfileMutation
       ? 'Destination added. Profile mutation is allowed, but profile and pin sync modes are still off.'
       : 'Destination added with profile and pin mutations disabled.');
@@ -524,6 +551,36 @@ export default function DashboardApp() {
       await destinations.fetchDestinations();
     }, 'Migration review dismissed.');
   }, [destinations.fetchDestinations, editingMapping, run]);
+
+  /** Accounts the editor may link: unlinked ones plus the current link. */
+  const editableBlueskyAccounts = useMemo(() => {
+    if (!editingMapping) return [];
+    return blueskyAccounts.accounts.filter(
+      (account) =>
+        account.linkedDestinationId === null || account.linkedDestinationId === editingMapping.id,
+    );
+  }, [blueskyAccounts.accounts, editingMapping]);
+
+  const changeBlueskyAccount = useCallback(
+    (accountId: string) => {
+      if (!editingMapping) return;
+      const target = blueskyAccounts.accounts.find((account) => account.id === accountId);
+      const handle = target?.canonicalHandle || target?.loginIdentifier || 'the selected account';
+      void askConfirmation({
+        title: editingMapping.bskyAccountId ? 'Switch Bluesky account?' : 'Link Bluesky account?',
+        description: `Future posts for this destination go to @${handle}. Already mirrored tweets stay recorded, so they are not posted again.`,
+        confirmLabel: editingMapping.bskyAccountId ? 'Switch account' : 'Link account',
+      }).then((ok) => {
+        if (!ok) return;
+        return run(async () => {
+          const updated = await destinations.linkBlueskyAccount(editingMapping, accountId);
+          setEditingMapping(updated);
+          await Promise.all([destinations.fetchDestinations(), blueskyAccounts.refresh()]);
+        }, `Destination now posts to @${handle}.`);
+      });
+    },
+    [askConfirmation, blueskyAccounts.accounts, blueskyAccounts.refresh, destinations.fetchDestinations, destinations.linkBlueskyAccount, editingMapping, run],
+  );
 
   const openBlueskyAccountSettings = useCallback(() => {
     setEditingMapping(null);
@@ -1149,6 +1206,17 @@ export default function DashboardApp() {
         form={newMapping}
         busy={busy}
         validating={validatingCredentials}
+        blueskyAccounts={unlinkedBlueskyAccounts}
+        accountsLoading={blueskyAccounts.loading}
+        accountMode={newAccountMode}
+        accountId={newAccountId}
+        onAccountModeChange={setNewAccountMode}
+        onAccountIdChange={setNewAccountId}
+        onManageAccounts={() => {
+          closeAdd();
+          setActiveTab('settings');
+          setSettingsSection('bluesky');
+        }}
         onClose={closeAdd}
         onSourceInputChange={setNewSourceInput}
         onAddSources={addSources}
@@ -1166,6 +1234,9 @@ export default function DashboardApp() {
         parseSummary={editSourceSummary}
         busy={busy}
         canReviewMigration={isAdmin}
+        blueskyAccounts={editableBlueskyAccounts}
+        canChangeAccount={editingMapping ? canManageMapping(editingMapping) : false}
+        onChangeAccount={changeBlueskyAccount}
         onClose={() => {
           setEditingMapping(null);
           setPendingEditSection(undefined);

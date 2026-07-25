@@ -6,7 +6,11 @@ This document describes implemented behavior in schema v7. Items under **Future 
 
 A destination is one Bluesky identity linked to a managed Bluesky account for posting credentials. A route connects one canonical X, webhook, or API source to that destination. One-to-one destinations default to no attribution; aggregate destinations default to source attribution when multiple sources are present. Adding a source never backfills automatically, and credential validation never changes a profile.
 
-App passwords are managed only under Settings → Bluesky accounts. The destination editor shows a read-only linked-account card (handle, DID, service URL, credential status, health) and never accepts or displays a password.
+App passwords are managed only under Settings → Bluesky accounts. The destination editor's Overview tab shows a read-only linked-account card (handle, DID, service URL, credential status, health) and never accepts or displays a password.
+
+The same card can repoint the destination at another managed account. Choose an account under **Posting account** and confirm; only accounts that are not linked to another destination are offered. Switching keeps the destination's queue and processed history, so already-mirrored posts are never delivered again and the newly linked account receives future posts only. Use this to move a destination onto a replacement identity, or to adopt a legacy inline-credential destination into a managed account.
+
+The create-destination wizard's Bluesky step offers the same choice: link an existing unlinked account, or enter credentials once. New credentials are validated and saved as a managed account under Settings → Bluesky accounts before the destination is linked, so the wizard never leaves an unmanaged inline password behind. If the entered credentials match an account that already exists, the request returns `409 ACCOUNT_EXISTS` with the account id so the existing account can be selected instead.
 
 Dashboard destination, source, route, account, and settings edits carry the `revision` and `updatedAt` last read from the API. A stale edit returns `409 CONFIG_REVISION_CONFLICT`; refresh, review the newer values, and reapply the change. The server never merges a stale form over newer configuration.
 
@@ -20,7 +24,7 @@ Settings → Bluesky accounts owns posting identities (`loginIdentifier`, `appPa
 
 Rotating an app password updates the encrypted account secret, evicts the cached Bluesky agent for that credential, and lets in-flight posts retry with the new password on the next attempt. After rotation, re-validate from Settings if posting fails with an auth error.
 
-Deleting an account that is still linked to a destination returns `409` — unlink or reassign the destination first.
+Deleting an account that is still linked to a destination returns `409` — reassign that destination to another account (destination editor → Overview → Posting account) or delete the destination first.
 
 ## Bulk destination actions
 
