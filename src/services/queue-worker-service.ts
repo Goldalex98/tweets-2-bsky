@@ -56,7 +56,16 @@ export interface QueueWorkerDependencies<
     batch: QueueBatch,
     context: { mode: 'worker' | 'drain' },
   ): Promise<void>;
-  findSettlement(item: QueueItem): { status: string } | null;
+  /**
+   * `recordedAt` (epoch ms) is when the history row was written, if known.
+   * Settlement uses it to reject a non-`migrated` record that predates this
+   * item's enqueue: a retained/override-requeued item can share its history
+   * key with a stale prior skip row, and treating that leftover row as
+   * proof-of-settlement would delete the queue item without ever delivering
+   * it. Omit `recordedAt` only when the caller cannot determine it; the
+   * record is then trusted as before.
+   */
+  findSettlement(item: QueueItem): { status: string; recordedAt?: number } | null;
   markDone(item: QueueItem): void;
   releaseForRetry(item: QueueItem, error: string, maxAttempts: number): void;
   describeError(error: unknown): string;
@@ -195,7 +204,17 @@ export class DestinationQueueWorkerService<
     const retryError = batchError ?? 'Post delivery did not create a processed record.';
     for (const item of batch.items) {
       const record = this.dependencies.findSettlement(item);
-      if (record) {
+      // A `migrated` record is always terminal. Any other status only counts
+      // as settled when it was written after this item was enqueued; a
+      // record from before that (a stale skip left over from a prior cycle,
+      // e.g. the item this override-requeue is replacing) must not be
+      // treated as this delivery's outcome, or the item vanishes unposted.
+      const isStale =
+        record !== null &&
+        record.status !== 'migrated' &&
+        record.recordedAt !== undefined &&
+        record.recordedAt < item.enqueued_at;
+      if (record && !isStale) {
         this.dependencies.markDone(item);
         if (record.status === 'migrated') settlement.posted += 1;
         else settlement.skipped += 1;

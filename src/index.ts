@@ -239,6 +239,7 @@ import {
   destinationLeaseService,
   duplicateFingerprintService,
   backfillJobService,
+  parseSqliteUtcTimestampMs,
   postQueueService,
   runtimeStateService,
 } from './db.js';
@@ -3266,8 +3267,8 @@ const digestWorkerService = new DigestWorkerService(
       resetProcessing: () => digestJobService.resetProcessing(),
       list: () => digestJobService.list(),
       arm: (destinationId, routeId, nextRunAt) => digestJobService.arm(destinationId, routeId, nextRunAt),
-      claimNext: (excludedDestinationIds, resolveMaxEntries) =>
-        digestJobService.claimNext(excludedDestinationIds, Date.now(), 200, resolveMaxEntries),
+      claimNext: (excludedDestinationIds, resolveMaxEntries, acquireLease) =>
+        digestJobService.claimNext(excludedDestinationIds, Date.now(), 200, resolveMaxEntries, acquireLease),
       checkpoint: (id, claimToken, checkpoint, contentHash) =>
         digestJobService.checkpoint(id, claimToken, checkpoint, contentHash),
       releaseEntries: (id, claimToken, entryIds) => digestJobService.releaseEntries(id, claimToken, entryIds),
@@ -3298,6 +3299,22 @@ const digestWorkerService = new DigestWorkerService(
     nextRun: (policy) => nextDigestRun(policy),
     metrics: {
       increment: (name) => metricsService.increment(name),
+    },
+    leases: {
+      heldByOthers: () => destinationLeaseService.listHeldByOthers(RUNTIME_OWNER_ID),
+      acquire: (destinationId) =>
+        Boolean(
+          destinationLeaseService.acquire({
+            destinationKey: destinationId,
+            ownerId: RUNTIME_OWNER_ID,
+            ttlMs: DESTINATION_LEASE_TTL_MS,
+          }),
+        ),
+      renew: (destinationId) =>
+        destinationLeaseService.renew(destinationId, RUNTIME_OWNER_ID, DESTINATION_LEASE_TTL_MS),
+      release: (destinationId) => {
+        destinationLeaseService.release(destinationId, RUNTIME_OWNER_ID);
+      },
     },
     onWorkerError: (error) =>
       logPipeline('Queue', `❌ Digest worker crashed: ${describeError(error)}`, true),
@@ -3361,14 +3378,16 @@ const queueWorkerService = new DestinationQueueWorkerService(
         getConfig().mappings.find((candidate) =>
           historyIdentityKeys(candidate).includes(item.bsky_identifier.toLowerCase()),
         );
-      if (mapping) {
-        return findProcessedTweetDual(
-          (twitterId, key) => dbService.getTweet(twitterId, key),
-          item.twitter_id,
-          mapping,
-        );
-      }
-      return dbService.getTweet(item.twitter_id, item.bsky_identifier);
+      const record = mapping
+        ? findProcessedTweetDual(
+            (twitterId, key) => dbService.getTweet(twitterId, key),
+            item.twitter_id,
+            mapping,
+          )
+        : dbService.getTweet(item.twitter_id, item.bsky_identifier);
+      return record
+        ? { status: record.status, recordedAt: parseSqliteUtcTimestampMs(record.created_at) }
+        : null;
     },
     markDone: (item) =>
       item.queue_id

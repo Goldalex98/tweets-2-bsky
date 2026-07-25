@@ -5648,6 +5648,19 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
       }
     : policyDecision;
   const snapshot = createPolicySnapshot({ destination, route, ai: config.ai });
+  // Consume the retained skip record *before* enqueueing: a worker's
+  // idempotency check reads the same history row, so if the row were still
+  // present when the new queue item became visible, a worker could see the
+  // stale skip and silently drop the override without ever posting it.
+  const consumed = dbService.finalizeOverrideRequeue(
+    retained.normalized.externalPostId,
+    destination.id,
+    req.user.id,
+  );
+  if (consumed !== 1) {
+    res.status(409).json({ error: 'This skipped item was already override-requeued.' });
+    return;
+  }
   const affected = postQueueService.enqueue([
     {
       twitter_id: retained.normalized.externalPostId,
@@ -5671,10 +5684,12 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
     },
   ]);
   if (affected !== 1) {
+    // The skip record is already consumed; restore it so the retained
+    // candidate is not lost and the caller can retry the override.
+    dbService.saveTweet({ ...skipped, override_requeued_at: undefined, override_requeued_by: undefined });
     res.status(409).json({ error: 'The retained candidate is already queued.' });
     return;
   }
-  dbService.markOverrideRequeued(retained.normalized.externalPostId, destination.id, req.user.id);
   if (dedupPolicy.enabled) {
     duplicateFingerprintService.record({
       destinationId: destination.id,
@@ -5696,7 +5711,6 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
     decisionTrace: JSON.stringify(decision.trace),
     policyHash: snapshot.hash,
   });
-  dbService.consumeSkippedOverride(retained.normalized.externalPostId, destination.id);
   res.json({ success: true, affected, decision, policyHash: snapshot.hash, retainedDegraded: retained.degraded });
 }));
 

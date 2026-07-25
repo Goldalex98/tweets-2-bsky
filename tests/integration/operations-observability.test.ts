@@ -40,13 +40,40 @@ test('queue scopes preserve active safety and delivery checkpoints resume after 
           const first = postQueueService.claimNextBatch(new Set(), new Set(['destination-1']), undefined, 1);
           postQueueService.releaseForRetry(first.items[0], new Error('Bearer secret-token request timed out'), 1);
           const failedDiagnostic = postQueueService.inspect({ routeId: 'route-a' })[0];
+          const attemptsAtTerminalFailure = failedDiagnostic.attempts;
           const retried = postQueueService.retryFailed({ requestId: 'request-a' });
+          // Terminal failure already spent the attempt budget; a retry must
+          // reset it so the item gets a full set of attempts again instead
+          // of being one delivery failure away from being parked right away.
+          const attemptsAfterRetry = postQueueService.inspect({ requestId: 'request-a' })[0].attempts;
           const active = postQueueService.claimNextBatch(new Set(), new Set(['destination-1']), undefined, 1);
           const cancelled = postQueueService.cancelPending({ destinationId: 'destination-1' });
           const activeAfterCancel = postQueueService.inspect({
             twitterId: active.items[0].twitter_id,
             bskyIdentifier: active.items[0].bsky_identifier,
           })[0];
+
+          enqueue('300', 'route-d', 'source-d', 'request-d');
+          const forSnapshotRewrite = postQueueService.claimNextBatch(new Set(), new Set(['destination-1']), undefined, 1);
+          postQueueService.releaseForRetry(forSnapshotRewrite.items[0], new Error('simulated failure'), 1);
+          const attemptsBeforeSnapshotRewrite = postQueueService.inspect({ routeId: 'route-d' })[0].attempts;
+          // A failed row's policy snapshot can be rewritten (e.g. after a
+          // policy edit) without going through retry-failed; that requeue
+          // path must reset attempts too, or the row is one delivery away
+          // from being parked again despite never having retried under the
+          // new policy.
+          postQueueService.rewritePolicySnapshots(
+            { routeId: 'route-d' },
+            'admin-actor',
+            'integration test snapshot rewrite',
+            (item) => ({
+              policyVersion: item.policy_version + 1,
+              policySnapshot: JSON.stringify({ reposts: true }),
+              decisionVersion: 1,
+              decisionTrace: '[]',
+            }),
+          );
+          const afterSnapshotRewrite = postQueueService.inspect({ routeId: 'route-d' })[0];
 
           enqueue('200', 'route-c', 'source-c', 'request-c');
           const chunks = ['one (1/3)', 'two (2/3)', 'three (3/3)'];
@@ -121,6 +148,11 @@ test('queue scopes preserve active safety and delivery checkpoints resume after 
             firstFailureAt: failedDiagnostic.first_failure_at,
             lastFailureAt: failedDiagnostic.last_failure_at,
             policyBehavior: failedDiagnostic.policy_behavior,
+            attemptsAtTerminalFailure,
+            attemptsAfterRetry,
+            attemptsBeforeSnapshotRewrite,
+            statusAfterSnapshotRewrite: afterSnapshotRewrite.status,
+            attemptsAfterSnapshotRewrite: afterSnapshotRewrite.attempts,
             retried,
             cancelled,
             activeStatus: activeAfterCancel.status,
@@ -142,6 +174,11 @@ test('queue scopes preserve active safety and delivery checkpoints resume after 
       diagnosticRedacted: true,
       category: 'timeout',
       policyBehavior: 'snapshotted',
+      attemptsAtTerminalFailure: 1,
+      attemptsAfterRetry: 0,
+      attemptsBeforeSnapshotRewrite: 1,
+      statusAfterSnapshotRewrite: 'pending',
+      attemptsAfterSnapshotRewrite: 0,
       retried: 1,
       cancelled: 1,
       activeStatus: 'processing',

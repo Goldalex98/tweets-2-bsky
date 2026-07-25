@@ -55,7 +55,7 @@ function dependencies(
   batches: QueueBatch[],
   options: {
     delivery?: () => Promise<void>;
-    settlements?: Map<string, { status: string }>;
+    settlements?: Map<string, { status: string; recordedAt?: number }>;
     leases?: QueueWorkerDependencies<TestConfig, TestMapping>['leases'];
   } = {},
 ): {
@@ -155,6 +155,84 @@ describe('DestinationQueueWorkerService', () => {
     expect(harness.events).toContain('parked:destination:1');
     expect(harness.metrics.get('posted')).toBe(1);
     expect(harness.metrics.get('failed')).toBe(1);
+  });
+
+  test('a migrated record always settles, even if it predates the item', async () => {
+    const rows = [item('migrated', 0)];
+    const harness = dependencies([], {
+      delivery: async () => {},
+      settlements: new Map([['migrated', { status: 'migrated', recordedAt: 0 }]]),
+    });
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+
+    const result = await service.runBatch(
+      { id: 'destination', bskyIdentifier: 'destination.test' },
+      batch(rows),
+    );
+
+    expect(result).toMatchObject({ posted: 1, skipped: 0, retrying: 0, parked: 0 });
+    expect(harness.events).toContain('done:migrated');
+  });
+
+  test('a stale skip record predating the item is not settled, so delivery keeps retrying', async () => {
+    // Mirrors an override-requeue: the item is enqueued to replace a
+    // previously skipped attempt, but the old skip history row for the same
+    // key is still present when the worker checks settlement. Treating that
+    // leftover row as this delivery's outcome would delete the queue item
+    // without ever actually posting the override.
+    const staleItem = item('stale-skip', 0);
+    const harness = dependencies([], {
+      delivery: async () => {},
+      settlements: new Map([
+        ['stale-skip', { status: 'skipped', recordedAt: staleItem.enqueued_at - 1 }],
+      ]),
+    });
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+
+    const result = await service.runBatch(
+      { id: 'destination', bskyIdentifier: 'destination.test' },
+      batch([staleItem]),
+    );
+
+    expect(result).toMatchObject({ posted: 0, skipped: 0, retrying: 1, parked: 0 });
+    expect(harness.events).not.toContain('done:stale-skip');
+    expect(harness.events).toContain('retry:stale-skip:3');
+  });
+
+  test('a skip record written after the item was enqueued settles as done', async () => {
+    const freshItem = item('fresh-skip', 0);
+    const harness = dependencies([], {
+      delivery: async () => {},
+      settlements: new Map([
+        ['fresh-skip', { status: 'skipped', recordedAt: freshItem.enqueued_at + 1 }],
+      ]),
+    });
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+
+    const result = await service.runBatch(
+      { id: 'destination', bskyIdentifier: 'destination.test' },
+      batch([freshItem]),
+    );
+
+    expect(result).toMatchObject({ posted: 0, skipped: 1, retrying: 0, parked: 0 });
+    expect(harness.events).toContain('done:fresh-skip');
+  });
+
+  test('a skip record with unknown timing is trusted as settled (legacy findSettlement callers)', async () => {
+    const rows = [item('unknown-timing', 0)];
+    const harness = dependencies([], {
+      delivery: async () => {},
+      settlements: new Map([['unknown-timing', { status: 'skipped' }]]),
+    });
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+
+    const result = await service.runBatch(
+      { id: 'destination', bskyIdentifier: 'destination.test' },
+      batch(rows),
+    );
+
+    expect(result).toMatchObject({ posted: 0, skipped: 1, retrying: 0, parked: 0 });
+    expect(harness.events).toContain('done:unknown-timing');
   });
 });
 

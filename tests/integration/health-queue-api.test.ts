@@ -159,6 +159,65 @@ test('health is redacted and queue operations are permission scoped with active 
               headers: { ...adminAuth, 'x-queue-confirmation': 'OVERRIDE_POLICY_SKIP' },
               body: JSON.stringify({ override: true }),
             });
+            // The retained skip record must be fully consumed (not merely
+            // marked) once the override succeeds: a worker's idempotency
+            // check reads the same history row, so a leftover skip row would
+            // make the worker treat the override as already settled and
+            // silently drop it without ever posting.
+            const skipRecordAfterOverride = dbService.getPost('502', mapping.id);
+            const queuedAfterOverride = postQueueService.inspect({ twitterId: '502' })[0];
+
+            // A second retained candidate whose enqueue collides (simulating
+            // an already-queued duplicate) must not lose its retained skip
+            // record: the handler consumes the skip before enqueueing, so a
+            // failed enqueue has to restore it for a later retry instead of
+            // leaving the candidate stranded with nothing in the queue and
+            // no history row.
+            dbService.saveTweet({
+              twitter_id: '503',
+              twitter_username: 'source',
+              bsky_identifier: 'did:plc:test-destination',
+              source_type: 'x',
+              external_post_id: '503',
+              destination_id: mapping.id,
+              route_id: route.id,
+              source_id: route.sourceId,
+              skip_reason: 'moderation-blocked-keyword',
+              retained_until: Date.now() + 60000,
+              retained_candidate_json: JSON.stringify({
+                version: 1,
+                retainedAt: Date.now(),
+                expiresAt: Date.now() + 60000,
+                normalized: {
+                  externalPostId: '503',
+                  text: 'retained sample two',
+                  urls: [],
+                  mediaUrls: [],
+                  sourceUsername: 'source',
+                  contentType: 'original',
+                  mediaTypes: ['none'],
+                },
+                sourcePayload: { id_str: '503', full_text: 'retained sample two', user: { screen_name: 'source' } },
+                degraded: false,
+              }),
+              status: 'skipped',
+            });
+            postQueueService.enqueue([{
+              twitter_id: '503',
+              bsky_identifier: 'did:plc:test-destination',
+              mapping_id: mapping.id,
+              twitter_username: 'source',
+              destination_id: mapping.id,
+              route_id: route.id,
+              kind: 'scheduled',
+              tweet_json: '{}',
+            }]);
+            const collidingOverride = await json('/api/activity/' + mapping.id + '/503/override-requeue', {
+              method: 'POST',
+              headers: { ...adminAuth, 'x-queue-confirmation': 'OVERRIDE_POLICY_SKIP' },
+              body: JSON.stringify({ override: true }),
+            });
+            const skipRecordAfterFailedOverride = dbService.getPost('503', mapping.id);
             postQueueService.claimNextBatch(new Set(), new Set([mapping.id]), undefined, 1);
             const activeDelete = await json('/api/queue/items/did%3Aplc%3Atest-destination/500', {
               method: 'DELETE',
@@ -194,6 +253,13 @@ test('health is redacted and queue operations are permission scoped with active 
               deniedOverrideStatus: deniedOverride.status,
               allowedOverrideStatus: allowedOverride.status,
               overrideDecision: allowedOverride.body.decision,
+              skipRecordConsumedAfterOverride: skipRecordAfterOverride === null,
+              queuedAfterOverrideStatus: queuedAfterOverride && queuedAfterOverride.status,
+              collidingOverrideStatus: collidingOverride.status,
+              skipRecordRestoredAfterFailedOverride:
+                skipRecordAfterFailedOverride !== null &&
+                skipRecordAfterFailedOverride.status === 'skipped' &&
+                !skipRecordAfterFailedOverride.override_requeued_at,
             }));
           } finally {
             await new Promise((resolve) => listener.close(resolve));
@@ -223,6 +289,10 @@ test('health is redacted and queue operations are permission scoped with active 
       deniedOverrideStatus: 403,
       allowedOverrideStatus: 200,
       overrideDecision: { allowed: true, reason: 'authorized-policy-override' },
+      skipRecordConsumedAfterOverride: true,
+      queuedAfterOverrideStatus: 'pending',
+      collidingOverrideStatus: 409,
+      skipRecordRestoredAfterFailedOverride: true,
     });
     expect(result.cookieDiagnostics).toMatchObject({
       primaryConfigured: true,

@@ -73,6 +73,10 @@ export interface DigestWorkerDependencies<
     claimNext(
       excludedDestinationIds: ReadonlySet<string>,
       resolveMaxEntries?: (job: DigestJob) => number,
+      // Runs inside the claim transaction (mirrors postQueueService's
+      // claimNextBatch), so acquiring the cross-process destination lease
+      // and claiming the job either both happen or neither does.
+      acquireLease?: (destinationId: string) => boolean,
     ): DigestJob | null;
     checkpoint(id: string, claimToken: string, checkpoint: number, contentHash: string): boolean;
     releaseEntries(id: string, claimToken: string, entryIds: readonly number[]): boolean;
@@ -110,6 +114,19 @@ export interface DigestWorkerDependencies<
   nextRun(policy: DigestPolicy): number;
   metrics: {
     increment(name: 'digestRuns' | 'digestFailures'): void;
+  };
+  /**
+   * Cross-process destination locking, shared with the immediate queue
+   * workers. The in-memory `activeDestinations` set only serializes digest
+   * runs within one process, so without a shared lease a digest run and a
+   * queue post (or two digest runs on different replicas) can hit the same
+   * destination at once.
+   */
+  leases?: {
+    heldByOthers(): readonly string[];
+    acquire(destinationId: string): boolean;
+    renew(destinationId: string): boolean;
+    release(destinationId: string): void;
   };
   onWorkerError?(error: unknown): void;
 }
@@ -165,11 +182,57 @@ export class DigestWorkerService<
 > {
   private started = false;
   private readonly running = new Set<Promise<void>>();
+  private readonly leasedDestinations = new Set<string>();
 
   constructor(
     private readonly dependencies: DigestWorkerDependencies<Config, Route, Destination, Mapping>,
     private readonly activeDestinations: Set<string>,
   ) {}
+
+  private acquireLease(destinationId: string): boolean {
+    if (!this.dependencies.leases) return true;
+    if (!this.dependencies.leases.acquire(destinationId)) return false;
+    this.leasedDestinations.add(destinationId);
+    return true;
+  }
+
+  private releaseLease(destinationId: string): void {
+    if (!this.leasedDestinations.delete(destinationId)) return;
+    this.dependencies.leases?.release(destinationId);
+  }
+
+  /** Keeps leases for in-flight digest runs alive while a slow run delivers. */
+  renewLeases(): void {
+    if (!this.dependencies.leases) return;
+    for (const id of this.leasedDestinations) this.dependencies.leases.renew(id);
+  }
+
+  /** Excludes destinations locked in this process and by other replicas. */
+  private blockedDestinationIds(): Set<string> {
+    const blocked = new Set(this.activeDestinations);
+    for (const id of this.dependencies.leases?.heldByOthers() ?? []) blocked.add(id);
+    return blocked;
+  }
+
+  /**
+   * A claim can acquire a lease and still come back empty (no due job for
+   * that destination). Releasing the unused lease immediately keeps the
+   * destination available instead of parking it until the lease expires.
+   */
+  private claimJob(): DigestJob | null {
+    const before = new Set(this.leasedDestinations);
+    const job = this.dependencies.jobs.claimNext(
+      this.blockedDestinationIds(),
+      (candidate) => this.maxEntriesFor(candidate),
+      this.dependencies.leases ? (destinationId) => this.acquireLease(destinationId) : undefined,
+    );
+    if (!job) {
+      for (const id of [...this.leasedDestinations]) {
+        if (!before.has(id)) this.releaseLease(id);
+      }
+    }
+    return job;
+  }
 
   initialize(): void {
     this.dependencies.jobs.resetProcessing();
@@ -311,15 +374,14 @@ export class DigestWorkerService<
   }
 
   scheduleNext(): boolean {
-    const job = this.dependencies.jobs.claimNext(this.activeDestinations, (candidate) =>
-      this.maxEntriesFor(candidate),
-    );
+    const job = this.claimJob();
     if (!job) return false;
     this.activeDestinations.add(job.destinationId);
     const running = this.execute(job)
       .catch((error) => this.dependencies.onWorkerError?.(error))
       .finally(() => {
         this.activeDestinations.delete(job.destinationId);
+        this.releaseLease(job.destinationId);
         this.running.delete(running);
       });
     this.running.add(running);
@@ -339,7 +401,12 @@ export class DigestWorkerService<
 
   private async runForever(): Promise<never> {
     while (true) {
-      this.scheduleNext();
+      try {
+        this.renewLeases();
+        this.scheduleNext();
+      } catch (error) {
+        this.dependencies.onWorkerError?.(error);
+      }
       await this.dependencies.sleep(1_000);
     }
   }

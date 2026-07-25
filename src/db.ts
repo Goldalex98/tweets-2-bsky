@@ -264,6 +264,18 @@ const rowToProcessedTweet = (row: ProcessedTweetRow): ProcessedTweet => ({
   created_at: row.created_at,
 });
 
+// SQLite's CURRENT_TIMESTAMP is UTC but formatted without a timezone marker
+// ("YYYY-MM-DD HH:MM:SS"), so Date.parse would otherwise interpret it as
+// local time. Callers that compare a processed_tweets row's created_at
+// against a Date.now()-derived value (e.g. settlement freshness checks) need
+// a real epoch, not one skewed by the host's timezone offset.
+export function parseSqliteUtcTimestampMs(value?: string | null): number | undefined {
+  if (!value) return undefined;
+  const iso = value.includes('T') || value.endsWith('Z') ? value : `${value.replace(' ', 'T')}Z`;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function normalizeSearchValue(value: string): string {
   return value
     .toLowerCase()
@@ -631,6 +643,26 @@ export const dbService = {
         AND status = 'skipped' AND override_requeued_at IS NOT NULL
     `).run(externalPostId, destinationId);
     return changesCount();
+  },
+
+  // Marks and consumes the retained skip record atomically, and *before* the
+  // caller enqueues the override so a worker can never observe the stale
+  // skip row and the freshly-enqueued item at the same time (that race let a
+  // worker's idempotency check treat the override as already settled and
+  // silently drop it without ever posting). Returns 1 when the skip record
+  // was consumed, 0 if it was already gone (e.g. a concurrent override).
+  finalizeOverrideRequeue(
+    externalPostId: string,
+    destinationId: string,
+    actorId: string,
+    at = Date.now(),
+  ): number {
+    let removed = 0;
+    db.transaction(() => {
+      dbService.markOverrideRequeued(externalPostId, destinationId, actorId, at);
+      removed = dbService.consumeSkippedOverride(externalPostId, destinationId);
+    })();
+    return removed;
   },
 
   purgeExpiredRetainedCandidates(now = Date.now()): number {
@@ -1473,7 +1505,7 @@ export const postQueueService = {
     const clause = queueScopeClause(scope);
     db.prepare(
       `UPDATE post_queue
-       SET status = 'pending', not_before = 0, updated_at = ?
+       SET status = 'pending', attempts = 0, not_before = 0, updated_at = ?
        WHERE status = 'failed' AND ${clause.sql}`,
     ).run(Date.now(), ...clause.params);
     return changesCount();
@@ -1504,6 +1536,7 @@ export const postQueueService = {
           decision_version = ?, decision_trace = ?,
           status = CASE WHEN status = 'failed' THEN 'pending' ELSE status END,
           not_before = CASE WHEN status = 'failed' THEN 0 ELSE not_before END,
+          attempts = CASE WHEN status = 'failed' THEN 0 ELSE attempts END,
           updated_at = ?
         WHERE queue_id = ? AND status != 'processing'
       `);
@@ -2790,6 +2823,10 @@ export const digestJobService = {
     now = Date.now(),
     maxEntries = 200,
     resolveMaxEntries?: (job: DigestJob) => number,
+    // Runs inside the claim transaction so acquiring the cross-process
+    // destination lease and claiming the job either both happen or neither
+    // does (mirrors postQueueService.claimNextBatch's acquireLease).
+    acquireLease?: (destinationId: string) => boolean,
   ): DigestJob | null {
     const rows = db
       .prepare(
@@ -2805,6 +2842,7 @@ export const digestJobService = {
     const token = randomUUID();
     let claimed: DigestJob | null = null;
     db.transaction(() => {
+      if (acquireLease && !acquireLease(candidate.destinationId)) return;
       db.prepare(`
         UPDATE digest_jobs SET status = 'processing', claimed_at = ?, claim_token = ?, updated_at = ?
         WHERE id = ? AND status = 'scheduled' AND next_run_at <= ? AND not_before <= ?
