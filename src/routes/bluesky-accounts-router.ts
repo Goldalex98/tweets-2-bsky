@@ -33,6 +33,7 @@ export interface BlueskyAccountsRouterDependencies {
   saveCanonicalConfig(config: AppConfig): void;
   rejectStaleConfigMutation(config: AppConfig, body: unknown, response: Response): boolean;
   listAccounts(requester: { id: string; isAdmin: boolean }): BlueskyAccountView[];
+  canMutateAccount(requester: { id: string; isAdmin: boolean }, accountId: string): boolean;
   createAccount(
     config: AppConfig,
     input: {
@@ -60,6 +61,19 @@ export interface BlueskyAccountsRouterDependencies {
 export function createBlueskyAccountsRouter(dependencies: BlueskyAccountsRouterDependencies): Router {
   const router = Router();
   const auth = [dependencies.authenticateToken, dependencies.requireManageMappings];
+
+  const requireAccountMutation = (
+    request: { user?: { id: string; isAdmin: boolean }; params: { id?: string } },
+    response: Response,
+  ): boolean => {
+    const user = request.user;
+    const accountId = String(request.params.id ?? '');
+    if (!user || !dependencies.canMutateAccount(user, accountId)) {
+      response.status(403).json({ error: 'You do not have permission to modify this Bluesky account.' });
+      return false;
+    }
+    return true;
+  };
 
   router.get('/api/bluesky-accounts', ...auth, (request, response) => {
     const user = (request as typeof request & { user: { id: string; isAdmin: boolean } }).user;
@@ -105,6 +119,7 @@ export function createBlueskyAccountsRouter(dependencies: BlueskyAccountsRouterD
     ...auth,
     async (request, response) => {
       try {
+        if (!requireAccountMutation(request as never, response)) return;
         const config = dependencies.getConfig();
         if (dependencies.rejectStaleConfigMutation(config, request.body, response)) return;
         const validated = await dependencies.validateAccount(config, String(request.params.id));
@@ -121,6 +136,7 @@ export function createBlueskyAccountsRouter(dependencies: BlueskyAccountsRouterD
     ...auth,
     async (request, response) => {
       try {
+        if (!requireAccountMutation(request as never, response)) return;
         const config = dependencies.getConfig();
         if (dependencies.rejectStaleConfigMutation(config, request.body, response)) return;
         const appPassword = typeof request.body?.appPassword === 'string'
@@ -154,6 +170,7 @@ export function createBlueskyAccountsRouter(dependencies: BlueskyAccountsRouterD
 
   router.delete('/api/bluesky-accounts/:id', ...auth, (request, response) => {
     try {
+      if (!requireAccountMutation(request as never, response)) return;
       const config = dependencies.getConfig();
       if (dependencies.rejectStaleConfigMutation(config, request.body, response)) return;
       dependencies.deleteAccount(config, String(request.params.id));

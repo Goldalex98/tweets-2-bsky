@@ -44,7 +44,7 @@ test('health is redacted and queue operations are permission scoped with active 
             });
             const login = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'test-password-123' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'test-password-123' }),
             });
             const adminAuth = { authorization: 'Bearer ' + login.body.token };
             const createdUser = await json('/api/admin/users', {
@@ -65,7 +65,7 @@ test('health is redacted and queue operations are permission scoped with active 
             });
             const viewerLogin = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'viewer', password: 'test-password-456' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'viewer', password: 'test-password-456' }),
             });
             const viewerAuth = { authorization: 'Bearer ' + viewerLogin.body.token };
             const current = configManager.getConfig();

@@ -59,7 +59,7 @@ test('migration review dismissal persists and destination aliases stay secret-sa
             });
             const login = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'test-password-123' })
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'test-password-123' })
             });
             const config = configManager.getConfig();
             configManager.addMapping({
@@ -128,7 +128,7 @@ test('migration review dismissal persists and destination aliases stay secret-sa
             });
             const memberLogin = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'member', password: 'test-password-123' })
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'member', password: 'test-password-123' })
             });
             live = seedReview(true);
             const forbidden = await json('/api/destinations/' + mappingId + '/migration-review', {

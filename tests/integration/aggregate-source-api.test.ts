@@ -40,7 +40,7 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
             });
             const login = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'test-password-123' })
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'test-password-123' })
             });
             const config = configManager.getConfig();
             configManager.addMapping({

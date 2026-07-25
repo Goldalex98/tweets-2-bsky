@@ -130,7 +130,7 @@ test('whole-document replacements must name the revision they replace', async ()
             });
             const login = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'initial-password' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'initial-password' }),
             });
             const bearer = { authorization: 'Bearer ' + login.body.token };
             const exported = await request('/api/config/export?mode=redacted', { headers: bearer });

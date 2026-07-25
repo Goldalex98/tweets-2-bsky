@@ -96,6 +96,7 @@ export function createBlueskyAccount(input: {
   label?: string;
   did?: string;
   canonicalHandle?: string;
+  createdByUserId?: string;
   legacyDestinationIds?: string[];
   now?: Date;
 }): BlueskyAccount {
@@ -117,6 +118,7 @@ export function createBlueskyAccount(input: {
     ...(input.canonicalHandle
       ? { canonicalHandle: normalizeTwitterUsername(input.canonicalHandle) ?? input.canonicalHandle }
       : {}),
+    ...(input.createdByUserId ? { createdByUserId: input.createdByUserId } : {}),
     createdAt: now,
     updatedAt: now,
     ...(input.legacyDestinationIds?.length
@@ -158,4 +160,32 @@ export function sanitizeBlueskyAccount(
     linkedDestinationId: extras.linkedDestinationId ?? null,
     health: extras.health ?? null,
   };
+}
+
+/**
+ * Non-admins may mutate an account when they manage its linked destination,
+ * or when they created the account and it is still unlinked. Orphan accounts
+ * without createdByUserId require manageAllMappings.
+ */
+export function canMutateBlueskyAccount(
+  config: Pick<AppConfig, 'blueskyAccounts' | 'destinations'>,
+  requester: { id: string },
+  accountId: string,
+  options: {
+    canManageAllMappings: boolean;
+    canManageDestination(destinationId: string): boolean;
+  },
+): boolean {
+  if (options.canManageAllMappings) {
+    return true;
+  }
+  const account = findBlueskyAccount(config, accountId);
+  if (!account) {
+    return true;
+  }
+  const linked = findDestinationForAccount(config, accountId);
+  if (linked) {
+    return options.canManageDestination(linked.id);
+  }
+  return account.createdByUserId === requester.id;
 }

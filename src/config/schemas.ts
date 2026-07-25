@@ -330,6 +330,8 @@ export interface BlueskyAccount {
   appPassword: string;
   did?: string;
   canonicalHandle?: string;
+  /** Dashboard user who created the account (ownership for non-admin mutators). */
+  createdByUserId?: string;
   createdAt: string;
   updatedAt: string;
   metadata?: BlueskyAccountMetadata;

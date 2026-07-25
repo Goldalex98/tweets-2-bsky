@@ -75,7 +75,7 @@ test('a destination can be repointed at another managed Bluesky account without 
             });
             const login = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'test-password-123' })
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'test-password-123' })
             });
             const auth = { authorization: 'Bearer ' + login.body.token };
             const adminId = configManager.getConfig().users[0].id;
@@ -231,7 +231,7 @@ test('a destination can be repointed at another managed Bluesky account without 
             });
             const memberLogin = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'member', password: 'test-password-123' })
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'member', password: 'test-password-123' })
             });
             live = configManager.getConfig();
             const forbidden = await json('/api/destinations/' + destinationId + '/bluesky-account', {
@@ -242,6 +242,11 @@ test('a destination can be repointed at another managed Bluesky account without 
                 revision: live.revision,
                 updatedAt: live.updatedAt
               })
+            });
+            const forbiddenValidate = await json('/api/bluesky-accounts/account-beta/validate', {
+              method: 'POST',
+              headers: { authorization: 'Bearer ' + memberLogin.body.token },
+              body: JSON.stringify({ revision: live.revision, updatedAt: live.updatedAt })
             });
 
             await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
@@ -265,7 +270,8 @@ test('a destination can be repointed at another managed Bluesky account without 
               createdFromAccount,
               createdWithLinkedAccount,
               createdWithoutCredentials,
-              forbidden
+              forbidden,
+              forbiddenValidate
             }));
           } finally {
             listener.close();
@@ -309,6 +315,7 @@ test('a destination can be repointed at another managed Bluesky account without 
       createdWithLinkedAccount: { status: number; body: { code?: string } };
       createdWithoutCredentials: { status: number };
       forbidden: { status: number };
+      forbiddenValidate: { status: number };
     };
 
     expect(result.stale).toMatchObject({ status: 409, body: { code: 'CONFIG_REVISION_CONFLICT' } });
@@ -350,6 +357,7 @@ test('a destination can be repointed at another managed Bluesky account without 
     expect(result.createdWithoutCredentials.status).toBe(400);
 
     expect(result.forbidden.status).toBe(403);
+    expect(result.forbiddenValidate.status).toBe(403);
   } finally {
     temporary.cleanup();
   }

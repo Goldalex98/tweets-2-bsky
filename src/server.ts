@@ -37,6 +37,7 @@ import {
 } from './services/bluesky-account-service.js';
 import {
   applyValidatedAccountIdentity,
+  canMutateBlueskyAccount,
   createBlueskyAccount,
   findBlueskyAccount,
   findBlueskyAccountByIdentity,
@@ -185,7 +186,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = (process.env.HOST || process.env.BIND_HOST || '0.0.0.0').trim() || '0.0.0.0';
 const APP_ROOT_DIR = path.join(__dirname, '..');
 const jwtSecretFromEnv = process.env.JWT_SECRET?.trim();
-const JWT_EXPIRES_IN = ((process.env.JWT_EXPIRES_IN || '30d').trim() || '30d') as SignOptions['expiresIn'];
+const JWT_EXPIRES_IN = ((process.env.JWT_EXPIRES_IN || '7d').trim() || '7d') as SignOptions['expiresIn'];
 const WEB_DIST_DIR = path.join(APP_ROOT_DIR, 'web', 'dist');
 const LEGACY_PUBLIC_DIR = path.join(APP_ROOT_DIR, 'public');
 const PACKAGE_JSON_PATH = path.join(APP_ROOT_DIR, 'package.json');
@@ -2522,6 +2523,20 @@ app.use(
         return canManageDestination(user, account.linkedDestinationId);
       });
     },
+    canMutateAccount: (requester, accountId) => {
+      const user: AuthenticatedUser = {
+        id: requester.id,
+        isAdmin: requester.isAdmin,
+        permissions: requester.isAdmin
+          ? ADMIN_USER_PERMISSIONS
+          : getConfig().users.find((entry) => entry.id === requester.id)?.permissions ??
+            getDefaultUserPermissions('user'),
+      };
+      return canMutateBlueskyAccount(getConfig(), user, accountId, {
+        canManageAllMappings: canManageAllMappings(user),
+        canManageDestination: (destinationId) => canManageDestination(user, destinationId),
+      });
+    },
     createAccount: (config, input) =>
       createValidatedBlueskyAccount(
         config,
@@ -2530,6 +2545,7 @@ app.use(
           appPassword: input.appPassword,
           serviceUrl: input.serviceUrl,
           label: input.label,
+          requesterId: input.requesterId,
         },
         saveCanonicalConfig,
       ),
@@ -2623,7 +2639,12 @@ app.post('/api/login', authRateLimiter, async (req, res) => {
   const token = issueTokenForUser(user);
   const csrfToken = setAuthenticationCookies(req, res, token);
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ token, csrfToken, isAdmin: user.role === 'admin' });
+  const includeBearerToken = req.body?.includeBearerToken === true;
+  res.json({
+    ...(includeBearerToken ? { token } : {}),
+    csrfToken,
+    isAdmin: user.role === 'admin',
+  });
 });
 
 app.get('/api/me', authenticateToken, asAuthedHandler((req, res) => {
@@ -3860,6 +3881,15 @@ app.patch(
     res.status(404).json({ error: 'Bluesky account not found.' });
     return;
   }
+  if (
+    !canMutateBlueskyAccount(config, req.user, account.id, {
+      canManageAllMappings: canManageAllMappings(req.user),
+      canManageDestination: (destinationId) => canManageDestination(req.user, destinationId),
+    })
+  ) {
+    res.status(403).json({ error: 'You do not have permission to link that Bluesky account.' });
+    return;
+  }
   if (mapping.bskyAccountId === account.id) {
     res.json({
       success: true,
@@ -4150,6 +4180,15 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHand
       res.status(404).json({ error: 'Bluesky account not found.' });
       return;
     }
+    if (
+      !canMutateBlueskyAccount(config, req.user, existingAccount.id, {
+        canManageAllMappings: canManageAllMappings(req.user),
+        canManageDestination: (destinationId) => canManageDestination(req.user, destinationId),
+      })
+    ) {
+      res.status(403).json({ error: 'You do not have permission to link that Bluesky account.' });
+      return;
+    }
     const alreadyLinked = findDestinationForAccount(config, existingAccount.id);
     if (alreadyLinked) {
       res.status(409).json({
@@ -4197,6 +4236,7 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHand
         appPassword: bskyPassword,
         serviceUrl: normalizeOptionalString(req.body?.bskyServiceUrl),
         label: normalizeOptionalString(req.body?.bskyAccountLabel),
+        createdByUserId: req.user.id,
       }),
       destinationValidation,
     );

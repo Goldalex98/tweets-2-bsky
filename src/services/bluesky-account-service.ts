@@ -106,6 +106,7 @@ export async function createValidatedBlueskyAccount(
     appPassword: string;
     serviceUrl?: string;
     label?: string;
+    requesterId?: string;
   },
   save: (next: AppConfig) => void,
 ): Promise<BlueskyAccountView> {
@@ -127,6 +128,7 @@ export async function createValidatedBlueskyAccount(
     appPassword: input.appPassword,
     serviceUrl: input.serviceUrl,
     label: input.label,
+    createdByUserId: input.requesterId,
   });
   account = applyValidatedAccountIdentity(account, validation);
   config.blueskyAccounts.push(account);

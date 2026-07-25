@@ -34,7 +34,7 @@ test('destructive admin actions require typed confirmation and current password'
             });
             const login = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'initial-password' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'initial-password' }),
             });
             const bearer = { authorization: 'Bearer ' + login.body.token };
             const version = (await request('/api/settings/scheduler', { headers: bearer })).body;
