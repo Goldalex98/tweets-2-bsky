@@ -2,7 +2,7 @@
 
 Cross-post from Twitter/X to Bluesky with thread support, media handling, account mapping, and a web dashboard.
 
-Current release: app `3.2.1`, schema v7 with canonical sources, destinations, routes, managed
+Current release: app `3.2.2`, schema v7 with canonical sources, destinations, routes, managed
 Bluesky accounts, durable queue/checkpoints, content routing/moderation/dedup, webhook/API
 ingestion, digests, encrypted configuration, and WAL-consistent backup/restore. Bun is the
 canonical runtime and package manager; `bun.lock` is the only lockfile (never add `package-lock.json`).
