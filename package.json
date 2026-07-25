@@ -51,6 +51,10 @@
   ],
   "author": "",
   "license": "MIT",
+  "overrides": {
+    "brace-expansion": "5.0.8",
+    "sigstore": "4.1.1"
+  },
   "dependencies": {
     "@atproto/api": "^0.20.34",
     "@google/generative-ai": "^0.24.1",
@@ -84,7 +88,6 @@
     "@semantic-release/exec": "7.1.0",
     "@semantic-release/git": "10.0.1",
     "@semantic-release/github": "11.0.6",
-    "@semantic-release/npm": "12.0.2",
     "@semantic-release/release-notes-generator": "14.1.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
