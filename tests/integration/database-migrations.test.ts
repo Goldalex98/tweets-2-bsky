@@ -119,6 +119,7 @@ test('upgrades a representative legacy database twice idempotently', async () =>
       { version: 6, name: 'retained-policy-candidates', applied_at: expect.any(Number) },
       { version: 7, name: 'normalized-ingestion-digests', applied_at: expect.any(Number) },
       { version: 8, name: 'canonical-queue-identity', applied_at: expect.any(Number) },
+      { version: 9, name: 'delivery-diagnostics', applied_at: expect.any(Number) },
     ]);
     expect(secondMigrations).toEqual(migrations);
     expect(first.history).toMatchObject({
