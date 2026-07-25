@@ -99,8 +99,9 @@ export function createBackupRouter(dependencies: BackupRouterDependencies): Rout
       });
       response.json({
         ...report,
+        restartRequired: true,
         message:
-          'Restore validated. Configuration was replaced, every session was signed out, ingestion tokens were revoked, and the database will be applied on restart.',
+          'Restore applied. Configuration was replaced and sessions were revoked. Restart the service now to swap the staged database; mutating APIs stay blocked until then.',
       });
     } catch (error) {
       if (dependencies.handleConfigConflict(error, response)) return;

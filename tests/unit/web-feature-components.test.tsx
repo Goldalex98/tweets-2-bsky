@@ -27,6 +27,35 @@ describe('modular frontend features', () => {
     expect(markup).toContain('Open Settings');
   });
 
+  test('overview prefers canonical handle over raw DID identifiers', () => {
+    const markup = renderToStaticMarkup(
+      <OverviewPage
+        mappings={[
+          {
+            id: 'dest-1',
+            twitterUsernames: ['source'],
+            bskyIdentifier: 'did:plc:abcdef',
+            bskyCanonicalHandle: 'mirror.example',
+            bskyServiceUrl: 'https://bsky.social',
+            enabled: true,
+            postingPolicy: { attribution: { mode: 'off' } },
+            profileManagement: { profileSync: { mode: 'off' } },
+            sources: [],
+          } as never,
+        ]}
+        queuedPostCount={0}
+        pendingBackfillCount={0}
+        dashboardTabs={[{ id: 'overview', label: 'Overview', icon: LayoutDashboard }]}
+        loading={false}
+        error={null}
+        onRetry={() => undefined}
+        onNavigate={() => undefined}
+      />,
+    );
+    expect(markup).toContain('@mirror.example');
+    expect(markup).not.toContain('@did:plc:abcdef');
+  });
+
   test('posts renders a feature-owned empty state', () => {
     const markup = renderToStaticMarkup(
       <PostsPage

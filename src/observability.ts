@@ -15,7 +15,7 @@ export type QueueErrorCategory =
 
 const REDACTED = '[REDACTED]';
 const SECRET_KEY =
-  /(^|[_-])(cookie|password|passwd|secret|token|api[_-]?key|private[_-]?key|authorization|auth[_-]?header|webhook[_-]?(url|secret)|ct0)([_-]|$)/i;
+  /password|passwd|(^|[_-])(cookie|secret|token|api[_-]?key|private[_-]?key|authorization|auth[_-]?header|webhook[_-]?(url|secret)|ct0)([_-]|$)/i;
 const JWT = /\beyJ[a-zA-Z0-9_-]{6,}\.[a-zA-Z0-9_-]{6,}\.[a-zA-Z0-9_-]{6,}\b/g;
 const BEARER = /\b(Bearer|Basic)\s+[a-zA-Z0-9._~+/=-]+/gi;
 const COOKIE_PAIR = /\b(auth_token|ct0|session|cookie)=([^;\s]+)/gi;

@@ -147,6 +147,41 @@ export function resolveDestinationStorageKey(
   return getDestinationStorageKey(mapping);
 }
 
+type DestinationHistoryIdentity = Pick<
+  AccountMapping,
+  'bskyDid' | 'bskyCanonicalHandle' | 'bskyIdentifier'
+> & {
+  storageKey?: string;
+};
+
+/**
+ * Sticky storage key plus recomputed DID/handle identity so history lookups
+ * still find pre-sticky rows while new writes stay on resolveDestinationStorageKey.
+ */
+export function historyIdentityKeys(mapping: DestinationHistoryIdentity): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of [resolveDestinationStorageKey(mapping), getDestinationStorageKey(mapping)]) {
+    const normalized = candidate.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    keys.push(normalized);
+  }
+  return keys;
+}
+
+export function findProcessedTweetDual<T>(
+  getTweet: (twitterId: string, bskyIdentifier: string) => T | null,
+  twitterId: string,
+  mapping: DestinationHistoryIdentity,
+): T | null {
+  for (const key of historyIdentityKeys(mapping)) {
+    const row = getTweet(twitterId, key);
+    if (row) return row;
+  }
+  return null;
+}
+
 export function getActiveTwitterUsernames(
   mapping: Pick<AccountMapping, 'twitterUsernames' | 'pausedTwitterUsernames'>,
 ): string[] {

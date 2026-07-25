@@ -35,7 +35,7 @@ test('inbound credentials, HMAC replay, idempotency, and one-time secrets work t
             });
             const login = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'initial-password' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'initial-password' }),
             });
             const admin = { authorization: 'Bearer ' + login.body.token };
             const source = await request('/api/sources', {

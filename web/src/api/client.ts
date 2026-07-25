@@ -25,6 +25,14 @@ export function getApiErrorMessage(error: unknown, fallback: string): string {
       const guidance = error.response?.data?.guidance;
       return typeof guidance === 'string' && guidance.length > 0 ? `${serverMessage} ${guidance}` : serverMessage;
     }
+    if (
+      serverMessage &&
+      typeof serverMessage === 'object' &&
+      typeof (serverMessage as { message?: unknown }).message === 'string' &&
+      (serverMessage as { message: string }).message.length > 0
+    ) {
+      return (serverMessage as { message: string }).message;
+    }
     if (typeof error.message === 'string' && error.message.length > 0) return error.message;
   }
   return fallback;

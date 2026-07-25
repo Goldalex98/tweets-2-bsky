@@ -21,8 +21,10 @@ import {
   applyRestoreBundle,
   createBackupBundle,
   getBackupStorageStatus,
+  isRestoreRestartRequired,
   validateBackupBundle,
 } from './backup-service.js';
+import { assertProductionEncryptionConfigured } from './secret-storage.js';
 import { clearCachedAgent, deleteAllPosts } from './bsky.js';
 import { previewTextCapability, testAIProvider } from './ai-manager.js';
 import { contentSha256 } from './content-dedup.js';
@@ -37,6 +39,7 @@ import {
 } from './services/bluesky-account-service.js';
 import {
   applyValidatedAccountIdentity,
+  canMutateBlueskyAccount,
   createBlueskyAccount,
   findBlueskyAccount,
   findBlueskyAccountByIdentity,
@@ -113,9 +116,10 @@ import {
 } from './profile-mirror.js';
 import {
   getActiveTwitterUsernames,
-  getDestinationStorageKey,
+  historyIdentityKeys,
   normalizeTwitterUsername,
   parseTwitterUsernameInput,
+  resolveDestinationStorageKey,
   resolveProfileSyncSourceUsername,
 } from './mapping-helpers.js';
 import { applyPostingPolicy, validateAttributionTemplate } from './post-transform.js';
@@ -184,7 +188,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = (process.env.HOST || process.env.BIND_HOST || '0.0.0.0').trim() || '0.0.0.0';
 const APP_ROOT_DIR = path.join(__dirname, '..');
 const jwtSecretFromEnv = process.env.JWT_SECRET?.trim();
-const JWT_EXPIRES_IN = ((process.env.JWT_EXPIRES_IN || '30d').trim() || '30d') as SignOptions['expiresIn'];
+const JWT_EXPIRES_IN = ((process.env.JWT_EXPIRES_IN || '7d').trim() || '7d') as SignOptions['expiresIn'];
 const WEB_DIST_DIR = path.join(APP_ROOT_DIR, 'web', 'dist');
 const LEGACY_PUBLIC_DIR = path.join(APP_ROOT_DIR, 'public');
 const PACKAGE_JSON_PATH = path.join(APP_ROOT_DIR, 'package.json');
@@ -195,9 +199,10 @@ const POST_VIEW_CACHE_TTL_MS = 60_000;
 const PROFILE_CACHE_TTL_MS = 5 * 60_000;
 const RESERVED_UNGROUPED_KEY = 'ungrouped';
 const SERVER_STARTED_AT = Date.now();
-const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MIN_LENGTH = 12;
 const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000;
-const AUTH_RATE_MAX_ATTEMPTS = 30;
+// In-process only: each replica has its own counter. Tighten at the reverse proxy for multi-instance deploys.
+const AUTH_RATE_MAX_ATTEMPTS = 10;
 const AUTH_COOKIE_NAME = 't2b_session';
 const CSRF_COOKIE_NAME = 't2b_csrf';
 const DEFAULT_BODY_LIMIT = '128kb';
@@ -274,6 +279,7 @@ function resolveJwtSecret(): string {
 }
 
 const JWT_SECRET = resolveJwtSecret();
+assertProductionEncryptionConfigured();
 
 interface CacheEntry<T> {
   value: T;
@@ -1088,8 +1094,16 @@ function buildEnrichedPost(activity: ProcessedTweet, postView: AppViewPost | und
 }
 
 // In-memory state for triggers and scheduling
-let lastCheckTime = 0;
-let nextCheckTime = getNextCheckTimestamp(Date.now(), getSchedulerIntervalMinutes(getConfig()));
+let lastCheckTime = (() => {
+  const maxSourceCheck = runtimeStateService
+    .listSources()
+    .reduce((max, state) => Math.max(max, state.lastCheckAt ?? 0), 0);
+  return maxSourceCheck > 0 ? maxSourceCheck : 0;
+})();
+let nextCheckTime = getNextCheckTimestamp(
+  lastCheckTime || Date.now(),
+  getSchedulerIntervalMinutes(getConfig()),
+);
 export interface PendingBackfill {
   id: string;
   sourceUsernames?: string[];
@@ -1250,6 +1264,35 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// After restore apply, config is live but SQLite swap waits for restart. Block
+// mutating APIs so workers cannot run new config against the old database.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (!req.path.startsWith('/api')) {
+    next();
+    return;
+  }
+  if (!isRestoreRestartRequired()) {
+    next();
+    return;
+  }
+  const method = req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    next();
+    return;
+  }
+  if (method === 'POST' && (req.path === '/api/logout' || req.path === '/api/login')) {
+    next();
+    return;
+  }
+  res.status(503).json({
+    error: {
+      code: 'RESTART_REQUIRED',
+      message:
+        'A database restore is pending. Restart the service to finish applying it before making changes.',
+    },
+  });
+});
+
 const getPublicHealth = () => {
   const database = databaseHealthService.check();
   let scheduler: 'running' | 'disabled' | 'error' = 'error';
@@ -1258,11 +1301,13 @@ const getPublicHealth = () => {
   } catch {
     scheduler = 'error';
   }
+  const restartRequired = isRestoreRestartRequired();
   return {
     status: database.status === 'ok' && scheduler !== 'error' ? ('ok' as const) : ('error' as const),
     uptimeSeconds: Math.max(0, Math.floor((Date.now() - SERVER_STARTED_AT) / 1000)),
     database: database.status,
     scheduler,
+    restartRequired,
   };
 };
 
@@ -1273,10 +1318,12 @@ app.get('/healthz', (_req, res) => {
 
 app.get('/readyz', (_req, res) => {
   const health = getPublicHealth();
-  res.status(health.status === 'ok' ? 200 : 503).json({
-    status: health.status === 'ok' ? 'ready' : 'not-ready',
+  const ready = health.status === 'ok' && !health.restartRequired;
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not-ready',
     database: health.database,
     scheduler: health.scheduler,
+    restartRequired: health.restartRequired,
   });
 });
 
@@ -1724,7 +1771,9 @@ const getVisibleMappingIdentitySets = (config: AppConfig, user: AuthenticatedUse
       twitterUsernames.add(normalizeActor(username));
     }
     bskyIdentifiers.add(normalizeActor(mapping.bskyIdentifier));
-    bskyIdentifiers.add(normalizeActor(getDestinationStorageKey(mapping)));
+    for (const key of historyIdentityKeys(mapping)) {
+      bskyIdentifiers.add(normalizeActor(key));
+    }
   }
 
   return {
@@ -1863,7 +1912,10 @@ const getSourceImpact = (mapping: AccountMapping, username: string) => {
     runtime: source ? runtimeStateService.getSource(source.id) : null,
     dependencies: getSourceDependencies(mapping, username),
     queue: postQueueService.getSourceCounts(mapping.id, username),
-    historyCount: dbService.countTweetsBySourceForDestination(username, getDestinationStorageKey(mapping)),
+    historyCount: historyIdentityKeys(mapping).reduce(
+      (total, key) => total + dbService.countTweetsBySourceForDestination(username, key),
+      0,
+    ),
     pauseDefaults: { cancelPendingQueue: false },
     removalDefaults: {
       cancelPendingQueue: false,
@@ -2261,6 +2313,39 @@ const verifyCurrentAdminPassword = async (request: AuthedRequest): Promise<boole
   return Boolean(user && (await bcrypt.compare(password, user.passwordHash)));
 };
 
+/** Typed confirmation + current-admin password for destructive admin mutations. */
+const requireDestructiveAdminStepUp = async (
+  request: AuthedRequest,
+  response: Response,
+  expectedConfirmation: string,
+): Promise<boolean> => {
+  const header =
+    typeof request.headers['x-destructive-confirmation'] === 'string'
+      ? request.headers['x-destructive-confirmation']
+      : undefined;
+  const bodyConfirmation =
+    typeof request.body?.confirmation === 'string' ? request.body.confirmation : undefined;
+  if (header !== expectedConfirmation && bodyConfirmation !== expectedConfirmation) {
+    response.status(403).json({
+      error: {
+        code: 'CONFIRMATION_REQUIRED',
+        message: `Confirmation ${expectedConfirmation} is required.`,
+      },
+    });
+    return false;
+  }
+  if (!(await verifyCurrentAdminPassword(request))) {
+    response.status(401).json({
+      error: {
+        code: 'REAUTHENTICATION_FAILED',
+        message: 'Current admin password verification is required.',
+      },
+    });
+    return false;
+  }
+  return true;
+};
+
 function reconcileUpdateJobState() {
   if (!updateJobState.running) {
     return;
@@ -2386,6 +2471,7 @@ const settingsRouterDependencies = {
   },
   getNextCheckTimestamp,
   signalSchedulerWake,
+  isRestoreRestartRequired,
   getErrorMessage,
   validateWebhookTarget,
   sanitizeError: (error: unknown) =>
@@ -2453,6 +2539,7 @@ app.use(
     saveCanonicalConfig,
     rejectStaleConfigMutation,
     canManageDestination,
+    canQueueBackfills: (user) => canQueueBackfills(user as AuthenticatedUser),
     queueBackfill,
     sendSafeError,
   }),
@@ -2482,6 +2569,20 @@ app.use(
         return canManageDestination(user, account.linkedDestinationId);
       });
     },
+    canMutateAccount: (requester, accountId) => {
+      const user: AuthenticatedUser = {
+        id: requester.id,
+        isAdmin: requester.isAdmin,
+        permissions: requester.isAdmin
+          ? ADMIN_USER_PERMISSIONS
+          : getConfig().users.find((entry) => entry.id === requester.id)?.permissions ??
+            getDefaultUserPermissions('user'),
+      };
+      return canMutateBlueskyAccount(getConfig(), user, accountId, {
+        canManageAllMappings: canManageAllMappings(user),
+        canManageDestination: (destinationId) => canManageDestination(user, destinationId),
+      });
+    },
     createAccount: (config, input) =>
       createValidatedBlueskyAccount(
         config,
@@ -2490,6 +2591,7 @@ app.use(
           appPassword: input.appPassword,
           serviceUrl: input.serviceUrl,
           label: input.label,
+          requesterId: input.requesterId,
         },
         saveCanonicalConfig,
       ),
@@ -2508,60 +2610,73 @@ app.get('/api/auth/bootstrap-status', (_req, res) => {
   res.json({ bootstrapOpen: config.users.length === 0 });
 });
 
-app.post('/api/register', authRateLimiter, async (req, res) => {
-  const config = getConfig();
-  if (config.users.length > 0) {
-    res.status(403).json({ error: 'Registration is disabled. Ask an admin to create your account.' });
-    return;
-  }
+let bootstrapRegisterChain: Promise<void> = Promise.resolve();
 
-  const email = normalizeEmail(req.body?.email);
-  const username = normalizeUsername(req.body?.username);
-  const password = req.body?.password;
+app.post('/api/register', authRateLimiter, (req, res) => {
+  const work = bootstrapRegisterChain.then(async () => {
+    const config = getConfig();
+    if (config.users.length > 0) {
+      res.status(403).json({ error: 'Registration is disabled. Ask an admin to create your account.' });
+      return;
+    }
 
-  if (!email && !username) {
-    res.status(400).json({ error: 'Username or email is required.' });
-    return;
-  }
+    const email = normalizeEmail(req.body?.email);
+    const username = normalizeUsername(req.body?.username);
+    const password = req.body?.password;
 
-  const passwordError = validatePassword(password);
-  if (passwordError) {
-    res.status(400).json({ error: passwordError });
-    return;
-  }
+    if (!email && !username) {
+      res.status(400).json({ error: 'Username or email is required.' });
+      return;
+    }
 
-  const uniqueIdentityError = ensureUniqueIdentity(config, undefined, username, email);
-  if (uniqueIdentityError) {
-    res.status(400).json({ error: uniqueIdentityError });
-    return;
-  }
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      res.status(400).json({ error: passwordError });
+      return;
+    }
 
-  const nowIso = new Date().toISOString();
-  const newUser: WebUser = {
-    id: randomUUID(),
-    username,
-    email,
-    passwordHash: await bcrypt.hash(password, 10),
-    tokenVersion: 0,
-    role: 'admin',
-    permissions: { ...ADMIN_USER_PERMISSIONS },
-    createdAt: nowIso,
-    updatedAt: nowIso,
-  };
+    const uniqueIdentityError = ensureUniqueIdentity(config, undefined, username, email);
+    if (uniqueIdentityError) {
+      res.status(400).json({ error: uniqueIdentityError });
+      return;
+    }
 
-  config.users.push(newUser);
+    const nowIso = new Date().toISOString();
+    const newUser: WebUser = {
+      id: randomUUID(),
+      username,
+      email,
+      passwordHash: await bcrypt.hash(password, 10),
+      tokenVersion: 0,
+      role: 'admin',
+      permissions: { ...ADMIN_USER_PERMISSIONS },
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
 
-  if (config.mappings.length > 0) {
-    config.mappings = config.mappings.map((mapping) => ({
-      ...mapping,
-      createdByUserId: mapping.createdByUserId || newUser.id,
-      owner: mapping.owner || getUserPublicLabel(newUser),
-    }));
-  }
+    config.users.push(newUser);
 
-  saveConfig(config);
+    if (config.mappings.length > 0) {
+      config.mappings = config.mappings.map((mapping) => ({
+        ...mapping,
+        createdByUserId: mapping.createdByUserId || newUser.id,
+        owner: mapping.owner || getUserPublicLabel(newUser),
+      }));
+    }
 
-  res.json({ success: true });
+    saveConfig(config);
+
+    res.json({ success: true });
+  });
+  bootstrapRegisterChain = work.then(
+    () => undefined,
+    () => undefined,
+  );
+  void work.catch((error: unknown) => {
+    if (!res.headersSent) {
+      sendSafeError(res, 500, 'REGISTER_FAILED', error);
+    }
+  });
 });
 
 app.post('/api/login', authRateLimiter, async (req, res) => {
@@ -2583,7 +2698,12 @@ app.post('/api/login', authRateLimiter, async (req, res) => {
   const token = issueTokenForUser(user);
   const csrfToken = setAuthenticationCookies(req, res, token);
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ token, csrfToken, isAdmin: user.role === 'admin' });
+  const includeBearerToken = req.body?.includeBearerToken === true;
+  res.json({
+    ...(includeBearerToken ? { token } : {}),
+    csrfToken,
+    isAdmin: user.role === 'admin',
+  });
 });
 
 app.get('/api/me', authenticateToken, asAuthedHandler((req, res) => {
@@ -2830,7 +2950,8 @@ app.put('/api/admin/users/:id', authenticateToken, requireAdmin, asAuthedHandler
   res.json(summary || null);
 }));
 
-app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'RESET_USER_PASSWORD'))) return;
   const { id } = req.params;
   const config = getConfig();
   const userIndex = config.users.findIndex((user) => user.id === id);
@@ -2855,7 +2976,7 @@ app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin,
   };
   saveConfig(config);
   res.json({ success: true });
-});
+}));
 
 app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   const { id } = req.params;
@@ -3597,7 +3718,10 @@ app.delete(
       ? postQueueService.cancelPendingByMappingAndSource(mapping.id, username)
       : 0;
     const deletedHistoryItems = deleteHistory
-      ? dbService.deleteTweetsBySourceForDestination(username, getDestinationStorageKey(mapping))
+      ? historyIdentityKeys(mapping).reduce(
+          (total, key) => total + dbService.deleteTweetsBySourceForDestination(username, key),
+          0,
+        )
       : 0;
     const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
     config.mappings[index] = updatedMapping;
@@ -3761,13 +3885,21 @@ app.patch(
       return;
     }
     const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
-    const previousStorageKey = getDestinationStorageKey(mapping);
-    const nextStorageKey = getDestinationStorageKey(candidate);
+    const nextStorageKey = resolveDestinationStorageKey(candidate);
     clearCachedAgent(mapping);
     clearCachedAgent(candidate);
     config.mappings[index] = candidate;
     saveConfig(config);
-    const rekeyed = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+    let rekeyed = { processed: 0, queued: 0 };
+    for (const previousStorageKey of historyIdentityKeys(mapping)) {
+      if (previousStorageKey !== nextStorageKey) {
+        const result = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+        rekeyed = {
+          processed: rekeyed.processed + result.processed,
+          queued: rekeyed.queued + result.queued,
+        };
+      }
+    }
     res.json({
       success: true,
       destination: sanitizeMapping(candidate, createUserLookupById(config), req.user),
@@ -3806,6 +3938,15 @@ app.patch(
   const account = findBlueskyAccount(config, accountId);
   if (!account) {
     res.status(404).json({ error: 'Bluesky account not found.' });
+    return;
+  }
+  if (
+    !canMutateBlueskyAccount(config, req.user, account.id, {
+      canManageAllMappings: canManageAllMappings(req.user),
+      canManageDestination: (destinationId) => canManageDestination(req.user, destinationId),
+    })
+  ) {
+    res.status(403).json({ error: 'You do not have permission to link that Bluesky account.' });
     return;
   }
   if (mapping.bskyAccountId === account.id) {
@@ -4098,6 +4239,15 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHand
       res.status(404).json({ error: 'Bluesky account not found.' });
       return;
     }
+    if (
+      !canMutateBlueskyAccount(config, req.user, existingAccount.id, {
+        canManageAllMappings: canManageAllMappings(req.user),
+        canManageDestination: (destinationId) => canManageDestination(req.user, destinationId),
+      })
+    ) {
+      res.status(403).json({ error: 'You do not have permission to link that Bluesky account.' });
+      return;
+    }
     const alreadyLinked = findDestinationForAccount(config, existingAccount.id);
     if (alreadyLinked) {
       res.status(409).json({
@@ -4145,6 +4295,7 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHand
         appPassword: bskyPassword,
         serviceUrl: normalizeOptionalString(req.body?.bskyServiceUrl),
         label: normalizeOptionalString(req.body?.bskyAccountLabel),
+        createdByUserId: req.user.id,
       }),
       destinationValidation,
     );
@@ -4907,7 +5058,8 @@ app.delete('/api/mappings/:id/cache', authenticateToken, requireAdmin, (req, res
   res.json({ success: true, message: 'Cache cleared for all associated accounts' });
 });
 
-app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'DELETE_ALL_POSTS'))) return;
   const id = routeParam(typeof req.params.id === 'string' ? req.params.id : undefined);
   if (!id) {
     res.status(400).json({ error: 'Missing destination id.' });
@@ -4923,17 +5075,19 @@ app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, 
   try {
     const deletedCount = await deleteAllPosts(id);
 
-    dbService.deleteTweetsByBskyIdentifier(getDestinationStorageKey(mapping));
+    for (const key of historyIdentityKeys(mapping)) {
+      dbService.deleteTweetsByBskyIdentifier(key);
+    }
 
     res.json({
       success: true,
       message: `Deleted ${deletedCount} posts from ${mapping.bskyIdentifier} and cleared local cache.`,
     });
   } catch (err) {
-    console.error('Failed to delete all posts:', err);
-    res.status(500).json({ error: (err as Error).message });
+    console.error('Failed to delete all posts:', sanitizeForDiagnostics(err));
+    sendSafeError(res, 500, 'DELETE_ALL_POSTS_FAILED', err);
   }
-});
+}));
 
 // --- Twitter Config Routes (Admin Only) ---
 
@@ -5593,6 +5747,19 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
       }
     : policyDecision;
   const snapshot = createPolicySnapshot({ destination, route, ai: config.ai });
+  // Consume the retained skip record *before* enqueueing: a worker's
+  // idempotency check reads the same history row, so if the row were still
+  // present when the new queue item became visible, a worker could see the
+  // stale skip and silently drop the override without ever posting it.
+  const consumed = dbService.finalizeOverrideRequeue(
+    retained.normalized.externalPostId,
+    destination.id,
+    req.user.id,
+  );
+  if (consumed !== 1) {
+    res.status(409).json({ error: 'This skipped item was already override-requeued.' });
+    return;
+  }
   const affected = postQueueService.enqueue([
     {
       twitter_id: retained.normalized.externalPostId,
@@ -5616,10 +5783,12 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
     },
   ]);
   if (affected !== 1) {
+    // The skip record is already consumed; restore it so the retained
+    // candidate is not lost and the caller can retry the override.
+    dbService.saveTweet({ ...skipped, override_requeued_at: undefined, override_requeued_by: undefined });
     res.status(409).json({ error: 'The retained candidate is already queued.' });
     return;
   }
-  dbService.markOverrideRequeued(retained.normalized.externalPostId, destination.id, req.user.id);
   if (dedupPolicy.enabled) {
     duplicateFingerprintService.record({
       destinationId: destination.id,
@@ -5641,7 +5810,6 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
     decisionTrace: JSON.stringify(decision.trace),
     policyHash: snapshot.hash,
   });
-  dbService.consumeSkippedOverride(retained.normalized.externalPostId, destination.id);
   res.json({ success: true, affected, decision, policyHash: snapshot.hash, retainedDegraded: retained.degraded });
 }));
 
@@ -5696,7 +5864,8 @@ app.get('/api/update-status', authenticateToken, requireAdmin, (_req, res) => {
   res.json(getUpdateStatusPayload());
 });
 
-app.post('/api/update', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
+app.post('/api/update', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'RUN_UPDATE'))) return;
   const startedBy = getActorLabel(req.user);
   const result = startUpdateJob(startedBy);
   if (!result.ok) {
@@ -5724,7 +5893,8 @@ app.post('/api/run-now', authenticateToken, asAuthedHandler((req, res) => {
   res.json({ success: true, message: 'Check triggered' });
 }));
 
-app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res) => {
+app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'CLEAR_ALL_BACKFILLS'))) return;
   pendingBackfills = [];
   postQueueService.cancelPendingBackfills();
   updateAppStatus({
@@ -5735,7 +5905,7 @@ app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res)
   });
   signalSchedulerWake();
   res.json({ success: true, message: 'All backfills cleared' });
-});
+}));
 
 app.post('/api/backfill/:id', authenticateToken, asAuthedHandler((req, res) => {
   if (!canQueueBackfills(req.user)) {
@@ -5898,23 +6068,36 @@ app.get('/api/config/export', authenticateToken, requireAdmin, asAuthedHandler(a
   res.json(exportData);
 }));
 
-app.post('/api/config/import', importRestoreRateLimiter, authenticateToken, requireAdmin, requireJsonObject, (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Pragma', 'no-cache');
-  try {
-    const currentConfig = getConfig();
-    if (rejectMissingOrStaleConfigRevision(currentConfig, req.body, res)) return;
-    const newConfig = mergeImportedConfig(currentConfig, req.body);
-    saveConfig(newConfig);
-    res.json({ success: true, message: 'Configuration imported successfully' });
-  } catch (err) {
-    if (sendConfigConflictIfStale(err, res)) return;
-    console.error('Import failed:', sanitizeForDiagnostics(err));
-    res.status(400).json({
-      error: 'Failed to process import file.',
-    });
-  }
-});
+app.post(
+  '/api/config/import',
+  importRestoreRateLimiter,
+  authenticateToken,
+  requireAdmin,
+  requireJsonObject,
+  asAuthedHandler(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    if (!(await requireDestructiveAdminStepUp(req, res, 'IMPORT_CONFIG'))) return;
+    try {
+      const currentConfig = getConfig();
+      if (rejectMissingOrStaleConfigRevision(currentConfig, req.body, res)) return;
+      const {
+        password: _reauthPassword,
+        confirmation: _confirmation,
+        ...importPayload
+      } = req.body as Record<string, unknown>;
+      const newConfig = mergeImportedConfig(currentConfig, importPayload);
+      saveConfig(newConfig);
+      res.json({ success: true, message: 'Configuration imported successfully' });
+    } catch (err) {
+      if (sendConfigConflictIfStale(err, res)) return;
+      console.error('Import failed:', sanitizeForDiagnostics(err));
+      res.status(400).json({
+        error: 'Failed to process import file.',
+      });
+    }
+  }),
+);
 
 app.get('/api/recent-activity', authenticateToken, asAuthedHandler((req, res) => {
   const limitCandidate = req.query.limit ? Number(req.query.limit) : 50;

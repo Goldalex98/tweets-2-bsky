@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  assertProductionEncryptionConfigured,
   decryptConfigDocument,
   encryptConfigDocument,
   isEncryptedValue,
@@ -58,5 +59,20 @@ describe('configuration secret encryption', () => {
     expect(parseEncryptionKey(Buffer.alloc(32, 7).toString('base64'))).toHaveLength(32);
     expect(() => parseEncryptionKey('short')).toThrow('exactly 32 bytes');
     expect(() => parseEncryptionKey(Buffer.alloc(31).toString('base64'))).toThrow('exactly 32 bytes');
+  });
+
+  test('refuses to start in production without CONFIG_ENCRYPTION_KEY', () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousKey = process.env.CONFIG_ENCRYPTION_KEY;
+    try {
+      process.env.NODE_ENV = 'production';
+      process.env.CONFIG_ENCRYPTION_KEY = '';
+      expect(() => assertProductionEncryptionConfigured()).toThrow('CONFIG_ENCRYPTION_KEY is required');
+      process.env.CONFIG_ENCRYPTION_KEY = KEY;
+      expect(() => assertProductionEncryptionConfigured()).not.toThrow();
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+      process.env.CONFIG_ENCRYPTION_KEY = previousKey;
+    }
   });
 });

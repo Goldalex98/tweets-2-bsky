@@ -10,7 +10,7 @@ import type { AppConfig, BlueskyAccount } from '../config/schemas.js';
 import { getConfigVersion } from '../config-manager.js';
 import { blueskyAccountRuntimeService, dbService } from '../db.js';
 import { clearCachedAgent } from '../bsky.js';
-import { getDestinationStorageKey } from '../mapping-helpers.js';
+import { getDestinationStorageKey, historyIdentityKeys, resolveDestinationStorageKey } from '../mapping-helpers.js';
 import { validateBlueskyCredentials } from '../profile-mirror.js';
 import type { BlueskyAccountView } from '../routes/bluesky-accounts-router.js';
 
@@ -38,9 +38,20 @@ function rekeyLinkedDestinationIdentity(
 ): void {
   const linked = findDestinationForAccount(config, accountId);
   if (!linked) return;
-  const previousStorageKey = getDestinationStorageKey(accountStorageIdentity(previousAccount));
-  const nextStorageKey = getDestinationStorageKey(accountStorageIdentity(nextAccount));
-  dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+  const stickyKey = resolveDestinationStorageKey({
+    ...accountStorageIdentity(nextAccount),
+    storageKey: linked.storageKey,
+  });
+  const previousKeys = historyIdentityKeys({
+    ...accountStorageIdentity(previousAccount),
+    storageKey: linked.storageKey,
+  });
+  const nextComputed = getDestinationStorageKey(accountStorageIdentity(nextAccount));
+  for (const previousStorageKey of [...previousKeys, nextComputed]) {
+    if (previousStorageKey !== stickyKey) {
+      dbService.rekeyDestinationIdentity(previousStorageKey, stickyKey);
+    }
+  }
 }
 
 function toAccountView(config: AppConfig, account: BlueskyAccount): BlueskyAccountView {
@@ -95,6 +106,7 @@ export async function createValidatedBlueskyAccount(
     appPassword: string;
     serviceUrl?: string;
     label?: string;
+    requesterId?: string;
   },
   save: (next: AppConfig) => void,
 ): Promise<BlueskyAccountView> {
@@ -116,6 +128,7 @@ export async function createValidatedBlueskyAccount(
     appPassword: input.appPassword,
     serviceUrl: input.serviceUrl,
     label: input.label,
+    createdByUserId: input.requesterId,
   });
   account = applyValidatedAccountIdentity(account, validation);
   config.blueskyAccounts.push(account);

@@ -319,6 +319,11 @@ function revokeIssuedSessions(config: AppConfig): AppConfig {
   };
 }
 
+/** True while a restore has staged SQLite that still needs a process restart to apply. */
+export function isRestoreRestartRequired(): boolean {
+  return fs.existsSync(PENDING_DB_RESTORE_PATH);
+}
+
 export function applyRestoreBundle(
   input: Buffer | string,
   options: { confirmation: string; maxBytes?: number },
@@ -327,6 +332,7 @@ export function applyRestoreBundle(
   pendingDatabase: string;
   revokedIngestionCredentials: number;
   sessionsRevoked: boolean;
+  restartRequired: boolean;
 } {
   if (options.confirmation !== 'RESTORE') throw new Error('Typed confirmation RESTORE is required.');
   const validated = validateBackupBundle(input, options.maxBytes);
@@ -353,7 +359,9 @@ export function applyRestoreBundle(
     saveCanonicalConfig(nextConfig);
   } catch (error) {
     // Cleanup must never mask the failure that triggered it; a locked handle on
-    // Windows can leave the staged file behind and that is recoverable.
+    // Windows can leave the staged file behind and that is recoverable. Stop the
+    // service, delete leftover `database.restore-pending.sqlite*` / `*.tmp*`, then
+    // re-run restore or restore the pre-restore backup bundle.
     for (const suffix of ['', '-wal', '-shm', '-journal']) {
       try {
         fs.rmSync(`${pendingTemporary}${suffix}`, { force: true });
@@ -362,7 +370,10 @@ export function applyRestoreBundle(
         // Ignored: the staged restore is abandoned either way.
       }
     }
-    throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Restore staging failed (${detail}). On Windows, stop the app if the database file is locked, remove leftover restore-pending files, then retry.`,
+    );
   }
   return {
     ...validated.report,
@@ -370,15 +381,18 @@ export function applyRestoreBundle(
     pendingDatabase: PENDING_DB_RESTORE_PATH,
     revokedIngestionCredentials,
     sessionsRevoked: true,
+    restartRequired: true,
   };
 }
 
 export function getBackupStorageStatus() {
+  const pendingDatabaseRestore = isRestoreRestartRequired();
   return {
     dataDirectory: DATA_DIR,
     configFile: ACTIVE_CONFIG_FILE,
     backupDirectory: BACKUP_DIR,
-    pendingDatabaseRestore: fs.existsSync(PENDING_DB_RESTORE_PATH),
+    pendingDatabaseRestore,
+    restartRequired: pendingDatabaseRestore,
     encryption: getEncryptionStatus(),
   };
 }

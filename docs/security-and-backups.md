@@ -19,6 +19,22 @@ cross-origin dashboard access. With no origin list, cross-origin browser access 
 Password changes, admin password resets, and role/permission changes increment the user's token
 version and immediately invalidate previously issued sessions and bearer tokens.
 
+Destructive admin dashboard actions also require **step-up authentication**: the caller must supply
+the current admin password (`password` body field or `x-reauth-password`) and a typed confirmation
+string (`confirmation` body field or `x-destructive-confirmation`). The confirmation tokens are:
+
+| Action | Confirmation |
+|--------|--------------|
+| Delete all Bluesky posts for a destination | `DELETE_ALL_POSTS` |
+| Run in-app service update | `RUN_UPDATE` |
+| Import configuration | `IMPORT_CONFIG` |
+| Reset another user's password | `RESET_USER_PASSWORD` |
+| Clear all queued backfills | `CLEAR_ALL_BACKFILLS` |
+| Full config export / full backup create & restore | existing `EXPORT_WITH_SECRETS` / backup confirmations |
+
+Bulk destination backfill additionally requires the `queueBackfills` permission (admins always pass)
+and rejects unknown destination ids with HTTP 404 instead of treating them as managed.
+
 Signing out does the same: `POST /api/logout` clears the browser cookies **and** increments the token
 version, so it is an all-sessions logout. Every other browser session and every bearer token issued
 for that account stops working, because clearing a cookie cannot retire a token an attacker already
@@ -29,6 +45,12 @@ Tokens identify their subject by account id. A token whose account has been dele
 if a new account later reuses the same username or email. Tokens issued before subject-bound claims
 existed still work, and each acceptance is logged as `legacy-session-token-accepted` with a hashed
 identifier so operators can see who still needs to re-authenticate.
+
+New passwords (bootstrap register, change-password, and admin reset) must be at least 12 characters.
+Existing shorter password hashes continue to work until the user sets a new password.
+
+Login and register share an in-process rate limit (10 attempts per 15 minutes per client address).
+Each process has its own counter; put a reverse-proxy limit in front when running multiple replicas.
 
 ## Configuration concurrency
 
@@ -45,15 +67,21 @@ missing.
 URLs/secrets, and future token-shaped fields before `config.json` is written. Values use
 AES-256-GCM with a unique 96-bit nonce and field-path authenticated data.
 
+When `NODE_ENV=production`, the key is **required**: the process refuses to start (and refuses to
+persist plaintext secrets) if `CONFIG_ENCRYPTION_KEY` is unset. Migrate an existing plaintext
+deployment before enabling production fail-closed: backup the volume, run
+`encryption-migrate --confirm ENCRYPT_CONFIG`, verify with `encryption-status`, then deploy the
+fail-closed build with the same key.
+
 The key must be exactly 32 bytes, encoded as either 64 hexadecimal characters or standard base64:
 
 ```bash
 openssl rand -hex 32
 ```
 
-Plaintext configuration remains compatible when the key is absent, but the application prints an
-admin warning. If encrypted data exists and the key is missing, wrong, or the ciphertext was
-modified, startup fails closed and does not rewrite the configuration with defaults.
+Outside production, plaintext configuration remains compatible when the key is absent, but the
+application prints an admin warning. If encrypted data exists and the key is missing, wrong, or the
+ciphertext was modified, startup fails closed and does not rewrite the configuration with defaults.
 
 Migration and rotation cover both stores that hold secrets: the configuration document and the
 ingestion HMAC secrets in SQLite. They always create a timestamped backup, re-encrypt both under the
@@ -110,9 +138,17 @@ bun run cli -- restore backup.t2b-backup --apply --confirm RESTORE
 ```
 
 Apply creates a full pre-restore bundle, atomically replaces the normalized config, and stages the
-SQLite database as `database.restore-pending.sqlite`. Restart the service to swap the database
-before SQLite opens; the prior database is retained as a timestamped `.bak`. Never copy
-`database.sqlite` over a running WAL database manually.
+SQLite database as `database.restore-pending.sqlite`. Until the process restarts, the dashboard
+reports **Restart required**, `/readyz` is not ready, mutating `/api/*` requests return HTTP 503
+`RESTART_REQUIRED`, and the scheduler/queue workers skip delivery so new config cannot run against
+the old database. Restart the service to swap the database before SQLite opens; the prior database
+is retained as a timestamped `.bak`. Never copy `database.sqlite` over a running WAL database
+manually.
+
+On Windows, a locked database handle can prevent the pending rename. Stop every tweets-2-bsky
+process, remove leftover `database.restore-pending.sqlite*` temporary files if a failed attempt left
+them behind, then restart so the staged file can replace `database.sqlite`. If rename still fails,
+manually rename the pending file over `database.sqlite` while the service is stopped.
 
 The document written by a restore is the validated and migrated one, not the raw bundle contents, and
 the bundle metadata is re-checked immediately before anything is applied.
@@ -127,9 +163,11 @@ when it was taken, including credentials revoked afterwards:
 
 ## Outbound request protection
 
-Operations webhooks and normalized media downloads must be HTTPS, may not carry credentials in the
-URL, and are refused when the hostname resolves into a private, loopback, link-local, or multicast
-range unless private targets are explicitly allowed. The request is then made against the exact
-address that passed validation, with the original hostname kept for the `Host` header and TLS SNI, so
-a DNS answer that changes between validation and connection cannot redirect the request. Redirects
-are never followed; a 3xx response is reported as a delivery failure.
+Operations webhooks, normalized media downloads, link-card fetches, and t.co-style URL expansion
+must use HTTPS, may not carry credentials in the URL, and are refused when the hostname is
+`.local` / `.localhost` or resolves into a private, loopback, link-local, or multicast range unless
+private webhook targets are explicitly allowed. The request is then made against the exact address
+that passed validation, with the original hostname kept for the `Host` header and TLS SNI, so a DNS
+answer that changes between validation and connection cannot redirect the request. Webhook and
+media downloads never follow redirects; link-card and URL-expansion helpers re-validate each
+`Location` hop before following it.

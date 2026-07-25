@@ -868,6 +868,7 @@ const normalizeBlueskyAccount = (value: unknown): BlueskyAccount | null => {
             normalizeString(value.canonicalHandle)?.toLowerCase(),
         }
       : {}),
+    ...(normalizeString(value.createdByUserId) ? { createdByUserId: normalizeString(value.createdByUserId) } : {}),
     createdAt,
     updatedAt,
     ...(legacyDestinationIds?.length ? { metadata: { legacyDestinationIds } } : {}),

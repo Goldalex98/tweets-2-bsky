@@ -52,10 +52,25 @@ export function getEncryptionStatus(raw = process.env.CONFIG_ENCRYPTION_KEY): En
 
 export function warnIfPlaintextSecrets(): void {
   if (plaintextWarningShown || process.env.NODE_ENV === 'test' || parseEncryptionKey()) return;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'CONFIG_ENCRYPTION_KEY is required when NODE_ENV=production. Set a 32-byte key and migrate before starting.',
+    );
+  }
   plaintextWarningShown = true;
   console.warn(
     '⚠️ CONFIG_ENCRYPTION_KEY is not set. Configuration secrets remain plaintext for compatibility; set a 32-byte key and run config-encryption-migrate.',
   );
+}
+
+/** Fail closed in production when encryption is not configured. */
+export function assertProductionEncryptionConfigured(): void {
+  if (process.env.NODE_ENV !== 'production') return;
+  if (!parseEncryptionKey()) {
+    throw new Error(
+      'CONFIG_ENCRYPTION_KEY is required when NODE_ENV=production. Refusing to start with plaintext secrets.',
+    );
+  }
 }
 
 export function isEncryptedValue(value: unknown): value is EncryptedValue {

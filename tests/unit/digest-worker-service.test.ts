@@ -63,9 +63,17 @@ const entry: DigestEntry = {
   createdAt: 1_000,
 };
 
+interface DigestLeaseAdapter {
+  heldByOthers(): readonly string[];
+  acquire(destinationId: string): boolean;
+  renew(destinationId: string): boolean;
+  release(destinationId: string): void;
+}
+
 interface HarnessOptions {
   claimedEntries?: DigestEntry[];
   renderedEntryIds?: number[];
+  leases?: DigestLeaseAdapter;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -83,6 +91,44 @@ function createHarness(options: HarnessOptions = {}) {
     {},
   ];
   const pendingJobs: DigestJob[] = [];
+  const jobs = {
+    resetProcessing: () => {
+      events.push('reset');
+      return 1;
+    },
+    list: () => [] as DigestJob[],
+    arm: (destinationId: string, routeId: string, nextRunAt: number) => {
+      events.push(`arm:${destinationId}:${routeId}:${nextRunAt}`);
+      return { ...job, nextRunAt };
+    },
+    claimNext: (
+      excluded: ReadonlySet<string>,
+      resolveMaxEntries?: (candidate: DigestJob) => number,
+      acquireLease?: (destinationId: string) => boolean,
+    ) => {
+      const next = pendingJobs[0];
+      if (!next || excluded.has(next.destinationId)) return null;
+      if (acquireLease && !acquireLease(next.destinationId)) return null;
+      events.push(`claim-limit:${resolveMaxEntries?.(next) ?? 'unbounded'}`);
+      return pendingJobs.shift() ?? null;
+    },
+    checkpoint: (_id: string, _token: string, value: number) => {
+      events.push(`checkpoint:${value}`);
+      return true;
+    },
+    releaseEntries: (_id: string, _token: string, entryIds: readonly number[]) => {
+      events.push(`release:${[...entryIds].join(',')}`);
+      return true;
+    },
+    complete: (_id: string, _token: string, _nextRunAt: number, deliveredEntryIds?: readonly number[]) => {
+      events.push(`complete:${deliveredEntryIds ? [...deliveredEntryIds].join(',') : 'all'}`);
+      return true;
+    },
+    fail: (_id: string, _token: string, error: unknown) => {
+      events.push(`fail:${error instanceof Error ? error.message : String(error)}`);
+      return true;
+    },
+  };
   const service = new DigestWorkerService(
     {
       sleep: async () => {},
@@ -91,39 +137,7 @@ function createHarness(options: HarnessOptions = {}) {
         destinations: [{ id: 'destination' }],
         mappings: [{ id: 'destination' }],
       }),
-      jobs: {
-        resetProcessing: () => {
-          events.push('reset');
-          return 1;
-        },
-        list: () => [],
-        arm: (destinationId, routeId, nextRunAt) => {
-          events.push(`arm:${destinationId}:${routeId}:${nextRunAt}`);
-          return { ...job, nextRunAt };
-        },
-        claimNext: (excluded, resolveMaxEntries) => {
-          const next = pendingJobs[0];
-          if (!next || excluded.has(next.destinationId)) return null;
-          events.push(`claim-limit:${resolveMaxEntries?.(next) ?? 'unbounded'}`);
-          return pendingJobs.shift() ?? null;
-        },
-        checkpoint: (_id, _token, value) => {
-          events.push(`checkpoint:${value}`);
-          return true;
-        },
-        releaseEntries: (_id, _token, entryIds) => {
-          events.push(`release:${[...entryIds].join(',')}`);
-          return true;
-        },
-        complete: (_id, _token, _nextRunAt, deliveredEntryIds) => {
-          events.push(`complete:${deliveredEntryIds ? [...deliveredEntryIds].join(',') : 'all'}`);
-          return true;
-        },
-        fail: (_id, _token, error) => {
-          events.push(`fail:${error instanceof Error ? error.message : String(error)}`);
-          return true;
-        },
-      },
+      jobs,
       entries: {
         list: () => options.claimedEntries ?? [entry],
       },
@@ -169,10 +183,39 @@ function createHarness(options: HarnessOptions = {}) {
       metrics: {
         increment: (name) => events.push(`metric:${name}`),
       },
+      ...(options.leases ? { leases: options.leases } : {}),
     },
     active,
   );
-  return { service, events, active, pendingJobs, previewPolicies };
+  return { service, events, active, pendingJobs, previewPolicies, jobs };
+}
+
+/** A shared SQLite-backed lease table, as seen by one replica. */
+function leaseTable() {
+  const holders = new Map<string, string>();
+  const events: string[] = [];
+  const forReplica = (replica: string): DigestLeaseAdapter => ({
+    heldByOthers: () =>
+      [...holders.entries()].filter(([, owner]) => owner !== replica).map(([key]) => key),
+    acquire: (key: string) => {
+      const owner = holders.get(key);
+      if (owner && owner !== replica) return false;
+      holders.set(key, replica);
+      events.push(`acquire:${replica}:${key}`);
+      return true;
+    },
+    renew: (key: string) => {
+      if (holders.get(key) !== replica) return false;
+      events.push(`renew:${replica}:${key}`);
+      return true;
+    },
+    release: (key: string) => {
+      if (holders.get(key) !== replica) return;
+      holders.delete(key);
+      events.push(`release:${replica}:${key}`);
+    },
+  });
+  return { holders, events, forReplica };
 }
 
 describe('DigestWorkerService', () => {
@@ -256,6 +299,52 @@ describe('DigestWorkerService', () => {
     expect(harness.active.has('destination')).toBe(true);
     await harness.service.waitForIdle();
     expect(harness.active.has('destination')).toBe(false);
+  });
+});
+
+describe('digest worker cross-process destination leases', () => {
+  test('a second replica cannot claim a destination another replica holds', async () => {
+    const table = leaseTable();
+    const replicaA = createHarness({ leases: table.forReplica('replica-a') });
+    replicaA.pendingJobs.push({ ...job });
+    const replicaB = createHarness({ leases: table.forReplica('replica-b') });
+    replicaB.pendingJobs.push({ ...job });
+
+    expect(replicaA.service.scheduleNext()).toBe(true);
+    expect(table.holders.get('destination')).toBe('replica-a');
+    // Separate processes, so replica B's in-memory active set cannot help;
+    // only the shared lease keeps it off the destination.
+    expect(replicaB.service.scheduleNext()).toBe(false);
+
+    replicaA.service.renewLeases();
+    expect(table.events).toContain('renew:replica-a:destination');
+
+    await replicaA.service.waitForIdle();
+    expect(table.holders.has('destination')).toBe(false);
+    expect(replicaB.service.scheduleNext()).toBe(true);
+  });
+
+  test('a lease taken for an empty claim is released immediately', () => {
+    const table = leaseTable();
+    const harness = createHarness({ leases: table.forReplica('replica-a') });
+    // No due jobs, but the claim path still resolves and locks the destination.
+    harness.jobs.claimNext = (_excluded, _resolveMaxEntries, acquireLease) => {
+      acquireLease?.('destination');
+      return null;
+    };
+
+    expect(harness.service.scheduleNext()).toBe(false);
+    // Without this the destination would be unusable until the lease expired.
+    expect(table.holders.has('destination')).toBe(false);
+    expect(table.events).toEqual(['acquire:replica-a:destination', 'release:replica-a:destination']);
+  });
+
+  test('leases are ignored entirely when no lease store is wired', () => {
+    const harness = createHarness();
+    harness.pendingJobs.push({ ...job });
+
+    expect(harness.service.scheduleNext()).toBe(true);
+    harness.service.renewLeases();
   });
 });
 

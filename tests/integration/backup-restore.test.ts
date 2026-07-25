@@ -100,6 +100,8 @@ test('backup snapshots WAL data and restore validation is no-write and fail-safe
             secretPreserved: restored.mappings[0]?.bskyPassword === 'full-backup-secret',
             pendingDatabaseExists: fs.existsSync(applyReport.pendingDatabase),
             preRestoreBackupExists: fs.existsSync(applyReport.preRestoreBackup),
+            restartRequired: applyReport.restartRequired === true,
+            storageRestartRequired: backup.getBackupStorageStatus().restartRequired === true,
           }));
         `,
       ],
@@ -157,6 +159,8 @@ test('backup snapshots WAL data and restore validation is no-write and fail-safe
     expect(result.secretPreserved).toBe(true);
     expect(result.pendingDatabaseExists).toBe(true);
     expect(result.preRestoreBackupExists).toBe(true);
+    expect(result.restartRequired).toBe(true);
+    expect(result.storageRestartRequired).toBe(true);
     expect(restartResult).toEqual({
       restoredRow: 'wal-row',
       pendingExists: false,

@@ -84,11 +84,15 @@ Selectable events (dashboard toggles or CLI):
 
 Browser sessions use `HttpOnly` cookies and CSRF tokens. CLI automation may use bearer authentication. Stored X cookies, managed Bluesky `appPassword` values, provider keys, webhook secrets, ingestion secrets, and JWT material are never returned by normal settings APIs.
 
-`CONFIG_ENCRYPTION_KEY` enables AES-256-GCM protected configuration fields. Keep the same key across restarts and copied-volume validation. See [security and backups](security-and-backups.md).
+`CONFIG_ENCRYPTION_KEY` enables AES-256-GCM protected configuration fields. When `NODE_ENV=production`,
+the key is required at startup. Keep the same key across restarts and copied-volume validation. See
+[security and backups](security-and-backups.md).
 
 ## Backup and restore
 
-Redacted backups preserve the current deployment's users and credentials during restore. Full backups contain encrypted credentials and require current-admin reauthentication plus typed confirmation. Validation is dry-run and no-write. Restore stages SQLite for startup replacement and retains pre-restore rollback artifacts.
+Redacted backups preserve the current deployment's users and credentials during restore. Full backups contain encrypted credentials and require current-admin reauthentication plus typed confirmation. Validation is dry-run and no-write. Restore stages SQLite for startup replacement, enters restart-required mode (mutating APIs blocked, `/readyz` not ready) until restart, and retains pre-restore rollback artifacts. On Windows, stop the service before retrying if pending-database rename fails because the file is locked.
+
+Destructive dashboard operations (service update, config import, delete-all-posts, admin password reset, clear-all backfills) require the same style of current-admin password reauthentication and a typed confirmation token. See [security and backups](security-and-backups.md).
 
 ## Webhook/API ingestion
 

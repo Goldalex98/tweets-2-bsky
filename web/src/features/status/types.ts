@@ -50,6 +50,7 @@ export interface SchedulerSettings extends ConfigVersion {
   runOnStartup: boolean;
   lastCheckTime: number | null;
   nextCheckTime: number | null;
+  restartRequired?: boolean;
   enabledSourceCount: number;
   estimatedChecksPerHour: number;
   diagnostics?: Record<string, number | undefined>;

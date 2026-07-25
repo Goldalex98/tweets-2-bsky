@@ -14,6 +14,9 @@ import * as francModule from 'franc-min';
 import iso6391 from 'iso-639-1';
 import puppeteer from 'puppeteer-core';
 import sharp from 'sharp';
+import { fetchPublicHttps } from './public-http-fetch.js';
+import { isRestoreRestartRequired } from './backup-service.js';
+import { resolveWebhookTarget, sendPinnedHttpsRequest } from './webhook.js';
 import { applyTextCapabilities, generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { createBlueskyDigestDeliveryAdapter } from './adapters/bluesky-digest-delivery.js';
 import { createBlueskyNormalizedDeliveryAdapter } from './adapters/bluesky-normalized-delivery.js';
@@ -36,7 +39,9 @@ import {
 import {
   getActiveTwitterUsernames,
   getCanonicalDestinationKey,
-  getDestinationStorageKey,
+  findProcessedTweetDual,
+  historyIdentityKeys,
+  resolveDestinationStorageKey,
 } from './mapping-helpers.js';
 import {
   applyPostingPolicy,
@@ -237,6 +242,7 @@ import {
   destinationLeaseService,
   duplicateFingerprintService,
   backfillJobService,
+  parseSqliteUtcTimestampMs,
   postQueueService,
   runtimeStateService,
 } from './db.js';
@@ -321,7 +327,7 @@ async function migrateJsonToSqlite() {
   // REPAIR STEP: Fix any 'unknown' records in SQLite that came from the broken schema migration
   for (const mapping of config.mappings) {
     for (const username of mapping.twitterUsernames) {
-      dbService.repairUnknownIdentifiers(username, getDestinationStorageKey(mapping));
+      dbService.repairUnknownIdentifiers(username, resolveDestinationStorageKey(mapping));
     }
   }
 
@@ -350,6 +356,18 @@ function loadProcessedTweets(bskyIdentifier: string): ProcessedTweetsMap {
       ];
     }),
   );
+}
+
+/** Union history under sticky storageKey and recomputed DID/handle aliases. Sticky wins on conflicts. */
+function loadProcessedTweetsForDestination(mapping: AccountMapping): ProcessedTweetsMap {
+  const merged: ProcessedTweetsMap = {};
+  const sticky = resolveDestinationStorageKey(mapping);
+  for (const key of historyIdentityKeys(mapping)) {
+    if (key === sticky) continue;
+    Object.assign(merged, loadProcessedTweets(key));
+  }
+  Object.assign(merged, loadProcessedTweets(sticky));
+  return merged;
 }
 
 function saveProcessedTweet(
@@ -856,42 +874,30 @@ function detectLanguage(text: string): string[] {
 
 async function expandUrl(shortUrl: string): Promise<string> {
   try {
-    const response = await axios.head(shortUrl, {
+    const head = await fetchPublicHttps(shortUrl, {
+      method: 'HEAD',
+      timeoutMs: 10_000,
       maxRedirects: 5,
-      timeout: 10000,
-      validateStatus: (status) => status >= 200 && status < 400,
+      maxResponseBytes: 8 * 1024,
     });
-    return getAxiosResponseUrl(response.request) ?? shortUrl;
+    return head.url || shortUrl;
   } catch {
     try {
-      const response = await axios.get(shortUrl, {
-        responseType: 'stream',
+      const get = await fetchPublicHttps(shortUrl, {
+        method: 'GET',
+        timeoutMs: 10_000,
         maxRedirects: 5,
-        timeout: 10000,
+        maxResponseBytes: 64 * 1024,
       });
-      response.data.destroy();
-      return getAxiosResponseUrl(response.request) ?? shortUrl;
+      return get.url || shortUrl;
     } catch (error: unknown) {
-      if (
-        axios.isAxiosError(error) &&
-        (error.code === 'ERR_FR_TOO_MANY_REDIRECTS' ||
-          error.response?.status === 403 ||
-          error.response?.status === 401)
-      ) {
-        // Silent fallback for common expansion issues (redirect loops, login walls)
+      const message = error instanceof Error ? error.message : String(error);
+      if (/too many redirects|private network|HTTPS|credentials/i.test(message)) {
         return shortUrl;
       }
       return shortUrl;
     }
   }
-}
-
-function getAxiosResponseUrl(request: unknown): string | undefined {
-  if (!request || typeof request !== 'object') return undefined;
-  const response = (request as { res?: unknown }).res;
-  if (!response || typeof response !== 'object') return undefined;
-  const responseUrl = (response as { responseUrl?: unknown }).responseUrl;
-  return typeof responseUrl === 'string' ? responseUrl : undefined;
 }
 
 interface DownloadedMedia {
@@ -905,20 +911,22 @@ interface DownloadedMedia {
 const MAX_MEDIA_DOWNLOAD_BYTES = 320 * 1024 * 1024;
 
 async function downloadMedia(url: string, maxDurationMs = 120000): Promise<DownloadedMedia> {
-  const response = await axios({
-    url,
+  const resolved = await resolveWebhookTarget(url, false);
+  const response = await sendPinnedHttpsRequest({
+    target: resolved.target,
+    ...(resolved.pinnedAddress ? { pinnedAddress: resolved.pinnedAddress } : {}),
+    ...(resolved.family ? { family: resolved.family } : {}),
     method: 'GET',
-    responseType: 'arraybuffer',
-    // axios `timeout` only fires on socket inactivity; the abort signal enforces
-    // a hard deadline so a slow-trickling large download can't stall the pipeline.
-    timeout: 30000,
-    signal: AbortSignal.timeout(maxDurationMs),
-    maxContentLength: MAX_MEDIA_DOWNLOAD_BYTES,
-    maxBodyLength: MAX_MEDIA_DOWNLOAD_BYTES,
+    headers: { 'user-agent': 'tweets-2-bsky-media/1' },
+    timeoutMs: Math.min(30_000, maxDurationMs),
+    maxResponseBytes: MAX_MEDIA_DOWNLOAD_BYTES,
   });
+  if (response.status !== 200) {
+    throw new Error(`Media request returned HTTP ${response.status}.`);
+  }
   return {
-    buffer: Buffer.from(response.data as ArrayBuffer),
-    mimeType: (response.headers['content-type'] as string) || 'application/octet-stream',
+    buffer: response.body,
+    mimeType: String(response.headers['content-type'] ?? 'application/octet-stream'),
   };
 }
 
@@ -1156,18 +1164,23 @@ async function pollForVideoProcessing(jobId: string): Promise<BlobRef> {
 
 async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<ExternalEmbedCard | null> {
   try {
-    const response = await axios.get(url, {
+    const response = await fetchPublicHttps(url, {
+      method: 'GET',
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      timeout: 10000,
+      timeoutMs: 10_000,
       maxRedirects: 5,
+      maxResponseBytes: 2 * 1024 * 1024,
     });
+    if (response.status < 200 || response.status >= 300) {
+      return null;
+    }
 
-    const $ = cheerio.load(response.data);
+    const $ = cheerio.load(response.body.toString('utf8'));
     const title = $('meta[property="og:title"]').attr('content') || $('title').text() || '';
     const description =
       $('meta[property="og:description"]').attr('content') || $('meta[name="description"]').attr('content') || '';
@@ -1176,21 +1189,21 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<Externa
     let imageUrl = $('meta[property="og:image"]').attr('content');
     if (imageUrl) {
       if (!imageUrl.startsWith('http')) {
-        const baseUrl = new URL(url);
+        const baseUrl = new URL(response.url || url);
         imageUrl = new URL(imageUrl, baseUrl.origin).toString();
       }
       try {
         const { buffer, mimeType } = await downloadMedia(imageUrl);
         thumbBlob = await uploadToBluesky(agent, buffer, mimeType);
       } catch {
-        // SIlently fail thumbnail upload
+        // Silently fail thumbnail upload
       }
     }
 
     if (!title && !description) return null;
 
     const external: ExternalEmbedCard['external'] = {
-      uri: url,
+      uri: response.url || url,
       title: title || url,
       description: description,
     };
@@ -1204,11 +1217,8 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<Externa
       external,
     };
   } catch (error: unknown) {
-    const code = axios.isAxiosError(error)
-      ? error.code
-      : (error as { code?: string })?.code;
-    if (code === 'ERR_FR_TOO_MANY_REDIRECTS') {
-      // Ignore redirect loops
+    const message = error instanceof Error ? error.message : String(error);
+    if (/too many redirects|private network|HTTPS|credentials/i.test(message)) {
       return null;
     }
     console.warn(`Failed to fetch embed card for ${url}:`, describeError(error));
@@ -1574,7 +1584,8 @@ async function processTweets(
   addTweetsToMap(tweetMap, filteredTweets);
 
   // Maintain a local map that updates in real-time for intra-batch replies
-  const localProcessedMap: ProcessedTweetsMap = sharedProcessedMap ?? { ...loadProcessedTweets(bskyIdentifier) };
+  const localProcessedMap: ProcessedTweetsMap =
+    sharedProcessedMap ?? { ...loadProcessedTweetsForDestination(mapping) };
 
   const toProcess = filteredTweets.filter((t) => !localProcessedMap[t.id_str || t.id || '']);
 
@@ -1598,7 +1609,11 @@ async function processTweets(
     if (localProcessedMap[tweetId]) continue;
 
     // Fallback to DB in case a nested backfill already saved this tweet.
-    const dbRecord = dbService.getTweet(tweetId, bskyIdentifier);
+    const dbRecord = findProcessedTweetDual(
+      (twitterId, key) => dbService.getTweet(twitterId, key),
+      tweetId,
+      mapping,
+    );
     if (dbRecord) {
       localProcessedMap[tweetId] = {
         uri: dbRecord.bsky_uri,
@@ -1697,7 +1712,11 @@ async function processTweets(
                 );
 
                 // Check if it was saved
-                const savedParent = dbService.getTweet(replyStatusId, bskyIdentifier);
+                const savedParent = findProcessedTweetDual(
+                  (twitterId, key) => dbService.getTweet(twitterId, key),
+                  replyStatusId,
+                  mapping,
+                );
                 if (savedParent && savedParent.status === 'migrated') {
                   // Update local map
                   localProcessedMap[replyStatusId] = {
@@ -2507,7 +2526,7 @@ function enqueueTweetsForMapping(
   sourcePolicyAlreadyApplied = false,
 ): number {
   const inputs = [];
-  const destinationStorageKey = getDestinationStorageKey(mapping);
+  const destinationStorageKey = resolveDestinationStorageKey(mapping);
   const config = getConfig();
   const source = config.sources.find((candidate) => candidate.username === twitterUsername.toLowerCase());
   const route = source
@@ -2923,10 +2942,11 @@ async function fetchBackfillTimeline(
     throw new Error(`[${twitterUsername}] Twitter credentials are not set; cannot backfill.`);
   }
 
-  const destinationStorageKey = getDestinationStorageKey(mapping);
-  const seenIds = new Set(Object.keys(loadProcessedTweets(destinationStorageKey)));
-  for (const id of postQueueService.getQueuedIdSet(destinationStorageKey)) {
-    seenIds.add(id);
+  const seenIds = new Set(Object.keys(loadProcessedTweetsForDestination(mapping)));
+  for (const key of historyIdentityKeys(mapping)) {
+    for (const id of postQueueService.getQueuedIdSet(key)) {
+      seenIds.add(id);
+    }
   }
 
   const found: Tweet[] = [];
@@ -2955,7 +2975,7 @@ async function applyBackfillPolicy(
   found: readonly Tweet[],
   mediaHashByTweet: Map<string, string | undefined>,
 ): Promise<PolicyDecision<Tweet>> {
-  const destinationStorageKey = getDestinationStorageKey(mapping);
+  const destinationStorageKey = resolveDestinationStorageKey(mapping);
   const config = getConfig();
   const source = config.sources.find((candidate) => candidate.username === twitterUsername.toLowerCase());
   const route = source
@@ -3242,8 +3262,16 @@ const digestWorkerService = new DigestWorkerService(
       resetProcessing: () => digestJobService.resetProcessing(),
       list: () => digestJobService.list(),
       arm: (destinationId, routeId, nextRunAt) => digestJobService.arm(destinationId, routeId, nextRunAt),
-      claimNext: (excludedDestinationIds, resolveMaxEntries) =>
-        digestJobService.claimNext(excludedDestinationIds, Date.now(), 200, resolveMaxEntries),
+      claimNext: (excludedDestinationIds, resolveMaxEntries, acquireLease) => {
+        if (isRestoreRestartRequired()) return null;
+        return digestJobService.claimNext(
+          excludedDestinationIds,
+          Date.now(),
+          200,
+          resolveMaxEntries,
+          acquireLease,
+        );
+      },
       checkpoint: (id, claimToken, checkpoint, contentHash) =>
         digestJobService.checkpoint(id, claimToken, checkpoint, contentHash),
       releaseEntries: (id, claimToken, entryIds) => digestJobService.releaseEntries(id, claimToken, entryIds),
@@ -3275,6 +3303,22 @@ const digestWorkerService = new DigestWorkerService(
     metrics: {
       increment: (name) => metricsService.increment(name),
     },
+    leases: {
+      heldByOthers: () => destinationLeaseService.listHeldByOthers(RUNTIME_OWNER_ID),
+      acquire: (destinationId) =>
+        Boolean(
+          destinationLeaseService.acquire({
+            destinationKey: destinationId,
+            ownerId: RUNTIME_OWNER_ID,
+            ttlMs: DESTINATION_LEASE_TTL_MS,
+          }),
+        ),
+      renew: (destinationId) =>
+        destinationLeaseService.renew(destinationId, RUNTIME_OWNER_ID, DESTINATION_LEASE_TTL_MS),
+      release: (destinationId) => {
+        destinationLeaseService.release(destinationId, RUNTIME_OWNER_ID);
+      },
+    },
     onWorkerError: (error) =>
       logPipeline('Queue', `❌ Digest worker crashed: ${describeError(error)}`, true),
   },
@@ -3304,14 +3348,16 @@ const queueWorkerService = new DestinationQueueWorkerService(
       allowed: Set<string>,
       resolveDestinationKey: (mappingId: string) => string,
       acquireLease?: (destinationKey: string) => boolean,
-    ) =>
-      postQueueService.claimNextBatch(
+    ) => {
+      if (isRestoreRestartRequired()) return null;
+      return postQueueService.claimNextBatch(
         active,
         allowed,
         resolveDestinationKey,
         QUEUE_BATCH_MAX_ITEMS,
         acquireLease,
-      ),
+      );
+    },
     leases: {
       heldByOthers: () => destinationLeaseService.listHeldByOthers(RUNTIME_OWNER_ID),
       acquire: (destinationKey) =>
@@ -3331,7 +3377,23 @@ const queueWorkerService = new DestinationQueueWorkerService(
     deleteByMappingId: (mappingId) => postQueueService.deleteByMappingId(mappingId),
     deliver: (mapping, batch, context) =>
       deliverPostBatch(mapping, batch, context.mode === 'drain' ? 'one-shot-queue' : 'post-worker'),
-    findSettlement: (item) => dbService.getTweet(item.twitter_id, item.bsky_identifier),
+    findSettlement: (item) => {
+      const mapping =
+        getConfig().mappings.find((candidate) => candidate.id === item.destination_id) ??
+        getConfig().mappings.find((candidate) =>
+          historyIdentityKeys(candidate).includes(item.bsky_identifier.toLowerCase()),
+        );
+      const record = mapping
+        ? findProcessedTweetDual(
+            (twitterId, key) => dbService.getTweet(twitterId, key),
+            item.twitter_id,
+            mapping,
+          )
+        : dbService.getTweet(item.twitter_id, item.bsky_identifier);
+      return record
+        ? { status: record.status, recordedAt: parseSqliteUtcTimestampMs(record.created_at) }
+        : null;
+    },
     markDone: (item) =>
       item.queue_id
         ? void postQueueService.markDoneById(item.queue_id)
@@ -3457,7 +3519,7 @@ async function importHistory(
     console.error(`No mapping found for twitter username: ${twitterUsername}`);
     return;
   }
-  const destinationStorageKey = getDestinationStorageKey(mapping);
+  const destinationStorageKey = resolveDestinationStorageKey(mapping);
 
   if (delivery === 'queue' && !dryRun) {
     await fetchAndEnqueueBackfill(mapping, twitterUsername, limit, ignoreCancellation, requestId, sessionKey);
@@ -3493,7 +3555,7 @@ async function importHistory(
 
   const allFoundTweets: Tweet[] = [];
   const seenIds = new Set<string>();
-  const processedTweets = loadProcessedTweets(destinationStorageKey);
+  const processedTweets = loadProcessedTweetsForDestination(mapping);
 
   console.log(`Fetching tweets for ${twitterUsername}...`);
   updateAppStatus({ message: 'Fetching tweets...' });
@@ -3811,7 +3873,11 @@ async function applyPinnedTweet(
     return true;
   }
 
-  const record = dbService.getTweet(pinnedTweetId, getDestinationStorageKey(mapping));
+  const record = findProcessedTweetDual(
+    (twitterId, bskyIdentifier) => dbService.getTweet(twitterId, bskyIdentifier),
+    pinnedTweetId,
+    mapping,
+  );
   if (record && record.status === 'skipped') {
     // Pinned retweets/external replies are never mirrored — remember that so we
     // don't retry (and log) every cycle.
@@ -3936,8 +4002,12 @@ async function syncPinnedTweetViaProfile(
       return `Pinned tweet unchanged (${pinnedTweetId}). Nothing to do.`;
     }
 
-    const destinationStorageKey = getDestinationStorageKey(mapping);
-    let record = dbService.getTweet(pinnedTweetId, destinationStorageKey);
+    const destinationStorageKey = resolveDestinationStorageKey(mapping);
+    let record = findProcessedTweetDual(
+      (twitterId, bskyIdentifier) => dbService.getTweet(twitterId, bskyIdentifier),
+      pinnedTweetId,
+      mapping,
+    );
     if (!record || record.status !== 'migrated') {
       console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} not mirrored yet. Backfilling it now...`);
       await acquireScraperSlot();
@@ -3972,7 +4042,11 @@ async function syncPinnedTweetViaProfile(
           undefined,
           sessionKey,
         );
-        record = dbService.getTweet(pinnedTweetId, destinationStorageKey);
+        record = findProcessedTweetDual(
+          (twitterId, bskyIdentifier) => dbService.getTweet(twitterId, bskyIdentifier),
+          pinnedTweetId,
+          mapping,
+        );
       }
     }
 
@@ -4302,8 +4376,8 @@ async function runAccountTask(
         const scheduledAccountTimeoutMs = resolveScheduledAccountTimeoutMs();
 
         // Pre-load processed IDs for optimization
-        const destinationStorageKey = getDestinationStorageKey(mapping);
-        const processedMap = loadProcessedTweets(destinationStorageKey);
+        const destinationStorageKey = resolveDestinationStorageKey(mapping);
+        const processedMap = loadProcessedTweetsForDestination(mapping);
         const processedIds = new Set(Object.keys(processedMap));
 
         for (const twitterUsername of getActiveTwitterUsernames(mapping)) {
@@ -4662,6 +4736,10 @@ async function main(): Promise<void> {
     getPendingBackfills: mergedPendingBackfills,
     getPendingPinSyncs: () => getPendingPinSyncs().slice(0, SUBBRANCH_COUNT),
     processPinSyncs: async (pendingPinSyncs, cycleConfig) => {
+      if (isRestoreRestartRequired()) {
+        console.warn('[Scheduler] Restore restart required; skipping pin syncs.');
+        return;
+      }
       for (const pinSync of pendingPinSyncs) {
         const mapping = findMappingById(cycleConfig.mappings, pinSync.id);
         clearPinSync(pinSync.id);
@@ -4685,6 +4763,10 @@ async function main(): Promise<void> {
       }
     },
     processBackfills: async (pendingBackfills, cycleConfig) => {
+      if (isRestoreRestartRequired()) {
+        console.warn('[Scheduler] Restore restart required; skipping backfills.');
+        return;
+      }
       const estimatedPendingTweets = pendingBackfills.reduce((total, backfill) => {
         const mapping = findMappingById(cycleConfig.mappings, backfill.id);
         const accountCount = mapping
@@ -4722,6 +4804,10 @@ async function main(): Promise<void> {
       );
     },
     runSweep: async (cycleConfig) => {
+      if (isRestoreRestartRequired()) {
+        console.warn('[Scheduler] Restore restart required; skipping fetch sweep.');
+        return;
+      }
       await runFetchSweep(cycleConfig);
     },
     updateLastCheckTime,

@@ -368,8 +368,18 @@
 
             const clearAllBackfills = async () => {
                 if (!confirm('Stop all pending and running backfills?')) return;
+                const confirmation = prompt('Type CLEAR_ALL_BACKFILLS to confirm:');
+                if (confirmation !== 'CLEAR_ALL_BACKFILLS') return;
+                const password = prompt('Enter your admin password to confirm:');
+                if (!password) return;
                 try {
-                    await axios.post('/api/backfill/clear-all', {}, { headers: { Authorization: `Bearer ${token}` } });
+                    await axios.post('/api/backfill/clear-all', { confirmation: 'CLEAR_ALL_BACKFILLS', password }, {
+                        headers: {
+                            Authorization: `Bearer ${token}`,
+                            'x-destructive-confirmation': 'CLEAR_ALL_BACKFILLS',
+                            'x-reauth-password': password,
+                        },
+                    });
                     fetchStatus();
                 } catch (err) {
                     alert('Failed to clear backfills');
@@ -396,14 +406,27 @@
 
             const deleteAllPosts = async (id) => {
                 if (!confirm('DANGER: This will delete ALL posts on the associated Bluesky account. Are you absolutely sure?')) return;
-                const confirmName = prompt('Type "DELETE" to confirm:');
-                if (confirmName !== 'DELETE') return;
-                
+                const confirmation = prompt('Type DELETE_ALL_POSTS to confirm:');
+                if (confirmation !== 'DELETE_ALL_POSTS') return;
+                const password = prompt('Enter your admin password to confirm:');
+                if (!password) return;
+
                 try {
-                    const res = await axios.post(`/api/mappings/${id}/delete-all-posts`, {}, { headers: { Authorization: `Bearer ${token}` } });
+                    const res = await axios.post(
+                        `/api/mappings/${id}/delete-all-posts`,
+                        { confirmation: 'DELETE_ALL_POSTS', password },
+                        {
+                            headers: {
+                                Authorization: `Bearer ${token}`,
+                                'x-destructive-confirmation': 'DELETE_ALL_POSTS',
+                                'x-reauth-password': password,
+                            },
+                        },
+                    );
                     alert(res.data.message);
                 } catch (err) {
-                    alert('Failed to delete posts: ' + (err.response?.data?.error || err.message));
+                    const apiError = err.response?.data?.error;
+                    alert('Failed to delete posts: ' + (typeof apiError === 'string' ? apiError : apiError?.message || err.message));
                 }
             };
 
@@ -467,18 +490,37 @@
                     e.target.value = ''; // Reset input
                     return;
                 }
+                const confirmation = prompt('Type IMPORT_CONFIG to confirm the import:');
+                if (confirmation !== 'IMPORT_CONFIG') {
+                    e.target.value = '';
+                    return;
+                }
+                const password = prompt('Enter your admin password to confirm:');
+                if (!password) {
+                    e.target.value = '';
+                    return;
+                }
 
                 const reader = new FileReader();
                 reader.onload = async (event) => {
                     try {
                         const config = JSON.parse(event.target.result);
-                        await axios.post('/api/config/import', config, {
-                            headers: { Authorization: `Bearer ${token}` }
+                        await axios.post('/api/config/import', {
+                            ...config,
+                            confirmation: 'IMPORT_CONFIG',
+                            password,
+                        }, {
+                            headers: {
+                                Authorization: `Bearer ${token}`,
+                                'x-destructive-confirmation': 'IMPORT_CONFIG',
+                                'x-reauth-password': password,
+                            }
                         });
                         alert('Configuration imported successfully! Reloading...');
                         fetchData();
                     } catch (err) {
-                        alert('Failed to import configuration: ' + (err.response?.data?.error || err.message));
+                        const apiError = err.response?.data?.error;
+                        alert('Failed to import configuration: ' + (typeof apiError === 'string' ? apiError : apiError?.message || err.message));
                     }
                     e.target.value = ''; // Reset input
                 };

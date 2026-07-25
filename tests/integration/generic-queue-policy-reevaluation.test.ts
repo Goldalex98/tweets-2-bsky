@@ -43,7 +43,7 @@ test('re-evaluating a generic queue item applies policy to its normalized payloa
             });
             const login = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'test-password-123' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'test-password-123' }),
             });
             const adminAuth = { authorization: 'Bearer ' + login.body.token };
 

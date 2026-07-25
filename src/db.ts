@@ -36,16 +36,43 @@ interface DbLike {
   pragma?: (sql: string) => unknown;
 }
 
+function renameSyncWithRetry(from: string, to: string, attempts = 8): void {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (error) {
+      lastError = error;
+      // Windows often holds a brief exclusive lock after process start; retry
+      // with a short busy-wait before declaring the restore unrecoverable.
+      const waitUntil = Date.now() + 40 * attempt;
+      while (Date.now() < waitUntil) {
+        // intentional busy-wait: module load cannot await
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 if (fs.existsSync(PENDING_DB_RESTORE_PATH)) {
   const previousPath = `${DB_PATH}.pre-restore-${Date.now()}.bak`;
-  if (fs.existsSync(DB_PATH)) fs.renameSync(DB_PATH, previousPath);
+  if (fs.existsSync(DB_PATH)) renameSyncWithRetry(DB_PATH, previousPath);
   try {
-    fs.renameSync(PENDING_DB_RESTORE_PATH, DB_PATH);
+    renameSyncWithRetry(PENDING_DB_RESTORE_PATH, DB_PATH);
     for (const suffix of ['-wal', '-shm']) fs.rmSync(`${DB_PATH}${suffix}`, { force: true });
     console.warn(`♻️ Applied staged database restore. Previous database: ${previousPath}`);
   } catch (error) {
-    if (fs.existsSync(previousPath) && !fs.existsSync(DB_PATH)) fs.renameSync(previousPath, DB_PATH);
-    throw new Error(`Could not apply staged database restore: ${(error as Error).message}`);
+    if (fs.existsSync(previousPath) && !fs.existsSync(DB_PATH)) {
+      try {
+        renameSyncWithRetry(previousPath, DB_PATH);
+      } catch {
+        // Keep the original failure; operator must stop the service and swap manually.
+      }
+    }
+    throw new Error(
+      `Could not apply staged database restore: ${(error as Error).message}. If the database file is locked (common on Windows), stop every tweets-2-bsky process, then rename ${PENDING_DB_RESTORE_PATH} over ${DB_PATH} and restart.`,
+    );
   }
 }
 
@@ -263,6 +290,18 @@ const rowToProcessedTweet = (row: ProcessedTweetRow): ProcessedTweet => ({
   status: row.status,
   created_at: row.created_at,
 });
+
+// SQLite's CURRENT_TIMESTAMP is UTC but formatted without a timezone marker
+// ("YYYY-MM-DD HH:MM:SS"), so Date.parse would otherwise interpret it as
+// local time. Callers that compare a processed_tweets row's created_at
+// against a Date.now()-derived value (e.g. settlement freshness checks) need
+// a real epoch, not one skewed by the host's timezone offset.
+export function parseSqliteUtcTimestampMs(value?: string | null): number | undefined {
+  if (!value) return undefined;
+  const iso = value.includes('T') || value.endsWith('Z') ? value : `${value.replace(' ', 'T')}Z`;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 function normalizeSearchValue(value: string): string {
   return value
@@ -631,6 +670,26 @@ export const dbService = {
         AND status = 'skipped' AND override_requeued_at IS NOT NULL
     `).run(externalPostId, destinationId);
     return changesCount();
+  },
+
+  // Marks and consumes the retained skip record atomically, and *before* the
+  // caller enqueues the override so a worker can never observe the stale
+  // skip row and the freshly-enqueued item at the same time (that race let a
+  // worker's idempotency check treat the override as already settled and
+  // silently drop it without ever posting). Returns 1 when the skip record
+  // was consumed, 0 if it was already gone (e.g. a concurrent override).
+  finalizeOverrideRequeue(
+    externalPostId: string,
+    destinationId: string,
+    actorId: string,
+    at = Date.now(),
+  ): number {
+    let removed = 0;
+    db.transaction(() => {
+      dbService.markOverrideRequeued(externalPostId, destinationId, actorId, at);
+      removed = dbService.consumeSkippedOverride(externalPostId, destinationId);
+    })();
+    return removed;
   },
 
   purgeExpiredRetainedCandidates(now = Date.now()): number {
@@ -1473,7 +1532,7 @@ export const postQueueService = {
     const clause = queueScopeClause(scope);
     db.prepare(
       `UPDATE post_queue
-       SET status = 'pending', not_before = 0, updated_at = ?
+       SET status = 'pending', attempts = 0, not_before = 0, updated_at = ?
        WHERE status = 'failed' AND ${clause.sql}`,
     ).run(Date.now(), ...clause.params);
     return changesCount();
@@ -1504,6 +1563,7 @@ export const postQueueService = {
           decision_version = ?, decision_trace = ?,
           status = CASE WHEN status = 'failed' THEN 'pending' ELSE status END,
           not_before = CASE WHEN status = 'failed' THEN 0 ELSE not_before END,
+          attempts = CASE WHEN status = 'failed' THEN 0 ELSE attempts END,
           updated_at = ?
         WHERE queue_id = ? AND status != 'processing'
       `);
@@ -2790,6 +2850,10 @@ export const digestJobService = {
     now = Date.now(),
     maxEntries = 200,
     resolveMaxEntries?: (job: DigestJob) => number,
+    // Runs inside the claim transaction so acquiring the cross-process
+    // destination lease and claiming the job either both happen or neither
+    // does (mirrors postQueueService.claimNextBatch's acquireLease).
+    acquireLease?: (destinationId: string) => boolean,
   ): DigestJob | null {
     const rows = db
       .prepare(
@@ -2805,6 +2869,7 @@ export const digestJobService = {
     const token = randomUUID();
     let claimed: DigestJob | null = null;
     db.transaction(() => {
+      if (acquireLease && !acquireLease(candidate.destinationId)) return;
       db.prepare(`
         UPDATE digest_jobs SET status = 'processing', claimed_at = ?, claim_token = ?, updated_at = ?
         WHERE id = ? AND status = 'scheduled' AND next_run_at <= ? AND not_before <= ?

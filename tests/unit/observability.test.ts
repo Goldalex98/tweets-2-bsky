@@ -28,6 +28,19 @@ describe('operations logging', () => {
     expect(text).toContain('[REDACTED]');
   });
 
+  test('redacts camelCase appPassword and bskyPassword keys', () => {
+    const sanitized = sanitizeForDiagnostics({
+      appPassword: 'xxxx-xxxx-xxxx-xxxx',
+      bskyPassword: 'legacy-inline-secret',
+      loginIdentifier: 'mirror.example',
+    });
+    const text = JSON.stringify(sanitized);
+    expect(text).not.toContain('xxxx-xxxx-xxxx-xxxx');
+    expect(text).not.toContain('legacy-inline-secret');
+    expect(text).toContain('mirror.example');
+    expect(text).toContain('[REDACTED]');
+  });
+
   test('emits JSON with one correlation id and sanitized data', () => {
     const lines: string[] = [];
     const logger = createStructuredLogger(

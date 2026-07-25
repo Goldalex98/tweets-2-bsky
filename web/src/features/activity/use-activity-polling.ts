@@ -20,6 +20,12 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
   const [clock, setClock] = useState(() => Date.now());
   const statusRequestRef = useRef(0);
   const statusMutationRef = useRef(0);
+  const activityRequestRef = useRef(0);
+  const activityMutationRef = useRef(0);
+  const queueRequestRef = useRef(0);
+  const queueMutationRef = useRef(0);
+  const postsRequestRef = useRef(0);
+  const postsMutationRef = useRef(0);
 
   const fetchStatus = useCallback(async () => {
     if (!authenticated) return;
@@ -39,9 +45,13 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
 
   const fetchRecentActivity = useCallback(async () => {
     if (!authenticated) return;
+    const requestToken = ++activityRequestRef.current;
+    const mutationTokenAtStart = activityMutationRef.current;
     try {
       const response = await api.get<ActivityLog[]>('/api/recent-activity?limit=20');
-      setRecentActivity(response.data);
+      if (requestToken === activityRequestRef.current && mutationTokenAtStart === activityMutationRef.current) {
+        setRecentActivity(response.data);
+      }
       setError(null);
     } catch (requestError) {
       setError('Failed to fetch activity.');
@@ -51,9 +61,13 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
 
   const fetchQueueItems = useCallback(async () => {
     if (!authenticated) return;
+    const requestToken = ++queueRequestRef.current;
+    const mutationTokenAtStart = queueMutationRef.current;
     try {
       const response = await api.get<{ items: QueueItemView[] }>('/api/queue?limit=200');
-      setQueueItems(response.data.items ?? []);
+      if (requestToken === queueRequestRef.current && mutationTokenAtStart === queueMutationRef.current) {
+        setQueueItems(response.data.items ?? []);
+      }
       setError(null);
     } catch (requestError) {
       setError('Failed to fetch queue details.');
@@ -63,9 +77,13 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
 
   const fetchEnrichedPosts = useCallback(async () => {
     if (!authenticated) return;
+    const requestToken = ++postsRequestRef.current;
+    const mutationTokenAtStart = postsMutationRef.current;
     try {
       const response = await api.get<EnrichedPost[]>('/api/posts/enriched?limit=36');
-      setEnrichedPosts(response.data);
+      if (requestToken === postsRequestRef.current && mutationTokenAtStart === postsMutationRef.current) {
+        setEnrichedPosts(response.data);
+      }
       setError(null);
     } catch (requestError) {
       setError('Failed to fetch Bluesky posts.');
@@ -77,6 +95,12 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
     if (authenticated) return;
     statusRequestRef.current += 1;
     statusMutationRef.current += 1;
+    activityRequestRef.current += 1;
+    activityMutationRef.current += 1;
+    queueRequestRef.current += 1;
+    queueMutationRef.current += 1;
+    postsRequestRef.current += 1;
+    postsMutationRef.current += 1;
     setStatus(null);
     setRecentActivity([]);
     setQueueItems([]);
@@ -133,6 +157,17 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
     statusMutationRef.current += 1;
   }, []);
 
+  const markQueueMutation = useCallback(() => {
+    queueMutationRef.current += 1;
+    statusMutationRef.current += 1;
+  }, []);
+
+  const markActivityMutation = useCallback(() => {
+    activityMutationRef.current += 1;
+    queueMutationRef.current += 1;
+    statusMutationRef.current += 1;
+  }, []);
+
   const runNow = useCallback(async () => {
     markStatusMutation();
     await api.post('/api/run-now');
@@ -140,27 +175,31 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
   }, [fetchStatus, markStatusMutation]);
 
   const retryFailed = useCallback(async () => {
+    markQueueMutation();
     await api.post('/api/queue/retry-failed');
     await Promise.all([fetchStatus(), fetchQueueItems()]);
-  }, [fetchQueueItems, fetchStatus]);
+  }, [fetchQueueItems, fetchStatus, markQueueMutation]);
 
   const clearFailed = useCallback(async () => {
+    markQueueMutation();
     await api.delete('/api/queue/failed');
     await Promise.all([fetchStatus(), fetchQueueItems()]);
-  }, [fetchQueueItems, fetchStatus]);
+  }, [fetchQueueItems, fetchStatus, markQueueMutation]);
 
   const operateQueueItem = useCallback(
     async (item: QueueItemView, action: 'retry' | 'cancel') => {
+      markQueueMutation();
       const path = `/api/queue/items/${encodeURIComponent(item.bsky_identifier)}/${encodeURIComponent(item.twitter_id)}`;
       if (action === 'retry') await api.post(`${path}/retry`);
       else await api.delete(path);
       await Promise.all([fetchStatus(), fetchQueueItems()]);
     },
-    [fetchQueueItems, fetchStatus],
+    [fetchQueueItems, fetchStatus, markQueueMutation],
   );
 
   const reevaluateQueueItem = useCallback(
     async (item: QueueItemView) => {
+      markQueueMutation();
       await api.post(
         `/api/queue/items/${encodeURIComponent(item.bsky_identifier)}/${encodeURIComponent(item.twitter_id)}/reevaluate-policy`,
         { reason: 'Dashboard-confirmed current policy re-evaluation' },
@@ -168,12 +207,13 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
       );
       await fetchQueueItems();
     },
-    [fetchQueueItems],
+    [fetchQueueItems, markQueueMutation],
   );
 
   const overrideSkipped = useCallback(
     async (activity: ActivityLog) => {
       if (!activity.destination_id) return;
+      markActivityMutation();
       await api.post(
         `/api/activity/${encodeURIComponent(activity.destination_id)}/${encodeURIComponent(activity.twitter_id)}/override-requeue`,
         { override: true },
@@ -181,7 +221,7 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
       );
       await Promise.all([fetchRecentActivity(), fetchQueueItems(), fetchStatus()]);
     },
-    [fetchQueueItems, fetchRecentActivity, fetchStatus],
+    [fetchQueueItems, fetchRecentActivity, fetchStatus, markActivityMutation],
   );
 
   const requestBackfill = useCallback(
@@ -205,6 +245,12 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
   const reset = useCallback(() => {
     statusRequestRef.current += 1;
     statusMutationRef.current += 1;
+    activityRequestRef.current += 1;
+    activityMutationRef.current += 1;
+    queueRequestRef.current += 1;
+    queueMutationRef.current += 1;
+    postsRequestRef.current += 1;
+    postsMutationRef.current += 1;
     setStatus(null);
     setRecentActivity([]);
     setQueueItems([]);

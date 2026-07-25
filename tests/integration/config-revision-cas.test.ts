@@ -130,27 +130,49 @@ test('whole-document replacements must name the revision they replace', async ()
             });
             const login = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'initial-password' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'initial-password' }),
             });
             const bearer = { authorization: 'Bearer ' + login.body.token };
             const exported = await request('/api/config/export?mode=redacted', { headers: bearer });
             const { revision: _revision, updatedAt: _updatedAt, ...bundle } = exported.body;
             const version = (await request('/api/settings/scheduler', { headers: bearer })).body;
 
+            const stepUp = {
+              confirmation: 'IMPORT_CONFIG',
+              password: 'initial-password',
+            };
             const missingRevision = await request('/api/config/import', {
               method: 'POST',
               headers: bearer,
-              body: JSON.stringify(bundle),
+              body: JSON.stringify({ ...bundle, ...stepUp }),
             });
             const staleRevision = await request('/api/config/import', {
               method: 'POST',
               headers: bearer,
-              body: JSON.stringify({ ...bundle, revision: version.revision - 1 }),
+              body: JSON.stringify({ ...bundle, revision: version.revision - 1, ...stepUp }),
             });
             const accepted = await request('/api/config/import', {
               method: 'POST',
               headers: bearer,
-              body: JSON.stringify({ ...bundle, revision: version.revision }),
+              body: JSON.stringify({ ...bundle, revision: version.revision, ...stepUp }),
+            });
+            const missingConfirm = await request('/api/config/import', {
+              method: 'POST',
+              headers: bearer,
+              body: JSON.stringify({
+                ...bundle,
+                revision: version.revision,
+                password: 'initial-password',
+              }),
+            });
+            const missingPassword = await request('/api/config/import', {
+              method: 'POST',
+              headers: bearer,
+              body: JSON.stringify({
+                ...bundle,
+                revision: version.revision,
+                confirmation: 'IMPORT_CONFIG',
+              }),
             });
             const staleScheduler = await request('/api/settings/scheduler', {
               method: 'PATCH',
@@ -166,6 +188,10 @@ test('whole-document replacements must name the revision they replace', async ()
               staleRevisionCode: staleRevision.body?.code,
               staleRevisionCurrent: staleRevision.body?.current?.revision,
               accepted: accepted.status,
+              missingConfirm: missingConfirm.status,
+              missingConfirmCode: missingConfirm.body?.error?.code,
+              missingPassword: missingPassword.status,
+              missingPasswordCode: missingPassword.body?.error?.code,
               staleScheduler: staleScheduler.status,
             }));
           } finally {
@@ -184,6 +210,10 @@ test('whole-document replacements must name the revision they replace', async ()
       staleRevision: 409,
       staleRevisionCode: 'CONFIG_REVISION_CONFLICT',
       accepted: 200,
+      missingConfirm: 403,
+      missingConfirmCode: 'CONFIRMATION_REQUIRED',
+      missingPassword: 401,
+      missingPasswordCode: 'REAUTHENTICATION_FAILED',
       staleScheduler: 409,
     });
     expect(result.staleRevisionCurrent).toBe(result.revision);

@@ -65,6 +65,16 @@ describe('webhook notifications', () => {
         throw new Error('resolver must not be called for IPv6 literals');
       }),
     ).rejects.toThrow('private network');
+    await expect(
+      validateWebhookTarget('https://hooks.local/x', false, async () => [
+        { address: '203.0.113.8', family: 4 },
+      ]),
+    ).rejects.toThrow('private network');
+    await expect(
+      validateWebhookTarget('https://svc.localhost/x', false, async () => [
+        { address: '203.0.113.8', family: 4 },
+      ]),
+    ).rejects.toThrow('private network');
     expect(
       (
         await validateWebhookTarget('https://internal.test/x', true, async () => [

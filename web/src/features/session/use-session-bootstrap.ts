@@ -1,11 +1,24 @@
 import { useCallback, useState } from 'react';
+import axios from 'axios';
 import api, { getApiErrorMessage } from '../../api/client';
 import type { AuthView, BootstrapStatus } from '../../api/types';
 import type { AuthUser } from '../settings/types';
 import { normalizePermissions } from '../settings/utils';
 
+/** True when /api/me failed because there is no usable session (login screen). */
+export function isAnonymousSessionError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false;
+  if (error.response?.status === 401) return true;
+  const payload = error.response?.data?.error;
+  if (payload && typeof payload === 'object' && 'code' in payload) {
+    const code = (payload as { code?: string }).code;
+    return code === 'AUTH_REQUIRED' || code === 'INVALID_SESSION' || code === 'SESSION_REVOKED';
+  }
+  return false;
+}
+
 export function useSessionBootstrap() {
-  const [token, setToken] = useState<string | null>('cookie-session');
+  const [token, setToken] = useState<string | null>(null);
   const [authView, setAuthView] = useState<AuthView>('login');
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -21,7 +34,7 @@ export function useSessionBootstrap() {
     }
   }, []);
 
-  const refreshUser = useCallback(async () => {
+  const refreshUser = useCallback(async (options?: { silentAnonymous?: boolean }) => {
     try {
       const response = await api.get<AuthUser>('/api/me');
       setUser({ ...response.data, permissions: normalizePermissions(response.data.permissions) });
@@ -31,7 +44,11 @@ export function useSessionBootstrap() {
     } catch (requestError) {
       setToken(null);
       setUser(null);
-      setError(getApiErrorMessage(requestError, 'Your session has expired.'));
+      if (options?.silentAnonymous || isAnonymousSessionError(requestError)) {
+        setError('');
+      } else {
+        setError(getApiErrorMessage(requestError, 'Your session has expired.'));
+      }
       return null;
     } finally {
       setLoading(false);

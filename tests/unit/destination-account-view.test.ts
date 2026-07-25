@@ -65,7 +65,7 @@ test('destination list account views expose credentialConfigured without appPass
             });
             const login = await json('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'test-password-123' })
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'test-password-123' })
             });
             const auth = { authorization: 'Bearer ' + login.body.token };
             const list = await json('/api/destinations', { headers: auth });

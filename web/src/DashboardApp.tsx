@@ -115,7 +115,17 @@ export default function DashboardApp() {
   const [schedulerSaving, setSchedulerSaving] = useState(false);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [confirmation, setConfirmation] = useState<ConfirmationState | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
   const noticeTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    void fetch('/readyz')
+      .then(async (response) => {
+        const payload = (await response.json()) as { restartRequired?: boolean };
+        if (payload.restartRequired) setRestartRequired(true);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const showNotice = useCallback((tone: Notice['tone'], message: string) => {
     setNotice({ tone, message });
@@ -197,13 +207,22 @@ export default function DashboardApp() {
     return () => media.removeEventListener('change', apply);
   }, [theme]);
 
+  const sessionBootstrapStarted = useRef(false);
   useEffect(() => {
-    if (session.token) {
-      void session.refreshUser();
-    } else {
-      void session.fetchBootstrapStatus();
-    }
-  }, [session.fetchBootstrapStatus, session.refreshUser, session.token]);
+    if (sessionBootstrapStarted.current) return;
+    sessionBootstrapStarted.current = true;
+    let cancelled = false;
+    void (async () => {
+      const user = await session.refreshUser({ silentAnonymous: true });
+      if (cancelled) return;
+      if (!user) {
+        await session.fetchBootstrapStatus();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session.fetchBootstrapStatus, session.refreshUser]);
 
   useEffect(() => {
     if (!session.token || !session.user) return;
@@ -732,9 +751,19 @@ export default function DashboardApp() {
 
   const mappingsByIdentity = useMemo(() => {
     const result = new Map<string, AccountMapping>();
+    const index = (value: string | undefined | null, mapping: AccountMapping) => {
+      if (!value) return;
+      const normalized = normalizeTwitterUsername(value);
+      if (normalized) result.set(normalized, mapping);
+      const lowered = value.trim().toLowerCase();
+      if (lowered) result.set(lowered, mapping);
+    };
     for (const mapping of destinations.mappings) {
-      result.set(normalizeTwitterUsername(mapping.bskyIdentifier), mapping);
-      for (const source of mapping.twitterUsernames) result.set(normalizeTwitterUsername(source), mapping);
+      index(mapping.storageKey, mapping);
+      index(mapping.bskyDid, mapping);
+      index(mapping.bskyCanonicalHandle, mapping);
+      index(mapping.bskyIdentifier, mapping);
+      for (const source of mapping.twitterUsernames) index(source, mapping);
     }
     return result;
   }, [destinations.mappings]);
@@ -798,14 +827,22 @@ export default function DashboardApp() {
   const engagement = useMemo(() => {
     const scores = new Map<string, { identifier: string; score: number; posts: number }>();
     for (const post of activity.enrichedPosts) {
-      const key = normalizeTwitterUsername(post.bskyIdentifier);
-      const current = scores.get(key) || { identifier: post.bskyIdentifier, score: 0, posts: 0 };
+      const mapping = resolvePost(post);
+      const displayHandle =
+        post.author?.handle ||
+        mapping?.bskyCanonicalHandle ||
+        (mapping?.bskyIdentifier && !mapping.bskyIdentifier.startsWith('did:')
+          ? mapping.bskyIdentifier
+          : undefined) ||
+        post.bskyIdentifier;
+      const key = normalizeTwitterUsername(displayHandle);
+      const current = scores.get(key) || { identifier: displayHandle, score: 0, posts: 0 };
       current.score += post.stats.engagement;
       current.posts += 1;
       scores.set(key, current);
     }
     return [...scores.values()].sort((a, b) => b.score - a.score)[0];
-  }, [activity.enrichedPosts]);
+  }, [activity.enrichedPosts, resolvePost]);
 
   const [emailForm, setEmailForm] = useState<AccountSecurityEmailState>({ currentEmail: '', newEmail: '', password: '' });
   const [passwordForm, setPasswordForm] = useState<AccountSecurityPasswordState>({ currentPassword: '', newPassword: '', confirmPassword: '' });
@@ -835,15 +872,34 @@ export default function DashboardApp() {
 
   if (!session.token) {
     return (
-      <AuthScreen
-        view={session.authView}
-        bootstrapOpen={session.bootstrapOpen}
-        loading={session.loading}
-        error={session.error}
-        onViewChange={session.setAuthView}
-        onLogin={session.login}
-        onRegister={session.register}
-      />
+      <div className="min-h-screen bg-muted/20 text-foreground">
+        {restartRequired ? (
+          <div className="mx-auto max-w-lg px-4 pt-6">
+            <RecoveryBanners
+              notices={[
+                {
+                  id: 'restart-required',
+                  severity: 'danger',
+                  title: 'Restart required',
+                  detail:
+                    'A backup restore staged a new database. Restart the service to finish applying it before making changes.',
+                  actionLabel: 'Dismiss',
+                  onAction: () => undefined,
+                },
+              ]}
+            />
+          </div>
+        ) : null}
+        <AuthScreen
+          view={session.authView}
+          bootstrapOpen={session.bootstrapOpen}
+          loading={session.loading}
+          error={session.error}
+          onViewChange={session.setAuthView}
+          onLogin={session.login}
+          onRegister={session.register}
+        />
+      </div>
     );
   }
 
@@ -889,6 +945,20 @@ export default function DashboardApp() {
     return notices;
   }, []);
 
+  if (restartRequired || settings.scheduler?.restartRequired) {
+    recoveryNotices.unshift({
+      id: 'restart-required',
+      severity: 'danger',
+      title: 'Restart required',
+      detail:
+        'A backup restore staged a new database. Restart the service to finish applying it. Configuration changes stay blocked until then.',
+      actionLabel: 'Open data settings',
+      onAction: () => {
+        setActiveTab('settings');
+        setSettingsSection('data');
+      },
+    });
+  }
   // Wrapped through `run` so a rejected mutation never escapes as an unhandled
   // promise from BlueskyAccountsSection's fire-and-forget call sites.
   const blueskyAccountActions = {
@@ -1179,8 +1249,21 @@ export default function DashboardApp() {
                 })
               }
               onRunUpdate={() => {
+                const confirmation = window.prompt('Type RUN_UPDATE to start a service update.');
+                if (confirmation !== 'RUN_UPDATE') return;
+                const password = window.prompt('Enter your admin password to confirm.');
+                if (!password) return;
                 setUpdateBusy(true);
-                void api.post('/api/update').then(() => settings.refresh()).then(() => showNotice('success', 'Update started.')).catch((error) => handleError(error, 'Failed to start update.')).finally(() => setUpdateBusy(false));
+                void api
+                  .post(
+                    '/api/update',
+                    { confirmation: 'RUN_UPDATE', password },
+                    { headers: { 'x-destructive-confirmation': 'RUN_UPDATE', 'x-reauth-password': password } },
+                  )
+                  .then(() => settings.refresh())
+                  .then(() => showNotice('success', 'Update started.'))
+                  .catch((error) => handleError(error, 'Failed to start update.'))
+                  .finally(() => setUpdateBusy(false));
               }}
               onAddDestination={openAdd}
               onExport={() => void run(async () => {
@@ -1322,13 +1405,34 @@ export default function DashboardApp() {
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (!file) return;
-          void run(async () => {
-            const version = settings.scheduler;
-            if (!version) throw new Error('Settings are still loading; retry the import in a moment.');
-            await api.post('/api/config/import', withConfigVersion(JSON.parse(await file.text()), version));
-            await Promise.all([destinations.fetchDestinations(), settings.refresh()]);
-          }, 'Configuration imported.');
-          event.target.value = '';
+          void (async () => {
+            const confirmation = window.prompt('Type IMPORT_CONFIG to import this configuration.');
+            if (confirmation !== 'IMPORT_CONFIG') {
+              event.target.value = '';
+              return;
+            }
+            const password = window.prompt('Enter your admin password to confirm the import.');
+            if (!password) {
+              event.target.value = '';
+              return;
+            }
+            await run(async () => {
+              const version = settings.scheduler;
+              if (!version) throw new Error('Settings are still loading; retry the import in a moment.');
+              const payload = withConfigVersion(
+                { ...JSON.parse(await file.text()), confirmation: 'IMPORT_CONFIG', password },
+                version,
+              );
+              await api.post('/api/config/import', payload, {
+                headers: {
+                  'x-destructive-confirmation': 'IMPORT_CONFIG',
+                  'x-reauth-password': password,
+                },
+              });
+              await Promise.all([destinations.fetchDestinations(), settings.refresh()]);
+            }, 'Configuration imported.');
+            event.target.value = '';
+          })();
         }}
       />
       <input
@@ -1339,15 +1443,16 @@ export default function DashboardApp() {
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (!file) return;
-          void askConfirmation({ title: 'Restore backup?', description: 'Current configuration and runtime data may be replaced.', confirmLabel: 'Restore backup', destructive: true }).then((ok) => {
+          void askConfirmation({ title: 'Restore backup?', description: 'Current configuration and runtime data may be replaced. You will need to restart the service afterward.', confirmLabel: 'Restore backup', destructive: true }).then((ok) => {
             if (!ok) return;
             void run(async () => {
               const version = settings.scheduler;
               if (!version) throw new Error('Settings are still loading; retry the restore in a moment.');
               const bundle = JSON.parse(await file.text());
-              await api.post('/api/backup/restore/apply', withConfigVersion({ bundle }, version));
-              await Promise.all([destinations.fetchDestinations(), settings.refresh(), activity.refresh()]);
-            }, 'Backup restored.');
+              const response = await api.post<{ restartRequired?: boolean }>('/api/backup/restore/apply', withConfigVersion({ bundle }, version));
+              if (response.data?.restartRequired !== false) setRestartRequired(true);
+              showNotice('success', 'Backup restored. Restart the service now to finish applying the database.');
+            });
           });
           event.target.value = '';
         }}

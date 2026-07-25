@@ -43,6 +43,11 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
             const login = await request('/api/login', {
               method: 'POST',
               headers: { 'x-forwarded-proto': 'https' },
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'initial-password' }),
+            });
+            const cookieOnlyLogin = await request('/api/login', {
+              method: 'POST',
+              headers: { 'x-forwarded-proto': 'https' },
               body: JSON.stringify({ identifier: 'admin', password: 'initial-password' }),
             });
             const cookieHeader = login.setCookies.map((value) => value.split(';')[0]).join('; ');
@@ -72,7 +77,7 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
             const revokedBearer = await request('/api/me', { headers: bearer });
             const newLogin = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'replacement-password' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'replacement-password' }),
             });
             const newBearer = { authorization: 'Bearer ' + newLogin.body.token };
             const newMe = await request('/api/me', { headers: newBearer });
@@ -90,7 +95,7 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
             });
             const viewerLogin = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'viewer', password: 'viewer-password' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'viewer', password: 'viewer-password' }),
             });
             const viewerBearer = { authorization: 'Bearer ' + viewerLogin.body.token };
             const permissionChange = await request('/api/admin/users/' + createdViewer.body.id, {
@@ -109,18 +114,20 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
             const corsDenied = await request('/healthz', { headers: { origin: 'https://evil.example' } });
             const tooLarge = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'x'.repeat(140000) }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'x'.repeat(140000) }),
             });
             let rateLimited = null;
             for (let index = 0; index < 35; index += 1) {
               rateLimited = await request('/api/login', {
                 method: 'POST',
-                body: JSON.stringify({ identifier: 'admin', password: 'wrong-password' }),
+                body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'wrong-password' }),
               });
               if (rateLimited.status === 429) break;
             }
             await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
               loginStatus: login.status,
+              loginHasToken: typeof login.body?.token === 'string',
+              cookieOnlyHasToken: typeof cookieOnlyLogin.body?.token === 'string',
               cookieFlags: login.setCookies,
               cookieMe: cookieMe.status,
               csrfRejected: csrfRejected.status,
@@ -155,6 +162,8 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
     expect(result).toMatchObject({
       loginStatus: 200,
+      loginHasToken: true,
+      cookieOnlyHasToken: false,
       cookieMe: 200,
       csrfRejected: 403,
       csrfAccepted: 200,

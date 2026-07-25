@@ -32,7 +32,7 @@ test('token subjects are bound to the account id and logout retires issued token
           const login = async (identifier, password) => {
             const response = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier, password }),
+              body: JSON.stringify({ includeBearerToken: true, identifier, password }),
             });
             return response.body.token;
           };
@@ -84,7 +84,7 @@ test('token subjects are bound to the account id and logout retires issued token
             });
             const reLogin = await request('/api/login', {
               method: 'POST',
-              body: JSON.stringify({ identifier: 'admin', password: 'initial-password' }),
+              body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'initial-password' }),
             });
             const afterReLogin = await request('/api/me', {
               headers: { authorization: 'Bearer ' + reLogin.body.token },
