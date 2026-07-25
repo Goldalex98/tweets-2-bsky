@@ -5097,26 +5097,34 @@ app.patch(
   asAuthedHandler((req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
-  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
-  if (!mapping) {
+  const destination = config.destinations.find((entry) => entry.id === req.params.id);
+  if (!destination) {
     res.status(404).json({ error: 'Mapping not found' });
     return;
   }
-  if (!mapping.migrationReview) {
+  if (!destination.migrationReview) {
     res.status(400).json({ error: 'This mapping has no migration review notice.' });
     return;
   }
-  mapping.migrationReview = {
-    ...mapping.migrationReview,
+  destination.migrationReview = {
+    ...destination.migrationReview,
     needsAdminReview: false,
     reviewedAt: new Date().toISOString(),
   };
-  saveConfig(config);
+  saveCanonicalConfig(config);
+  // Review state belongs to the canonical destination; re-project so the
+  // response mapping and revision tokens match what was persisted.
+  const fresh = getConfig();
+  const refreshed = fresh.mappings.find((entry) => entry.id === destination.id);
+  if (!refreshed) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
   res.json({
     success: true,
-    migrationReview: mapping.migrationReview,
-    destination: sanitizeMapping(mapping, createUserLookupById(config), req.user),
-    ...getConfigVersion(config),
+    migrationReview: destination.migrationReview,
+    destination: sanitizeMapping(refreshed, createUserLookupById(fresh), req.user),
+    ...getConfigVersion(fresh),
   });
 }),
 );
