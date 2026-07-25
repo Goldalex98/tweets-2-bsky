@@ -32,7 +32,7 @@ Every push to `main` runs `.github/workflows/release.yml` (`bun run release` / s
 - `BREAKING CHANGE:` footer or `feat!:` / `fix!:` → major
 - `chore:`, `docs:`, `ci:`, and similar → no release
 
-A releasable merge bumps `package.json` and the README, commits with `chore(release): X.Y.Z [skip ci]`, creates tag `vX.Y.Z` and a GitHub Release. Existing Docker publish workflows then build multi-arch images for that tag.
+A releasable merge bumps `package.json` and the README, commits with `chore(release): X.Y.Z [skip ci]`, creates tag `vX.Y.Z` and a GitHub Release. Because tag pushes authenticated with `GITHUB_TOKEN` do not start other workflows, the release job then dispatches the GHCR and Docker Hub publishers for that tag (multi-arch).
 
 Dry-run locally (needs full history, tags, and `GITHUB_TOKEN` or `GH_TOKEN`):
 
