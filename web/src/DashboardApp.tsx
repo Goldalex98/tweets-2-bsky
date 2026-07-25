@@ -197,13 +197,22 @@ export default function DashboardApp() {
     return () => media.removeEventListener('change', apply);
   }, [theme]);
 
+  const sessionBootstrapStarted = useRef(false);
   useEffect(() => {
-    if (session.token) {
-      void session.refreshUser();
-    } else {
-      void session.fetchBootstrapStatus();
-    }
-  }, [session.fetchBootstrapStatus, session.refreshUser, session.token]);
+    if (sessionBootstrapStarted.current) return;
+    sessionBootstrapStarted.current = true;
+    let cancelled = false;
+    void (async () => {
+      const user = await session.refreshUser({ silentAnonymous: true });
+      if (cancelled) return;
+      if (!user) {
+        await session.fetchBootstrapStatus();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session.fetchBootstrapStatus, session.refreshUser]);
 
   useEffect(() => {
     if (!session.token || !session.user) return;
@@ -732,9 +741,19 @@ export default function DashboardApp() {
 
   const mappingsByIdentity = useMemo(() => {
     const result = new Map<string, AccountMapping>();
+    const index = (value: string | undefined | null, mapping: AccountMapping) => {
+      if (!value) return;
+      const normalized = normalizeTwitterUsername(value);
+      if (normalized) result.set(normalized, mapping);
+      const lowered = value.trim().toLowerCase();
+      if (lowered) result.set(lowered, mapping);
+    };
     for (const mapping of destinations.mappings) {
-      result.set(normalizeTwitterUsername(mapping.bskyIdentifier), mapping);
-      for (const source of mapping.twitterUsernames) result.set(normalizeTwitterUsername(source), mapping);
+      index(mapping.storageKey, mapping);
+      index(mapping.bskyDid, mapping);
+      index(mapping.bskyCanonicalHandle, mapping);
+      index(mapping.bskyIdentifier, mapping);
+      for (const source of mapping.twitterUsernames) index(source, mapping);
     }
     return result;
   }, [destinations.mappings]);
@@ -798,14 +817,22 @@ export default function DashboardApp() {
   const engagement = useMemo(() => {
     const scores = new Map<string, { identifier: string; score: number; posts: number }>();
     for (const post of activity.enrichedPosts) {
-      const key = normalizeTwitterUsername(post.bskyIdentifier);
-      const current = scores.get(key) || { identifier: post.bskyIdentifier, score: 0, posts: 0 };
+      const mapping = resolvePost(post);
+      const displayHandle =
+        post.author?.handle ||
+        mapping?.bskyCanonicalHandle ||
+        (mapping?.bskyIdentifier && !mapping.bskyIdentifier.startsWith('did:')
+          ? mapping.bskyIdentifier
+          : undefined) ||
+        post.bskyIdentifier;
+      const key = normalizeTwitterUsername(displayHandle);
+      const current = scores.get(key) || { identifier: displayHandle, score: 0, posts: 0 };
       current.score += post.stats.engagement;
       current.posts += 1;
       scores.set(key, current);
     }
     return [...scores.values()].sort((a, b) => b.score - a.score)[0];
-  }, [activity.enrichedPosts]);
+  }, [activity.enrichedPosts, resolvePost]);
 
   const [emailForm, setEmailForm] = useState<AccountSecurityEmailState>({ currentEmail: '', newEmail: '', password: '' });
   const [passwordForm, setPasswordForm] = useState<AccountSecurityPasswordState>({ currentPassword: '', newPassword: '', confirmPassword: '' });

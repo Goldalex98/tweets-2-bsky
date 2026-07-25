@@ -3,6 +3,7 @@ import {
   getActiveTwitterUsernames,
   getCanonicalDestinationKey,
   getDestinationStorageKey,
+  historyIdentityKeys,
   normalizeTwitterUsername,
   parseTwitterUsernameInput,
   parseTwitterUsernames,
@@ -64,6 +65,13 @@ describe('destination runtime identity', () => {
         bskyIdentifier: 'old.example',
       }),
     ).toBe('did:plc:abc');
+    expect(
+      historyIdentityKeys({
+        bskyDid: 'did:plc:ABC',
+        bskyIdentifier: 'old.example',
+        storageKey: 'old.example',
+      }),
+    ).toEqual(['old.example', 'did:plc:abc']);
   });
 
   test('filters paused sources without affecting the compatibility source list', () => {

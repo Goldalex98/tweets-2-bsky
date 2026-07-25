@@ -36,7 +36,9 @@ import {
 import {
   getActiveTwitterUsernames,
   getCanonicalDestinationKey,
-  getDestinationStorageKey,
+  findProcessedTweetDual,
+  historyIdentityKeys,
+  resolveDestinationStorageKey,
 } from './mapping-helpers.js';
 import {
   applyPostingPolicy,
@@ -321,7 +323,7 @@ async function migrateJsonToSqlite() {
   // REPAIR STEP: Fix any 'unknown' records in SQLite that came from the broken schema migration
   for (const mapping of config.mappings) {
     for (const username of mapping.twitterUsernames) {
-      dbService.repairUnknownIdentifiers(username, getDestinationStorageKey(mapping));
+      dbService.repairUnknownIdentifiers(username, resolveDestinationStorageKey(mapping));
     }
   }
 
@@ -350,6 +352,18 @@ function loadProcessedTweets(bskyIdentifier: string): ProcessedTweetsMap {
       ];
     }),
   );
+}
+
+/** Union history under sticky storageKey and recomputed DID/handle aliases. Sticky wins on conflicts. */
+function loadProcessedTweetsForDestination(mapping: AccountMapping): ProcessedTweetsMap {
+  const merged: ProcessedTweetsMap = {};
+  const sticky = resolveDestinationStorageKey(mapping);
+  for (const key of historyIdentityKeys(mapping)) {
+    if (key === sticky) continue;
+    Object.assign(merged, loadProcessedTweets(key));
+  }
+  Object.assign(merged, loadProcessedTweets(sticky));
+  return merged;
 }
 
 function saveProcessedTweet(
@@ -1574,7 +1588,8 @@ async function processTweets(
   addTweetsToMap(tweetMap, filteredTweets);
 
   // Maintain a local map that updates in real-time for intra-batch replies
-  const localProcessedMap: ProcessedTweetsMap = sharedProcessedMap ?? { ...loadProcessedTweets(bskyIdentifier) };
+  const localProcessedMap: ProcessedTweetsMap =
+    sharedProcessedMap ?? { ...loadProcessedTweetsForDestination(mapping) };
 
   const toProcess = filteredTweets.filter((t) => !localProcessedMap[t.id_str || t.id || '']);
 
@@ -1598,7 +1613,11 @@ async function processTweets(
     if (localProcessedMap[tweetId]) continue;
 
     // Fallback to DB in case a nested backfill already saved this tweet.
-    const dbRecord = dbService.getTweet(tweetId, bskyIdentifier);
+    const dbRecord = findProcessedTweetDual(
+      (twitterId, key) => dbService.getTweet(twitterId, key),
+      tweetId,
+      mapping,
+    );
     if (dbRecord) {
       localProcessedMap[tweetId] = {
         uri: dbRecord.bsky_uri,
@@ -1697,7 +1716,11 @@ async function processTweets(
                 );
 
                 // Check if it was saved
-                const savedParent = dbService.getTweet(replyStatusId, bskyIdentifier);
+                const savedParent = findProcessedTweetDual(
+                  (twitterId, key) => dbService.getTweet(twitterId, key),
+                  replyStatusId,
+                  mapping,
+                );
                 if (savedParent && savedParent.status === 'migrated') {
                   // Update local map
                   localProcessedMap[replyStatusId] = {
@@ -2507,7 +2530,7 @@ function enqueueTweetsForMapping(
   sourcePolicyAlreadyApplied = false,
 ): number {
   const inputs = [];
-  const destinationStorageKey = getDestinationStorageKey(mapping);
+  const destinationStorageKey = resolveDestinationStorageKey(mapping);
   const config = getConfig();
   const source = config.sources.find((candidate) => candidate.username === twitterUsername.toLowerCase());
   const route = source
@@ -2923,10 +2946,11 @@ async function fetchBackfillTimeline(
     throw new Error(`[${twitterUsername}] Twitter credentials are not set; cannot backfill.`);
   }
 
-  const destinationStorageKey = getDestinationStorageKey(mapping);
-  const seenIds = new Set(Object.keys(loadProcessedTweets(destinationStorageKey)));
-  for (const id of postQueueService.getQueuedIdSet(destinationStorageKey)) {
-    seenIds.add(id);
+  const seenIds = new Set(Object.keys(loadProcessedTweetsForDestination(mapping)));
+  for (const key of historyIdentityKeys(mapping)) {
+    for (const id of postQueueService.getQueuedIdSet(key)) {
+      seenIds.add(id);
+    }
   }
 
   const found: Tweet[] = [];
@@ -2955,7 +2979,7 @@ async function applyBackfillPolicy(
   found: readonly Tweet[],
   mediaHashByTweet: Map<string, string | undefined>,
 ): Promise<PolicyDecision<Tweet>> {
-  const destinationStorageKey = getDestinationStorageKey(mapping);
+  const destinationStorageKey = resolveDestinationStorageKey(mapping);
   const config = getConfig();
   const source = config.sources.find((candidate) => candidate.username === twitterUsername.toLowerCase());
   const route = source
@@ -3331,7 +3355,21 @@ const queueWorkerService = new DestinationQueueWorkerService(
     deleteByMappingId: (mappingId) => postQueueService.deleteByMappingId(mappingId),
     deliver: (mapping, batch, context) =>
       deliverPostBatch(mapping, batch, context.mode === 'drain' ? 'one-shot-queue' : 'post-worker'),
-    findSettlement: (item) => dbService.getTweet(item.twitter_id, item.bsky_identifier),
+    findSettlement: (item) => {
+      const mapping =
+        getConfig().mappings.find((candidate) => candidate.id === item.destination_id) ??
+        getConfig().mappings.find((candidate) =>
+          historyIdentityKeys(candidate).includes(item.bsky_identifier.toLowerCase()),
+        );
+      if (mapping) {
+        return findProcessedTweetDual(
+          (twitterId, key) => dbService.getTweet(twitterId, key),
+          item.twitter_id,
+          mapping,
+        );
+      }
+      return dbService.getTweet(item.twitter_id, item.bsky_identifier);
+    },
     markDone: (item) =>
       item.queue_id
         ? void postQueueService.markDoneById(item.queue_id)
@@ -3457,7 +3495,7 @@ async function importHistory(
     console.error(`No mapping found for twitter username: ${twitterUsername}`);
     return;
   }
-  const destinationStorageKey = getDestinationStorageKey(mapping);
+  const destinationStorageKey = resolveDestinationStorageKey(mapping);
 
   if (delivery === 'queue' && !dryRun) {
     await fetchAndEnqueueBackfill(mapping, twitterUsername, limit, ignoreCancellation, requestId, sessionKey);
@@ -3493,7 +3531,7 @@ async function importHistory(
 
   const allFoundTweets: Tweet[] = [];
   const seenIds = new Set<string>();
-  const processedTweets = loadProcessedTweets(destinationStorageKey);
+  const processedTweets = loadProcessedTweetsForDestination(mapping);
 
   console.log(`Fetching tweets for ${twitterUsername}...`);
   updateAppStatus({ message: 'Fetching tweets...' });
@@ -3811,7 +3849,11 @@ async function applyPinnedTweet(
     return true;
   }
 
-  const record = dbService.getTweet(pinnedTweetId, getDestinationStorageKey(mapping));
+  const record = findProcessedTweetDual(
+    (twitterId, bskyIdentifier) => dbService.getTweet(twitterId, bskyIdentifier),
+    pinnedTweetId,
+    mapping,
+  );
   if (record && record.status === 'skipped') {
     // Pinned retweets/external replies are never mirrored — remember that so we
     // don't retry (and log) every cycle.
@@ -3936,8 +3978,12 @@ async function syncPinnedTweetViaProfile(
       return `Pinned tweet unchanged (${pinnedTweetId}). Nothing to do.`;
     }
 
-    const destinationStorageKey = getDestinationStorageKey(mapping);
-    let record = dbService.getTweet(pinnedTweetId, destinationStorageKey);
+    const destinationStorageKey = resolveDestinationStorageKey(mapping);
+    let record = findProcessedTweetDual(
+      (twitterId, bskyIdentifier) => dbService.getTweet(twitterId, bskyIdentifier),
+      pinnedTweetId,
+      mapping,
+    );
     if (!record || record.status !== 'migrated') {
       console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} not mirrored yet. Backfilling it now...`);
       await acquireScraperSlot();
@@ -3972,7 +4018,11 @@ async function syncPinnedTweetViaProfile(
           undefined,
           sessionKey,
         );
-        record = dbService.getTweet(pinnedTweetId, destinationStorageKey);
+        record = findProcessedTweetDual(
+          (twitterId, bskyIdentifier) => dbService.getTweet(twitterId, bskyIdentifier),
+          pinnedTweetId,
+          mapping,
+        );
       }
     }
 
@@ -4302,8 +4352,8 @@ async function runAccountTask(
         const scheduledAccountTimeoutMs = resolveScheduledAccountTimeoutMs();
 
         // Pre-load processed IDs for optimization
-        const destinationStorageKey = getDestinationStorageKey(mapping);
-        const processedMap = loadProcessedTweets(destinationStorageKey);
+        const destinationStorageKey = resolveDestinationStorageKey(mapping);
+        const processedMap = loadProcessedTweetsForDestination(mapping);
         const processedIds = new Set(Object.keys(processedMap));
 
         for (const twitterUsername of getActiveTwitterUsernames(mapping)) {

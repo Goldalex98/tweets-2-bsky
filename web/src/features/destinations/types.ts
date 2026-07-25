@@ -170,6 +170,7 @@ export interface AccountMapping extends ConfigVersion {
   bskyServiceUrl?: string;
   bskyDid?: string;
   bskyCanonicalHandle?: string;
+  storageKey?: string;
   enabled: boolean;
   destinationState?: 'enabled' | 'paused';
   sourceCount?: number;

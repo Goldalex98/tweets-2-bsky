@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { applyValidatedDestinationIdentity } from '../../src/aggregate-destination.js';
-import { getDestinationStorageKey, resolveDestinationStorageKey } from '../../src/mapping-helpers.js';
+import {
+  findProcessedTweetDual,
+  getDestinationStorageKey,
+  historyIdentityKeys,
+  resolveDestinationStorageKey,
+} from '../../src/mapping-helpers.js';
 import type { AccountMapping } from '../../src/config/schemas.js';
 import { createDefaultMappingPolicies } from '../../src/config/defaults.js';
 
@@ -42,5 +47,30 @@ describe('destination storage key immutability', () => {
         bskyIdentifier: 'fresh.example',
       }),
     ).toBe('fresh.example');
+  });
+
+  test('historyIdentityKeys dual-reads sticky key and recomputed DID', () => {
+    const keys = historyIdentityKeys({
+      bskyIdentifier: 'destination.example',
+      bskyDid: 'did:plc:destination',
+      storageKey: 'destination.example',
+    });
+    expect(keys).toEqual(['destination.example', 'did:plc:destination']);
+  });
+
+  test('findProcessedTweetDual prefers sticky history then recomputed key', () => {
+    const rows = new Map([
+      ['did:plc:destination', { status: 'migrated' as const }],
+    ]);
+    const found = findProcessedTweetDual(
+      (twitterId, key) => (twitterId === '1' ? rows.get(key) ?? null : null),
+      '1',
+      {
+        bskyIdentifier: 'destination.example',
+        bskyDid: 'did:plc:destination',
+        storageKey: 'destination.example',
+      },
+    );
+    expect(found).toEqual({ status: 'migrated' });
   });
 });

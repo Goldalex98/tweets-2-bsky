@@ -113,7 +113,7 @@ import {
 } from './profile-mirror.js';
 import {
   getActiveTwitterUsernames,
-  getDestinationStorageKey,
+  historyIdentityKeys,
   normalizeTwitterUsername,
   parseTwitterUsernameInput,
   resolveDestinationStorageKey,
@@ -1725,7 +1725,9 @@ const getVisibleMappingIdentitySets = (config: AppConfig, user: AuthenticatedUse
       twitterUsernames.add(normalizeActor(username));
     }
     bskyIdentifiers.add(normalizeActor(mapping.bskyIdentifier));
-    bskyIdentifiers.add(normalizeActor(getDestinationStorageKey(mapping)));
+    for (const key of historyIdentityKeys(mapping)) {
+      bskyIdentifiers.add(normalizeActor(key));
+    }
   }
 
   return {
@@ -1864,7 +1866,10 @@ const getSourceImpact = (mapping: AccountMapping, username: string) => {
     runtime: source ? runtimeStateService.getSource(source.id) : null,
     dependencies: getSourceDependencies(mapping, username),
     queue: postQueueService.getSourceCounts(mapping.id, username),
-    historyCount: dbService.countTweetsBySourceForDestination(username, getDestinationStorageKey(mapping)),
+    historyCount: historyIdentityKeys(mapping).reduce(
+      (total, key) => total + dbService.countTweetsBySourceForDestination(username, key),
+      0,
+    ),
     pauseDefaults: { cancelPendingQueue: false },
     removalDefaults: {
       cancelPendingQueue: false,
@@ -3633,7 +3638,10 @@ app.delete(
       ? postQueueService.cancelPendingByMappingAndSource(mapping.id, username)
       : 0;
     const deletedHistoryItems = deleteHistory
-      ? dbService.deleteTweetsBySourceForDestination(username, getDestinationStorageKey(mapping))
+      ? historyIdentityKeys(mapping).reduce(
+          (total, key) => total + dbService.deleteTweetsBySourceForDestination(username, key),
+          0,
+        )
       : 0;
     const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
     config.mappings[index] = updatedMapping;
@@ -3797,13 +3805,21 @@ app.patch(
       return;
     }
     const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
-    const previousStorageKey = getDestinationStorageKey(mapping);
-    const nextStorageKey = getDestinationStorageKey(candidate);
+    const nextStorageKey = resolveDestinationStorageKey(candidate);
     clearCachedAgent(mapping);
     clearCachedAgent(candidate);
     config.mappings[index] = candidate;
     saveConfig(config);
-    const rekeyed = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+    let rekeyed = { processed: 0, queued: 0 };
+    for (const previousStorageKey of historyIdentityKeys(mapping)) {
+      if (previousStorageKey !== nextStorageKey) {
+        const result = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+        rekeyed = {
+          processed: rekeyed.processed + result.processed,
+          queued: rekeyed.queued + result.queued,
+        };
+      }
+    }
     res.json({
       success: true,
       destination: sanitizeMapping(candidate, createUserLookupById(config), req.user),
@@ -4960,7 +4976,9 @@ app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, 
   try {
     const deletedCount = await deleteAllPosts(id);
 
-    dbService.deleteTweetsByBskyIdentifier(resolveDestinationStorageKey(mapping));
+    for (const key of historyIdentityKeys(mapping)) {
+      dbService.deleteTweetsByBskyIdentifier(key);
+    }
 
     res.json({
       success: true,

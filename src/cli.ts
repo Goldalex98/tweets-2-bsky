@@ -50,7 +50,7 @@ import {
   postQueueService,
   runtimeStateService,
 } from './db.js';
-import { getDestinationStorageKey, parseTwitterUsernameInput } from './mapping-helpers.js';
+import { historyIdentityKeys, parseTwitterUsernameInput, resolveDestinationStorageKey } from './mapping-helpers.js';
 import {
   applyProfileMirrorSyncState,
   fetchTwitterMirrorProfile,
@@ -862,7 +862,10 @@ program
         username,
         dependencies: getSourceDependencies(mapping, username),
         queue: postQueueService.getSourceCounts(mapping.id, username),
-        historyCount: dbService.countTweetsBySourceForDestination(username, getDestinationStorageKey(mapping)),
+        historyCount: historyIdentityKeys(mapping).reduce(
+          (total, key) => total + dbService.countTweetsBySourceForDestination(username, key),
+          0,
+        ),
       }));
       for (const username of parsed.added) {
         removeDestinationSource(updatedMapping, username);
@@ -874,9 +877,9 @@ program
           cancelledQueueItems += postQueueService.cancelPendingByMappingAndSource(mapping.id, username);
         }
         if (options.deleteHistory) {
-          deletedHistoryItems += dbService.deleteTweetsBySourceForDestination(
-            username,
-            getDestinationStorageKey(mapping),
+          deletedHistoryItems += historyIdentityKeys(mapping).reduce(
+            (total, key) => total + dbService.deleteTweetsBySourceForDestination(username, key),
+            0,
           );
         }
       }
@@ -1080,13 +1083,21 @@ program
         );
       }
       const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
-      const previousStorageKey = getDestinationStorageKey(mapping);
-      const nextStorageKey = getDestinationStorageKey(candidate);
+      const nextStorageKey = resolveDestinationStorageKey(candidate);
       clearCachedAgent(mapping);
       clearCachedAgent(candidate);
       config.mappings[index] = candidate;
       saveConfig(config);
-      const rekeyed = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+      let rekeyed = { processed: 0, queued: 0 };
+      for (const previousStorageKey of historyIdentityKeys(mapping)) {
+        if (previousStorageKey !== nextStorageKey) {
+          const result = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+          rekeyed = {
+            processed: rekeyed.processed + result.processed,
+            queued: rekeyed.queued + result.queued,
+          };
+        }
+      }
       console.log(
         JSON.stringify(
           {
@@ -1521,7 +1532,9 @@ program
     }
 
     const deleted = await deleteAllPosts(mapping.id);
-    dbService.deleteTweetsByBskyIdentifier(getDestinationStorageKey(mapping));
+    for (const key of historyIdentityKeys(mapping)) {
+      dbService.deleteTweetsByBskyIdentifier(key);
+    }
     console.log(`Deleted ${deleted} posts for ${mapping.bskyIdentifier} and cleared local cache.`);
   });
 

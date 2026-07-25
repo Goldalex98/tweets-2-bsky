@@ -115,7 +115,13 @@ export function OverviewPage({
           {mappings.map((mapping) => (
             <div key={`health-${mapping.id}`} className="rounded-md border border-border p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="font-medium">@{mapping.bskyIdentifier}</p>
+                <p className="font-medium">
+                  {mapping.bskyCanonicalHandle
+                    ? `@${mapping.bskyCanonicalHandle}`
+                    : mapping.bskyIdentifier.startsWith('did:')
+                      ? mapping.bskyIdentifier
+                      : `@${mapping.bskyIdentifier}`}
+                </p>
                 <span className="text-xs text-muted-foreground">
                   Last post: {mapping.runtime?.lastBskyPostAt ? new Date(mapping.runtime.lastBskyPostAt).toLocaleString() : 'never'}
                 </span>

@@ -62,18 +62,18 @@ afterAll(() => {
 });
 
 describe('managed Bluesky account credential changes rekey linked destination history', () => {
-  test('validating an account for the first time rekeys processed history to the resolved DID', async () => {
+  test('validating an account keeps sticky destination storageKey history addressable', async () => {
     const config = buildConfig();
-    const oldStorageKey = getDestinationStorageKey({ bskyIdentifier: 'mirror.bsky.social' });
+    const stickyKey = 'mirror.bsky.social';
     dbService.saveTweet({
       twitter_id: 'tweet-1',
       twitter_username: 'source',
-      bsky_identifier: oldStorageKey,
+      bsky_identifier: stickyKey,
       status: 'migrated',
       bsky_uri: 'at://did:plc:example/app.bsky.feed.post/abc',
       bsky_cid: 'cid-abc',
     });
-    expect(Object.keys(dbService.getTweetsByBskyIdentifier(oldStorageKey))).toContain('tweet-1');
+    expect(Object.keys(dbService.getTweetsByBskyIdentifier(stickyKey))).toContain('tweet-1');
 
     currentValidation = {
       did: 'did:plc:example',
@@ -84,22 +84,24 @@ describe('managed Bluesky account credential changes rekey linked destination hi
     };
     await validateExistingBlueskyAccount(config, 'acct-1', () => {});
 
-    const newStorageKey = getDestinationStorageKey({
+    const recomputedDidKey = getDestinationStorageKey({
       bskyDid: 'did:plc:example',
       bskyIdentifier: 'mirror.bsky.social',
     });
-    expect(newStorageKey).not.toBe(oldStorageKey);
-    expect(Object.keys(dbService.getTweetsByBskyIdentifier(oldStorageKey))).not.toContain('tweet-1');
-    expect(Object.keys(dbService.getTweetsByBskyIdentifier(newStorageKey))).toContain('tweet-1');
+    expect(recomputedDidKey).not.toBe(stickyKey);
+    // Sticky destination identity wins; discovering a DID must not split history.
+    expect(Object.keys(dbService.getTweetsByBskyIdentifier(stickyKey))).toContain('tweet-1');
+    expect(Object.keys(dbService.getTweetsByBskyIdentifier(recomputedDidKey))).not.toContain('tweet-1');
   });
 
-  test('rotating credentials that resolve a same-DID handle change keeps history addressable', async () => {
+  test('rotating credentials that resolve a same-DID handle change keeps history on sticky key', async () => {
     const config = buildConfig({ did: 'did:plc:example' });
-    const storageKey = getDestinationStorageKey({ bskyDid: 'did:plc:example', bskyIdentifier: 'mirror.bsky.social' });
+    const stickyKey = 'mirror.bsky.social';
+    const didKey = getDestinationStorageKey({ bskyDid: 'did:plc:example', bskyIdentifier: 'mirror.bsky.social' });
     dbService.saveTweet({
       twitter_id: 'tweet-2',
       twitter_username: 'source',
-      bsky_identifier: storageKey,
+      bsky_identifier: didKey,
       status: 'migrated',
     });
 
@@ -112,9 +114,7 @@ describe('managed Bluesky account credential changes rekey linked destination hi
     };
     await rotateBlueskyAccountCredentials(config, { accountId: 'acct-1', appPassword: 'new-app-password' }, () => {});
 
-    // The DID still takes precedence over the handle in getDestinationStorageKey,
-    // so the key is unchanged here; this guards the case where a future change
-    // makes handle take precedence without wiring up a matching rekey.
-    expect(Object.keys(dbService.getTweetsByBskyIdentifier(storageKey))).toContain('tweet-2');
+    // Alias rows under the recomputed DID are folded onto the sticky destination key.
+    expect(Object.keys(dbService.getTweetsByBskyIdentifier(stickyKey))).toContain('tweet-2');
   });
 });
