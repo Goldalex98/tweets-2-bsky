@@ -8,10 +8,40 @@ import {
 } from '../config/bluesky-accounts.js';
 import type { AppConfig, BlueskyAccount } from '../config/schemas.js';
 import { getConfigVersion } from '../config-manager.js';
-import { blueskyAccountRuntimeService } from '../db.js';
+import { blueskyAccountRuntimeService, dbService } from '../db.js';
 import { clearCachedAgent } from '../bsky.js';
+import { getDestinationStorageKey } from '../mapping-helpers.js';
 import { validateBlueskyCredentials } from '../profile-mirror.js';
 import type { BlueskyAccountView } from '../routes/bluesky-accounts-router.js';
+
+/**
+ * A linked destination's queue/history identity is derived from the
+ * account's DID/handle (the account overrides the destination's own
+ * identity fields once linked; see `projectAccountMappings`). Validating or
+ * rotating credentials can resolve or change the DID/handle, so the
+ * effective storage key must be rekeyed in lockstep or duplicate detection
+ * silently breaks for that destination.
+ */
+function accountStorageIdentity(account: Pick<BlueskyAccount, 'did' | 'canonicalHandle' | 'loginIdentifier'>) {
+  return {
+    bskyDid: account.did,
+    bskyCanonicalHandle: account.canonicalHandle,
+    bskyIdentifier: account.loginIdentifier,
+  };
+}
+
+function rekeyLinkedDestinationIdentity(
+  config: Pick<AppConfig, 'destinations'>,
+  accountId: string,
+  previousAccount: Pick<BlueskyAccount, 'did' | 'canonicalHandle' | 'loginIdentifier'>,
+  nextAccount: Pick<BlueskyAccount, 'did' | 'canonicalHandle' | 'loginIdentifier'>,
+): void {
+  const linked = findDestinationForAccount(config, accountId);
+  if (!linked) return;
+  const previousStorageKey = getDestinationStorageKey(accountStorageIdentity(previousAccount));
+  const nextStorageKey = getDestinationStorageKey(accountStorageIdentity(nextAccount));
+  dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+}
 
 function toAccountView(config: AppConfig, account: BlueskyAccount): BlueskyAccountView {
   const linked = findDestinationForAccount(config, account.id);
@@ -113,6 +143,7 @@ export async function validateExistingBlueskyAccount(
     const updated = applyValidatedAccountIdentity(account, validation);
     config.blueskyAccounts[index] = updated;
     save(config);
+    rekeyLinkedDestinationIdentity(config, account.id, account, updated);
     clearCachedAgent({
       bskyAccountId: updated.id,
       bskyIdentifier: updated.canonicalHandle ?? updated.loginIdentifier,
@@ -174,6 +205,7 @@ export async function rotateBlueskyAccountCredentials(
   updated = applyValidatedAccountIdentity(updated, validation);
   config.blueskyAccounts[index] = updated;
   save(config);
+  rekeyLinkedDestinationIdentity(config, account.id, account, updated);
   clearCachedAgent({
     bskyAccountId: updated.id,
     bskyIdentifier: updated.canonicalHandle ?? updated.loginIdentifier,
