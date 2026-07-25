@@ -3,6 +3,7 @@
 ## Stack and layout
 
 - Runtime/package manager: Bun; language: strict TypeScript with NodeNext server modules.
+- `bun.lock` is the only lockfile. Never add `package-lock.json`: Bun silently migrates from it when `bun.lock` is absent, which pins stale transitive versions.
 - Backend: Express in `src/server.ts`; daemon and posting pipeline in `src/index.ts`.
 - Frontend: React 19 + Vite in `web/`; production assets are emitted to `web/dist/`.
 - Persistence: JSON configuration plus SQLite (`processed_tweets` and durable `post_queue`) in the configured data directory.
@@ -29,6 +30,8 @@ The web server exposes authenticated configuration/operations APIs and serves th
 ## Commands
 
 - `bun install --frozen-lockfile`
+- `bun audit --audit-level=high` — advisories against the resolved tree
+- `bun run verify:deps` — after upgrading the X scraper or Bluesky SDK
 - `bun run lint:check` — non-mutating lint verification
 - `bun run typecheck:server`
 - `bun run typecheck:web`

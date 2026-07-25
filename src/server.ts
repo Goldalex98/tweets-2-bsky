@@ -8,19 +8,75 @@ import bcrypt from 'bcryptjs';
 import cors from 'cors';
 import express from 'express';
 import jwt, { type SignOptions } from 'jsonwebtoken';
-import { deleteAllPosts } from './bsky.js';
+import {
+  addDestinationSources,
+  applyValidatedDestinationIdentity,
+  findDuplicateActiveDestination,
+  getSourceDependencies,
+  removeDestinationSource,
+  setDestinationSourcePaused,
+} from './aggregate-destination.js';
+import {
+  applyRestoreBundle,
+  createBackupBundle,
+  getBackupStorageStatus,
+  validateBackupBundle,
+} from './backup-service.js';
+import { clearCachedAgent, deleteAllPosts } from './bsky.js';
+import { previewTextCapability, testAIProvider } from './ai-manager.js';
+import { contentSha256 } from './content-dedup.js';
+import { contentPolicyMetadataForPost, evaluateContentPolicy } from './content-policy.js';
 import {
   ADMIN_USER_PERMISSIONS,
   type AccountMapping,
+  type AITextCapability,
   type AppConfig,
+  type PostingPolicy,
+  type ProfileFieldPolicy,
+  type ProfileManagementPolicy,
+  type SourceFilterPolicy,
+  type SourceSchedulePolicy,
   type UserPermissions,
   type UserRole,
   type WebUser,
+  createConfigExport,
+  createDefaultMappingPolicies,
+  findDestinationByLegacyId,
   getConfig,
+  getConfigMigrationReport,
+  getConfigVersion,
   getDefaultUserPermissions,
+  mergeImportedConfig,
   saveConfig,
+  saveCanonicalConfig,
+  normalizeSourceFilters,
+  normalizeSourceSchedule,
+  normalizeDuplicateSuppression,
+  normalizeAiOverrides,
+  normalizeModerationPolicy,
+  normalizeRoutingPolicy,
+  normalizeRouteDelivery,
 } from './config-manager.js';
-import { dbService, postQueueService } from './db.js';
+import {
+  rejectMissingOrStaleConfigRevision,
+  rejectStaleConfigMutation,
+  sendConfigConflictIfStale,
+} from './http-concurrency.js';
+import {
+  authRuntimeStateService,
+  databaseHealthService,
+  dbService,
+  duplicateFingerprintService,
+  digestEntryService,
+  digestJobService,
+  ingestionAuditService,
+  ingestionCredentialService,
+  ingestionReplayService,
+  policyOverrideAuditService,
+  postQueueService,
+  runtimeStateService,
+  webhookDeliveryService,
+} from './db.js';
 import type { ProcessedTweet } from './db.js';
 import {
   applyProfileMirrorSyncState,
@@ -31,12 +87,75 @@ import {
   syncBlueskyProfileFromTwitter,
   validateBlueskyCredentials,
 } from './profile-mirror.js';
+import {
+  getActiveTwitterUsernames,
+  getDestinationStorageKey,
+  normalizeTwitterUsername,
+  parseTwitterUsernameInput,
+  resolveProfileSyncSourceUsername,
+} from './mapping-helpers.js';
+import { applyPostingPolicy, validateAttributionTemplate } from './post-transform.js';
+import { assertProfileMutationAllowed, evaluateProfileMutation } from './profile-policy.js';
+import { evaluateSourceFilter } from './source-filter.js';
+import {
+  createSchedulerCommandState,
+  getSchedulerCommandsSince as readSchedulerCommandsSince,
+  issueSchedulerCommand,
+} from './scheduler-command.js';
+import {
+  getNextCheckTimestamp,
+  getSchedulerIntervalMinutes,
+  parseSchedulerIntervalMinutes,
+} from './scheduler-timing.js';
 import { JWT_SECRET_FILE_PATH, UPDATE_LOG_DIR } from './storage-paths.js';
+import { metricsService } from './metrics.js';
+import { combinePerceptualHashes, computePerceptualHashes } from './media-dedup.js';
+import { sanitizeForDiagnostics } from './observability.js';
+import { notifyOperationsEvent } from './notification-service.js';
+import {
+  applySecurityHeaders,
+  createRateLimiter,
+  noStore,
+  requireJsonObject,
+  safeEqual,
+  sanitizeErrorMessage,
+  sendSafeError,
+} from './http-security.js';
+import { validateWebhookTarget } from './webhook.js';
+import {
+  createPolicySnapshot,
+  diffPolicySnapshots,
+  parsePolicySnapshot,
+  POLICY_SNAPSHOT_VERSION,
+  serializePolicySnapshot,
+} from './policy-snapshot.js';
+import { parseRetainedCandidate } from './retained-candidate.js';
+import {
+  hashAuditValue,
+  INGESTION_TIMESTAMP_WINDOW_MS,
+  verifyIngestionHmac,
+} from './ingestion-security.js';
+import { routeNormalizedPost } from './ingestion.js';
+import { queuedPostForPolicyEvaluation, validateNormalizedPost } from './normalized-post.js';
+import {
+  DEFAULT_DUPLICATE_SUPPRESSION,
+  DEFAULT_MODERATION_POLICY,
+  DEFAULT_ROUTE_DELIVERY,
+  DEFAULT_ROUTING_POLICY,
+  DEFAULT_SOURCE_FILTERS,
+  DEFAULT_SOURCE_SCHEDULE,
+} from './config/defaults.js';
+import { nextDigestRun, buildDigestPreview } from './digest.js';
+import { buildSchedulerSettingsResponse, createSettingsRouter } from './routes/settings-router.js';
+import { createBackupRouter } from './routes/backup-router.js';
+import { createDigestRouter } from './routes/digest-router.js';
+import { createIngestionAdminRouter } from './routes/ingestion-admin-router.js';
+import { createQueueControlRouter } from './routes/queue-control-router.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();
+export const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = (process.env.HOST || process.env.BIND_HOST || '0.0.0.0').trim() || '0.0.0.0';
 const APP_ROOT_DIR = path.join(__dirname, '..');
@@ -55,6 +174,11 @@ const SERVER_STARTED_AT = Date.now();
 const PASSWORD_MIN_LENGTH = 8;
 const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_RATE_MAX_ATTEMPTS = 30;
+const AUTH_COOKIE_NAME = 't2b_session';
+const CSRF_COOKIE_NAME = 't2b_csrf';
+const DEFAULT_BODY_LIMIT = '128kb';
+const IMPORT_BODY_LIMIT = '2mb';
+const RESTORE_BODY_LIMIT = '110mb';
 const APPVIEW_POST_CHUNK_SIZE = 10;
 const APPVIEW_PROFILE_CHUNK_SIZE = 25;
 const APPVIEW_MAX_ATTEMPTS = 2;
@@ -63,6 +187,8 @@ const FEDIVERSE_BRIDGE_STATUS_CHUNK_SIZE = 2;
 const FEDIVERSE_BRIDGE_STATUS_CACHE_TTL_MS = 10 * 60_000;
 const FEDIVERSE_BRIDGE_HANDLES = ['ap.brid.gy', 'bsky.brid.gy'];
 
+const MINIMUM_JWT_SECRET_LENGTH = 32;
+
 function loadPersistedJwtSecret(): string | undefined {
   if (!fs.existsSync(JWT_SECRET_FILE_PATH)) {
     return undefined;
@@ -70,7 +196,7 @@ function loadPersistedJwtSecret(): string | undefined {
 
   try {
     const secret = fs.readFileSync(JWT_SECRET_FILE_PATH, 'utf8').trim();
-    if (secret.length >= 32) {
+    if (secret.length >= MINIMUM_JWT_SECRET_LENGTH) {
       return secret;
     }
     console.warn(`⚠️ Ignoring weak JWT secret in ${JWT_SECRET_FILE_PATH}. Regenerating.`);
@@ -95,8 +221,17 @@ function persistJwtSecret(secret: string): void {
 
 function resolveJwtSecret(): string {
   if (jwtSecretFromEnv) {
-    if (jwtSecretFromEnv.length < 32) {
-      console.warn('⚠️ JWT_SECRET is shorter than 32 characters. Use a longer value for stronger signing security.');
+    if (jwtSecretFromEnv.length < MINIMUM_JWT_SECRET_LENGTH) {
+      // A guessable signing key lets an attacker mint sessions for any account,
+      // so production refuses to start rather than degrading to a log warning.
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          `JWT_SECRET must be at least ${MINIMUM_JWT_SECRET_LENGTH} characters. Generate one with "openssl rand -hex 32", or unset JWT_SECRET to use the generated secret at ${JWT_SECRET_FILE_PATH}.`,
+        );
+      }
+      console.warn(
+        `⚠️ JWT_SECRET is shorter than ${MINIMUM_JWT_SECRET_LENGTH} characters. This is rejected when NODE_ENV=production.`,
+      );
     }
     return jwtSecretFromEnv;
   }
@@ -126,6 +261,7 @@ interface BskyProfileView {
   handle?: string;
   displayName?: string;
   avatar?: string;
+  banner?: string;
   description?: string;
   createdAt?: string;
 }
@@ -312,6 +448,34 @@ const authRateLimiter = (req: any, res: any, next: any) => {
   authRateBuckets.set(key, bucket);
   next();
 };
+
+const credentialRateLimiter = createRateLimiter({
+  scope: 'credential',
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  key: (request) => getRequestIp(request),
+});
+
+const importRestoreRateLimiter = createRateLimiter({
+  scope: 'import-restore',
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  key: (request) => getRequestIp(request),
+});
+
+const webhookRateLimiter = createRateLimiter({
+  scope: 'webhook',
+  windowMs: 5 * 60 * 1000,
+  max: 15,
+  key: (request) => getRequestIp(request),
+});
+
+const ingestionRateLimiter = createRateLimiter({
+  scope: 'normalized-ingestion',
+  windowMs: 60_000,
+  max: Number(process.env.INGESTION_RATE_LIMIT_PER_MINUTE) || 120,
+  key: (request) => getRequestIp(request),
+});
 
 function buildPostUrl(identifier: string, uri?: string): string | undefined {
   if (!uri) return undefined;
@@ -627,6 +791,7 @@ async function fetchProfilesByActor(actors: string[]): Promise<Record<string, Bs
         handle: typeof profile?.handle === 'string' ? profile.handle : undefined,
         displayName: typeof profile?.displayName === 'string' ? profile.displayName : undefined,
         avatar: typeof profile?.avatar === 'string' ? profile.avatar : undefined,
+        banner: typeof profile?.banner === 'string' ? profile.banner : undefined,
         description: typeof profile?.description === 'string' ? profile.description : undefined,
         createdAt: typeof profile?.createdAt === 'string' ? profile.createdAt : undefined,
       };
@@ -841,10 +1006,11 @@ function buildEnrichedPost(activity: ProcessedTweet, postView: any): EnrichedPos
 }
 
 // In-memory state for triggers and scheduling
-let lastCheckTime = Date.now();
-let nextCheckTime = Date.now() + (getConfig().checkIntervalMinutes || 5) * 60 * 1000;
+let lastCheckTime = 0;
+let nextCheckTime = getNextCheckTimestamp(Date.now(), getSchedulerIntervalMinutes(getConfig()));
 export interface PendingBackfill {
   id: string;
+  sourceUsernames?: string[];
   limit?: number;
   queuedAt: number;
   sequence: number;
@@ -852,7 +1018,7 @@ export interface PendingBackfill {
 }
 let pendingBackfills: PendingBackfill[] = [];
 let backfillSequence = 0;
-let schedulerWakeSignal = 0; // Monotonic counter to wake scheduler loop immediately.
+const schedulerCommandState = createSchedulerCommandState();
 
 // Multiple subbranches work in parallel, so a single global status message
 // gets clobbered constantly. Each unit of work registers its own job here and
@@ -904,6 +1070,7 @@ export interface PendingPinSync {
   id: string;
   queuedAt: number;
   requestId: string;
+  sourceUsername?: string;
 }
 let pendingPinSyncs: PendingPinSync[] = [];
 
@@ -933,33 +1100,102 @@ let updateJobState: UpdateJobState = {
   running: false,
 };
 
-function signalSchedulerWake(): void {
-  schedulerWakeSignal += 1;
+function signalSchedulerWake(
+  kind: 'run-now' | 'reschedule' | 'backfill' | 'pin-sync' = 'reschedule',
+  mappingId?: string,
+): void {
+  issueSchedulerCommand(schedulerCommandState, kind, { mappingId });
 }
 
 function requestImmediateSchedulerPass(): void {
-  lastCheckTime = 0;
-  nextCheckTime = Date.now() + 250;
-  signalSchedulerWake();
+  signalSchedulerWake('run-now');
 }
 
-if (allowedOrigins.size === 0) {
-  app.use(cors());
-} else {
-  app.use(
-    cors({
-      origin: (origin, callback) => {
-        if (!origin) {
-          callback(null, true);
-          return;
-        }
-        callback(null, allowedOrigins.has(origin));
-      },
-    }),
-  );
-}
-// Config imports with many mappings can exceed the 100kb express default.
-app.use(express.json({ limit: '2mb' }));
+app.set('trust proxy', TRUST_PROXY ? 1 : false);
+app.disable('x-powered-by');
+app.use(applySecurityHeaders);
+app.use(
+  cors({
+    credentials: true,
+    origin: (origin, callback) => {
+      // Requests without Origin include same-origin server calls, health probes,
+      // CLI clients, and test automation. Cross-origin browser access is
+      // denied unless explicitly configured.
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      callback(null, allowedOrigins.has(origin));
+    },
+  }),
+);
+app.use('/api/config/import', express.json({ limit: IMPORT_BODY_LIMIT }));
+app.use('/api/backup/restore', express.json({ limit: RESTORE_BODY_LIMIT }));
+app.use(
+  '/api/ingest',
+  express.json({
+    limit: process.env.INGESTION_BODY_LIMIT || '128kb',
+    verify: (request: any, _response, buffer) => {
+      request.rawBody = Buffer.from(buffer);
+    },
+  }),
+);
+app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+app.use(
+  [
+    '/api/config',
+    '/api/backup',
+    '/api/auth',
+    '/api/login',
+    '/api/register',
+    '/api/logout',
+    '/api/me',
+    '/api/twitter-config',
+    '/api/ai-config',
+    '/api/settings/notifications',
+    '/api/metrics',
+  ],
+  noStore,
+);
+app.use((req: any, res, next) => {
+  const supplied = req.get('x-correlation-id');
+  req.correlationId =
+    typeof supplied === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(supplied)
+      ? supplied
+      : `request-${randomUUID()}`;
+  res.setHeader('x-correlation-id', req.correlationId);
+  next();
+});
+
+const getPublicHealth = () => {
+  const database = databaseHealthService.check();
+  let scheduler: 'running' | 'disabled' | 'error' = 'error';
+  try {
+    scheduler = getConfig().scheduler.enabled ? 'running' : 'disabled';
+  } catch {
+    scheduler = 'error';
+  }
+  return {
+    status: database.status === 'ok' && scheduler !== 'error' ? ('ok' as const) : ('error' as const),
+    uptimeSeconds: Math.max(0, Math.floor((Date.now() - SERVER_STARTED_AT) / 1000)),
+    database: database.status,
+    scheduler,
+  };
+};
+
+app.get('/healthz', (_req, res) => {
+  const health = getPublicHealth();
+  res.status(health.status === 'ok' ? 200 : 503).json(health);
+});
+
+app.get('/readyz', (_req, res) => {
+  const health = getPublicHealth();
+  res.status(health.status === 'ok' ? 200 : 503).json({
+    status: health.status === 'ok' ? 'ready' : 'not-ready',
+    database: health.database,
+    scheduler: health.scheduler,
+  });
+});
 
 app.use(
   express.static(staticAssetsDir, {
@@ -976,6 +1212,20 @@ interface AuthenticatedUser {
 }
 
 interface MappingResponse extends Omit<AccountMapping, 'bskyPassword'> {
+  revision: number;
+  updatedAt: string;
+  destinationState: 'enabled' | 'paused';
+  sourceCount: number;
+  activeSourceCount: number;
+  sources: Array<{
+    username: string;
+    state: 'enabled' | 'paused';
+    filters?: SourceFilterPolicy;
+    schedule?: SourceSchedulePolicy;
+    runtime?: ReturnType<typeof runtimeStateService.getSource>;
+  }>;
+  runtime: ReturnType<typeof runtimeStateService.getDestination>;
+  queue: ReturnType<typeof postQueueService.getCounts>['perMapping'][number] | null;
   createdByLabel?: string;
   createdByUser?: {
     id: string;
@@ -1100,10 +1350,70 @@ const issueTokenForUser = (user: WebUser): string =>
       userId: user.id,
       email: user.email,
       username: user.username,
+      tokenVersion: user.tokenVersion,
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN },
   );
+
+const parseCookies = (request: any): Record<string, string> => {
+  const header = request.headers?.cookie;
+  if (typeof header !== 'string') return {};
+  const cookies: Record<string, string> = {};
+  for (const pair of header.split(';')) {
+    const separator = pair.indexOf('=');
+    if (separator <= 0) continue;
+    const name = pair.slice(0, separator).trim();
+    try {
+      cookies[name] = decodeURIComponent(pair.slice(separator + 1).trim());
+    } catch {
+      // Ignore malformed cookie values.
+    }
+  }
+  return cookies;
+};
+
+const cookieSecureForRequest = (request: any): boolean => request.secure === true;
+
+const serializeCookie = (
+  name: string,
+  value: string,
+  options: { httpOnly?: boolean; secure?: boolean; maxAge?: number } = {},
+): string => {
+  const attributes = [`${name}=${encodeURIComponent(value)}`, 'Path=/', 'SameSite=Lax'];
+  if (options.httpOnly) attributes.push('HttpOnly');
+  if (options.secure) attributes.push('Secure');
+  if (options.maxAge !== undefined) attributes.push(`Max-Age=${Math.max(0, Math.floor(options.maxAge))}`);
+  return attributes.join('; ');
+};
+
+const setAuthenticationCookies = (request: any, response: any, token: string): string => {
+  const csrfToken = randomBytes(32).toString('base64url');
+  const secure = cookieSecureForRequest(request);
+  response.setHeader('Set-Cookie', [
+    serializeCookie(AUTH_COOKIE_NAME, token, { httpOnly: true, secure }),
+    serializeCookie(CSRF_COOKIE_NAME, csrfToken, { secure }),
+  ]);
+  return csrfToken;
+};
+
+const clearAuthenticationCookies = (request: any, response: any): void => {
+  const secure = cookieSecureForRequest(request);
+  response.setHeader('Set-Cookie', [
+    serializeCookie(AUTH_COOKIE_NAME, '', { httpOnly: true, secure, maxAge: 0 }),
+    serializeCookie(CSRF_COOKIE_NAME, '', { secure, maxAge: 0 }),
+  ]);
+};
+
+const getBearerToken = (request: any): string | undefined => {
+  const header = request.headers?.authorization;
+  if (typeof header !== 'string') return undefined;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match?.[1];
+};
+
+const mutationRequiresCsrf = (request: any): boolean =>
+  !['GET', 'HEAD', 'OPTIONS'].includes(String(request.method || '').toUpperCase());
 
 const findUserByIdentifier = (config: AppConfig, identifier: string): WebUser | undefined => {
   const normalizedEmail = normalizeEmail(identifier);
@@ -1121,20 +1431,48 @@ const findUserByIdentifier = (config: AppConfig, identifier: string): WebUser | 
   return config.users.find((user) => normalizeUsername(user.username) === normalizedUsername);
 };
 
-const findUserFromTokenPayload = (config: AppConfig, payload: Record<string, unknown>): WebUser | undefined => {
+export interface TokenSubjectMatch {
+  user: WebUser;
+  matchedBy: 'userId' | 'legacy-identifier';
+}
+
+let legacyIdentifierSessionCount = 0;
+
+export function getLegacyIdentifierSessionCount(): number {
+  return legacyIdentifierSessionCount;
+}
+
+const recordLegacyIdentifierSession = (payload: Record<string, unknown>): void => {
+  legacyIdentifierSessionCount += 1;
+  const identity = normalizeEmail(payload.email) ?? normalizeUsername(payload.username);
+  console.warn(
+    `⚠️ legacy-session-token-accepted identity=${identity ? hashAuditValue(identity) : 'unknown'}; ` +
+      'the token predates userId claims. Users should re-authenticate to obtain a subject-bound token.',
+  );
+};
+
+/**
+ * Resolves the token subject. A token that carries a `userId` claim must match
+ * that exact account: falling back to the username or email would let a token
+ * minted for a deleted user authenticate as a later account that reuses the
+ * same identifier.
+ */
+const findUserFromTokenPayload = (
+  config: AppConfig,
+  payload: Record<string, unknown>,
+): TokenSubjectMatch | undefined => {
   const tokenUserId = normalizeOptionalString(payload.userId) ?? normalizeOptionalString(payload.id);
   if (tokenUserId) {
     const byId = config.users.find((user) => user.id === tokenUserId);
-    if (byId) {
-      return byId;
-    }
+    return byId ? { user: byId, matchedBy: 'userId' } : undefined;
   }
 
   const tokenEmail = normalizeEmail(payload.email);
   if (tokenEmail) {
     const byEmail = config.users.find((user) => normalizeEmail(user.email) === tokenEmail);
     if (byEmail) {
-      return byEmail;
+      recordLegacyIdentifierSession(payload);
+      return { user: byEmail, matchedBy: 'legacy-identifier' };
     }
   }
 
@@ -1142,7 +1480,8 @@ const findUserFromTokenPayload = (config: AppConfig, payload: Record<string, unk
   if (tokenUsername) {
     const byUsername = config.users.find((user) => normalizeUsername(user.username) === tokenUsername);
     if (byUsername) {
-      return byUsername;
+      recordLegacyIdentifierSession(payload);
+      return { user: byUsername, matchedBy: 'legacy-identifier' };
     }
   }
 
@@ -1184,8 +1523,17 @@ const getVisibleMappings = (config: AppConfig, user: AuthenticatedUser): Account
   return config.mappings.filter((mapping) => mapping.createdByUserId === user.id);
 };
 
-const getVisibleMappingIdSet = (config: AppConfig, user: AuthenticatedUser): Set<string> =>
-  new Set(getVisibleMappings(config, user).map((mapping) => mapping.id));
+const getVisibleMappingIdSet = (config: AppConfig, user: AuthenticatedUser): Set<string> => {
+  const ids = new Set<string>();
+  for (const mapping of getVisibleMappings(config, user)) {
+    ids.add(mapping.id);
+    const destination = findDestinationByLegacyId(config, mapping.id);
+    for (const legacyId of destination?.metadata.legacyMappingIds ?? []) {
+      ids.add(legacyId);
+    }
+  }
+  return ids;
+};
 
 const getVisibleMappingIdentitySets = (config: AppConfig, user: AuthenticatedUser) => {
   const visible = getVisibleMappings(config, user);
@@ -1197,6 +1545,7 @@ const getVisibleMappingIdentitySets = (config: AppConfig, user: AuthenticatedUse
       twitterUsernames.add(normalizeActor(username));
     }
     bskyIdentifiers.add(normalizeActor(mapping.bskyIdentifier));
+    bskyIdentifiers.add(normalizeActor(getDestinationStorageKey(mapping)));
   }
 
   return {
@@ -1211,11 +1560,36 @@ const sanitizeMapping = (
   requester: AuthenticatedUser,
 ): MappingResponse => {
   const { bskyPassword: _password, ...rest } = mapping;
+  const configVersion = getConfigVersion(getConfig());
   const createdBy = mapping.createdByUserId ? usersById.get(mapping.createdByUserId) : undefined;
   const ownerLabel = sanitizeLabelForRequester(mapping.owner, requester);
 
   const response: MappingResponse = {
     ...rest,
+    ...configVersion,
+    destinationState: mapping.enabled ? 'enabled' : 'paused',
+    sourceCount: mapping.twitterUsernames.length,
+    activeSourceCount: getActiveTwitterUsernames(mapping).length,
+    sources: mapping.twitterUsernames.map((username) => {
+      const config = getConfig();
+      const source = config.sources.find((candidate) => candidate.username === username);
+      const route = source
+        ? config.routes.find((candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping.id)
+        : undefined;
+      return {
+        username,
+        routeId: route?.id,
+        state: mapping.pausedTwitterUsernames?.includes(username) ? ('paused' as const) : ('enabled' as const),
+        filters: route?.filters ?? source?.filters,
+        routingPolicy: route?.routingPolicy,
+        moderationPolicy: route?.moderationPolicy,
+        duplicateSuppression: route?.duplicateSuppression,
+        schedule: source?.schedule,
+        runtime: source ? runtimeStateService.getSource(source.id) : null,
+      };
+    }),
+    runtime: runtimeStateService.getDestination(mapping.id),
+    queue: postQueueService.getCounts().perMapping.find((entry) => entry.destination_id === mapping.id) ?? null,
     owner: ownerLabel,
     createdByLabel: createdBy
       ? requester.isAdmin
@@ -1234,34 +1608,6 @@ const sanitizeMapping = (
   }
 
   return response;
-};
-
-const parseTwitterUsernames = (value: unknown): string[] => {
-  const seen = new Set<string>();
-  const usernames: string[] = [];
-  const add = (candidate: unknown) => {
-    if (typeof candidate !== 'string') {
-      return;
-    }
-    const normalized = normalizeActor(candidate);
-    if (!normalized || seen.has(normalized)) {
-      return;
-    }
-    seen.add(normalized);
-    usernames.push(normalized);
-  };
-
-  if (Array.isArray(value)) {
-    for (const candidate of value) {
-      add(candidate);
-    }
-  } else if (typeof value === 'string') {
-    for (const candidate of value.split(',')) {
-      add(candidate);
-    }
-  }
-
-  return usernames;
 };
 
 const parseMappingIds = (value: unknown): string[] => {
@@ -1286,39 +1632,234 @@ const parseMappingIds = (value: unknown): string[] => {
   return ids;
 };
 
-const resolveProfileSyncSourceUsername = (args: {
-  twitterUsernames: string[];
-  requestedSource?: unknown;
-  fallbackSource?: string;
-}): string | undefined => {
-  const twitterUsernames = args.twitterUsernames.map(normalizeActor).filter((username) => username.length > 0);
-  if (twitterUsernames.length === 0) {
-    return undefined;
-  }
+const getDuplicateDestinationPayload = (mapping: AccountMapping) => ({
+  error: `This Bluesky destination is already active as ${mapping.bskyCanonicalHandle || mapping.bskyIdentifier}.`,
+  code: 'DUPLICATE_DESTINATION',
+  duplicateDestination: {
+    mappingId: mapping.id,
+    did: mapping.bskyDid,
+    handle: mapping.bskyCanonicalHandle || mapping.bskyIdentifier,
+  },
+  guidance:
+    'Add the X sources to the existing destination, or pause one destination and explicitly choose credentials and ownership. Legacy duplicates are never merged automatically.',
+});
 
-  const normalizedRequested =
-    args.requestedSource !== undefined ? normalizeActor(String(args.requestedSource || '')) : undefined;
-  const normalizedFallback = normalizeActor(args.fallbackSource || '');
-
-  let resolved = normalizedRequested;
-  if (!resolved && normalizedFallback && twitterUsernames.includes(normalizedFallback)) {
-    resolved = normalizedFallback;
-  }
-
-  if (resolved && twitterUsernames.includes(resolved)) {
-    return resolved;
-  }
-
-  return twitterUsernames[0];
+const getSourceImpact = (mapping: AccountMapping, username: string) => {
+  const source = getConfig().sources.find((candidate) => candidate.username === username);
+  const route = source
+    ? getConfig().routes.find(
+        (candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping.id,
+      )
+    : undefined;
+  return {
+    username,
+    sourceId: source?.id,
+    routeId: route?.id,
+    state: mapping.pausedTwitterUsernames?.includes(username) ? ('paused' as const) : ('enabled' as const),
+    filters: route?.filters ?? source?.filters,
+    routingPolicy: route?.routingPolicy,
+    moderationPolicy: route?.moderationPolicy,
+    duplicateSuppression: route?.duplicateSuppression,
+    schedule: source?.schedule,
+    runtime: source ? runtimeStateService.getSource(source.id) : null,
+    dependencies: getSourceDependencies(mapping, username),
+    queue: postQueueService.getSourceCounts(mapping.id, username),
+    historyCount: dbService.countTweetsBySourceForDestination(username, getDestinationStorageKey(mapping)),
+    pauseDefaults: { cancelPendingQueue: false },
+    removalDefaults: {
+      cancelPendingQueue: false,
+      deleteHistory: false,
+    },
+  };
 };
 
 const getMappingMirrorSyncState = (mapping: AccountMapping) => ({
-  sourceUsername: mapping.profileSyncSourceUsername,
+  sourceUsername: mapping.profileManagement.profileSync.sourceUsername,
   mirroredDisplayName: mapping.lastMirroredDisplayName,
   mirroredDescription: mapping.lastMirroredDescription,
   avatarUrl: mapping.lastMirroredAvatarUrl,
   bannerUrl: mapping.lastMirroredBannerUrl,
 });
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const parseSourceFiltersInput = (value: unknown, fallback: SourceFilterPolicy): SourceFilterPolicy => {
+  if (!isRecord(value)) throw new Error('filters must be an object.');
+  const booleanFields = [
+    'originalPosts',
+    'selfReplies',
+    'externalReplies',
+    'quotes',
+    'reposts',
+    'mediaOnly',
+  ] as const;
+  for (const field of booleanFields) {
+    if (value[field] !== undefined && typeof value[field] !== 'boolean') {
+      throw new Error(`filters.${field} must be a boolean.`);
+    }
+  }
+  for (const field of ['includeKeywords', 'excludeKeywords', 'languages'] as const) {
+    if (
+      value[field] !== undefined &&
+      (!Array.isArray(value[field]) || !value[field].every((entry) => typeof entry === 'string'))
+    ) {
+      throw new Error(`filters.${field} must be an array of strings.`);
+    }
+  }
+  if (value.sensitiveContent !== undefined && value.sensitiveContent !== 'mirror' && value.sensitiveContent !== 'skip') {
+    throw new Error('filters.sensitiveContent must be mirror or skip.');
+  }
+  return normalizeSourceFilters({ ...fallback, ...value });
+};
+
+const parseSourceScheduleInput = (value: unknown, fallback: SourceSchedulePolicy): SourceSchedulePolicy => {
+  if (!isRecord(value)) throw new Error('schedule must be an object.');
+  if (value.mode !== undefined && !['adaptive', 'fixed', 'inherit'].includes(String(value.mode))) {
+    throw new Error('schedule.mode must be adaptive, fixed, or inherit.');
+  }
+  for (const field of ['minIntervalMinutes', 'maxIntervalMinutes', 'fixedIntervalMinutes'] as const) {
+    if (
+      value[field] !== undefined &&
+      (!Number.isInteger(value[field]) || Number(value[field]) < 1 || Number(value[field]) > 1440)
+    ) {
+      throw new Error(`schedule.${field} must be a whole number between 1 and 1440.`);
+    }
+  }
+  const schedule = normalizeSourceSchedule({ ...fallback, ...value });
+  if (
+    Number(value.minIntervalMinutes ?? fallback.minIntervalMinutes) >
+    Number(value.maxIntervalMinutes ?? fallback.maxIntervalMinutes)
+  ) {
+    throw new Error('schedule.minIntervalMinutes cannot exceed maxIntervalMinutes.');
+  }
+  const requestedFixed = Number(value.fixedIntervalMinutes ?? fallback.fixedIntervalMinutes);
+  if (requestedFixed < schedule.minIntervalMinutes || requestedFixed > schedule.maxIntervalMinutes) {
+    throw new Error('schedule.fixedIntervalMinutes must be within min/max bounds.');
+  }
+  return schedule;
+};
+
+const resolveStrictPolicySource = (
+  twitterUsernames: string[],
+  requestedSource: unknown,
+  fallbackSource?: string,
+): string | undefined => {
+  if (requestedSource !== undefined) {
+    const normalized = normalizeUsername(requestedSource);
+    if (normalized && !twitterUsernames.includes(normalized)) {
+      throw new Error(`@${normalized} is not a source in this destination.`);
+    }
+  }
+  return resolveProfileSyncSourceUsername({ twitterUsernames, requestedSource, fallbackSource });
+};
+
+const parsePostingPolicyInput = (value: unknown, fallback: PostingPolicy): PostingPolicy => {
+  if (value === undefined) return fallback;
+  if (!isRecord(value)) throw new Error('postingPolicy must be an object.');
+  const rawAttribution = value.attribution;
+  if (rawAttribution !== undefined && !isRecord(rawAttribution)) {
+    throw new Error('postingPolicy.attribution must be an object.');
+  }
+  const attribution = isRecord(rawAttribution) ? rawAttribution : {};
+  const mode = attribution.mode ?? fallback.attribution.mode;
+  if (mode !== 'never' && mode !== 'multiple-sources' && mode !== 'always') {
+    throw new Error('Attribution mode must be never, multiple-sources, or always.');
+  }
+  const template = attribution.template ?? fallback.attribution.template;
+  if (typeof template !== 'string') throw new Error('Attribution template must be a string.');
+  validateAttributionTemplate(template);
+  return {
+    attribution: {
+      mode,
+      template,
+      rootPostsOnly:
+        attribution.rootPostsOnly === undefined
+          ? fallback.attribution.rootPostsOnly
+          : normalizeBoolean(attribution.rootPostsOnly, fallback.attribution.rootPostsOnly),
+      linkSource:
+        attribution.linkSource === undefined
+          ? fallback.attribution.linkSource
+          : normalizeBoolean(attribution.linkSource, fallback.attribution.linkSource),
+    },
+    appendOriginalPostLink:
+      value.appendOriginalPostLink === undefined
+        ? fallback.appendOriginalPostLink
+        : normalizeBoolean(value.appendOriginalPostLink, fallback.appendOriginalPostLink),
+  };
+};
+
+const parseProfileManagementInput = (
+  value: unknown,
+  fallback: ProfileManagementPolicy,
+  twitterUsernames: string[],
+): ProfileManagementPolicy => {
+  if (value === undefined) return fallback;
+  if (!isRecord(value)) throw new Error('profileManagement must be an object.');
+  const rawProfileSync = value.profileSync;
+  const rawPinSync = value.pinSync;
+  if (rawProfileSync !== undefined && !isRecord(rawProfileSync)) throw new Error('profileSync must be an object.');
+  if (rawPinSync !== undefined && !isRecord(rawPinSync)) throw new Error('pinSync must be an object.');
+  const profileSync = isRecord(rawProfileSync) ? rawProfileSync : {};
+  const pinSync = isRecord(rawPinSync) ? rawPinSync : {};
+  const rawFields = profileSync.fields;
+  if (rawFields !== undefined && !isRecord(rawFields)) throw new Error('profileSync.fields must be an object.');
+  const fields = isRecord(rawFields) ? rawFields : {};
+  const parseMode = (candidate: unknown, current: ProfileManagementPolicy['profileSync']['mode']) => {
+    const mode = candidate ?? current;
+    if (mode !== 'off' && mode !== 'manual' && mode !== 'scheduled') {
+      throw new Error('Profile and pin sync modes must be off, manual, or scheduled.');
+    }
+    return mode;
+  };
+  const parseHours = (candidate: unknown, current: number) => {
+    if (candidate === undefined) return current;
+    if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 1 || candidate > 8760) {
+      throw new Error('Profile and pin intervals must be whole hours between 1 and 8760.');
+    }
+    return candidate;
+  };
+  const profileSource = resolveStrictPolicySource(
+    twitterUsernames,
+    profileSync.sourceUsername,
+    Object.hasOwn(profileSync, 'sourceUsername') ? undefined : fallback.profileSync.sourceUsername,
+  );
+  const pinSource = resolveStrictPolicySource(
+    twitterUsernames,
+    pinSync.sourceUsername,
+    Object.hasOwn(pinSync, 'sourceUsername') ? undefined : fallback.pinSync.sourceUsername,
+  );
+  return {
+    allowProfileMutation:
+      value.allowProfileMutation === undefined
+        ? fallback.allowProfileMutation
+        : normalizeBoolean(value.allowProfileMutation, fallback.allowProfileMutation),
+    ensureBotLabel:
+      value.ensureBotLabel === undefined
+        ? fallback.ensureBotLabel
+        : normalizeBoolean(value.ensureBotLabel, fallback.ensureBotLabel),
+    ensureDisplayNameBotSuffix:
+      value.ensureDisplayNameBotSuffix === undefined
+        ? fallback.ensureDisplayNameBotSuffix
+        : normalizeBoolean(value.ensureDisplayNameBotSuffix, fallback.ensureDisplayNameBotSuffix),
+    profileSync: {
+      mode: parseMode(profileSync.mode, fallback.profileSync.mode),
+      ...(profileSource ? { sourceUsername: profileSource } : {}),
+      intervalHours: parseHours(profileSync.intervalHours, fallback.profileSync.intervalHours),
+      fields: {
+        displayName: normalizeBoolean(fields.displayName, fallback.profileSync.fields.displayName),
+        description: normalizeBoolean(fields.description, fallback.profileSync.fields.description),
+        avatar: normalizeBoolean(fields.avatar, fallback.profileSync.fields.avatar),
+        banner: normalizeBoolean(fields.banner, fallback.profileSync.fields.banner),
+      },
+    },
+    pinSync: {
+      mode: parseMode(pinSync.mode, fallback.pinSync.mode),
+      ...(pinSource ? { sourceUsername: pinSource } : {}),
+      intervalHours: parseHours(pinSync.intervalHours, fallback.pinSync.intervalHours),
+    },
+  };
+};
 
 const getAccessibleGroups = (config: AppConfig, user: AuthenticatedUser) => {
   const allGroups = Array.isArray(config.groups)
@@ -1382,6 +1923,10 @@ const parsePermissionsInput = (rawPermissions: unknown, role: UserRole): UserPer
     manageGroups: normalizeBoolean(record.manageGroups, defaults.manageGroups),
     queueBackfills: normalizeBoolean(record.queueBackfills, defaults.queueBackfills),
     runNow: normalizeBoolean(record.runNow, defaults.runNow),
+    reevaluateQueuePolicies: normalizeBoolean(
+      record.reevaluateQueuePolicies,
+      defaults.reevaluateQueuePolicies,
+    ),
   };
 };
 
@@ -1450,11 +1995,12 @@ const ensureUniqueIdentity = (
 };
 
 const authenticateToken = (req: any, res: any, next: any) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.split(' ')[1];
+  const bearerToken = getBearerToken(req);
+  const cookieToken = parseCookies(req)[AUTH_COOKIE_NAME];
+  const token = bearerToken ?? cookieToken;
 
   if (!token) {
-    res.sendStatus(401);
+    res.status(401).json({ error: { code: 'AUTH_REQUIRED', message: 'Authentication required.' } });
     return;
   }
 
@@ -1466,16 +2012,31 @@ const authenticateToken = (req: any, res: any, next: any) => {
     }
 
     const config = getConfig();
-    const user = findUserFromTokenPayload(config, decoded as Record<string, unknown>);
-    if (!user) {
-      res.sendStatus(401);
+    const match = findUserFromTokenPayload(config, decoded as Record<string, unknown>);
+    if (!match) {
+      res.status(401).json({ error: { code: 'INVALID_SESSION', message: 'Session is no longer valid.' } });
       return;
+    }
+    const user = match.user;
+    const payloadTokenVersion = Number((decoded as Record<string, unknown>).tokenVersion ?? 0);
+    if (!Number.isInteger(payloadTokenVersion) || payloadTokenVersion !== user.tokenVersion) {
+      res.status(401).json({ error: { code: 'SESSION_REVOKED', message: 'Session is no longer valid.' } });
+      return;
+    }
+    if (!bearerToken && mutationRequiresCsrf(req)) {
+      const csrfCookie = parseCookies(req)[CSRF_COOKIE_NAME];
+      const csrfHeader = typeof req.headers?.['x-csrf-token'] === 'string' ? req.headers['x-csrf-token'] : undefined;
+      if (!safeEqual(csrfCookie, csrfHeader)) {
+        res.status(403).json({ error: { code: 'CSRF_REJECTED', message: 'CSRF validation failed.' } });
+        return;
+      }
     }
 
     req.user = toAuthenticatedUser(user);
+    req.authMode = bearerToken ? 'bearer' : 'cookie';
     next();
   } catch {
-    res.sendStatus(403);
+    res.status(401).json({ error: { code: 'INVALID_SESSION', message: 'Session is invalid or expired.' } });
   }
 };
 
@@ -1485,6 +2046,18 @@ const requireAdmin = (req: any, res: any, next: any) => {
     return;
   }
   next();
+};
+
+const verifyCurrentAdminPassword = async (request: any): Promise<boolean> => {
+  const password =
+    typeof request.body?.password === 'string'
+      ? request.body.password
+      : typeof request.get('x-reauth-password') === 'string'
+        ? request.get('x-reauth-password')
+        : undefined;
+  if (!password) return false;
+  const user = getConfig().users.find((candidate) => candidate.id === request.user?.id && candidate.role === 'admin');
+  return Boolean(user && (await bcrypt.compare(password, user.passwordHash)));
 };
 
 function reconcileUpdateJobState() {
@@ -1556,6 +2129,11 @@ function startUpdateJob(startedBy: string): { ok: true; state: UpdateStatusPaylo
         finishedAt: Date.now(),
         exitCode: 1,
       };
+      notifyOperationsEvent({
+        event: 'update-failure',
+        occurredAt: new Date().toISOString(),
+        message: 'Application update process failed to launch.',
+      });
     });
 
     child.on('exit', (code, signal) => {
@@ -1571,6 +2149,14 @@ function startUpdateJob(startedBy: string): { ok: true; state: UpdateStatusPaylo
         exitCode: code ?? null,
         signal: signal ?? null,
       };
+      if (!success) {
+        notifyOperationsEvent({
+          event: 'update-failure',
+          occurredAt: new Date().toISOString(),
+          message: 'Application update process exited unsuccessfully.',
+          details: { exitCode: code ?? null },
+        });
+      }
     });
 
     child.unref();
@@ -1582,6 +2168,81 @@ function startUpdateJob(startedBy: string): { ok: true; state: UpdateStatusPaylo
   }
 }
 
+const settingsRouterDependencies = {
+  authenticateToken,
+  requireAdmin,
+  webhookRateLimiter,
+  getConfig,
+  saveConfig,
+  getConfigVersion,
+  rejectStaleConfigMutation,
+  parseSchedulerIntervalMinutes,
+  getSchedulerIntervalMinutes,
+  getActiveTwitterUsernames,
+  getSchedulerRuntime: () => ({ lastCheckTime, nextCheckTime }),
+  setNextCheckTime: (value: number) => {
+    nextCheckTime = value;
+  },
+  getNextCheckTimestamp,
+  signalSchedulerWake,
+  getErrorMessage,
+  validateWebhookTarget,
+  sanitizeError: (error: unknown) =>
+    String((sanitizeForDiagnostics(error) as { message?: string }).message ?? error),
+  listWebhookDeliveries: (limit: number) => webhookDeliveryService.list(limit),
+  notifyOperationsEvent,
+};
+app.use('/api/settings', createSettingsRouter(settingsRouterDependencies));
+app.use(
+  '/api/backup',
+  createBackupRouter({
+    authenticateToken,
+    requireAdmin,
+    importRestoreRateLimiter,
+    requireJsonObject,
+    getBackupStorageStatus,
+    createBackupBundle,
+    validateBackupBundle,
+    applyRestoreBundle,
+    verifyCurrentAdminPassword,
+    rejectMissingOrStaleRevision: (request, response) =>
+      rejectMissingOrStaleConfigRevision(getConfig(), request.body, response),
+    handleConfigConflict: sendConfigConflictIfStale,
+    sendSafeError,
+  }),
+);
+app.use(
+  createDigestRouter({
+    authenticateToken,
+    requireAdmin,
+    listJobs: () => digestJobService.list(),
+    listEntries: (query) =>
+      digestEntryService.list(query as Parameters<typeof digestEntryService.list>[0]),
+    findRoute: (routeId) => getConfig().routes.find((route) => route.id === routeId),
+    buildPreview: (entries, policy) =>
+      buildDigestPreview(
+        entries as Parameters<typeof buildDigestPreview>[0],
+        policy as Parameters<typeof buildDigestPreview>[1],
+      ),
+    arm: (destinationId, routeId, nextRunAt) => digestJobService.arm(destinationId, routeId, nextRunAt),
+    retry: (jobId) => digestJobService.retry(jobId),
+    cancel: (jobId) => digestJobService.cancel(jobId),
+  }),
+);
+app.use(
+  createIngestionAdminRouter({
+    authenticateToken,
+    requireAdmin,
+    credentialRateLimiter,
+    findSource: (sourceId) => getConfig().sources.find((source) => source.id === sourceId),
+    listCredentials: () => ingestionCredentialService.list(),
+    createCredential: (input) => ingestionCredentialService.create(input),
+    rotateCredential: (id, userId) => ingestionCredentialService.rotate(id, userId),
+    revokeCredential: (id) => ingestionCredentialService.revoke(id),
+    listAudit: (limit) => ingestionAuditService.list(limit),
+    sendSafeError,
+  }),
+);
 // --- Auth Routes ---
 
 app.get('/api/auth/bootstrap-status', (_req, res) => {
@@ -1623,6 +2284,7 @@ app.post('/api/register', authRateLimiter, async (req, res) => {
     username,
     email,
     passwordHash: await bcrypt.hash(password, 10),
+    tokenVersion: 0,
     role: 'admin',
     permissions: { ...ADMIN_USER_PERMISSIONS },
     createdAt: nowIso,
@@ -1661,11 +2323,45 @@ app.post('/api/login', authRateLimiter, async (req, res) => {
   }
 
   const token = issueTokenForUser(user);
-  res.json({ token, isAdmin: user.role === 'admin' });
+  const csrfToken = setAuthenticationCookies(req, res, token);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ token, csrfToken, isAdmin: user.role === 'admin' });
 });
 
 app.get('/api/me', authenticateToken, (req: any, res) => {
   res.json(serializeAuthenticatedUser(req.user));
+});
+
+app.post('/api/logout', authenticateToken, (req: any, res) => {
+  // Clearing the cookie cannot retire a captured bearer token, so the token
+  // version is advanced instead. That invalidates every session for this
+  // account, not just the caller's browser.
+  const config = getConfig();
+  const userIndex = config.users.findIndex((user) => user.id === req.user.id);
+  const user = config.users[userIndex];
+  let allSessionsRevoked = false;
+  if (userIndex !== -1 && user) {
+    config.users[userIndex] = {
+      ...user,
+      tokenVersion: user.tokenVersion + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      saveConfig(config);
+      allSessionsRevoked = true;
+    } catch (error) {
+      console.error(`🛑 Could not revoke sessions during logout: ${sanitizeErrorMessage(error)}`);
+    }
+  }
+  clearAuthenticationCookies(req, res);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    success: true,
+    allSessionsRevoked,
+    message: allSessionsRevoked
+      ? 'Signed out of every active session for this account.'
+      : 'Signed out of this browser. Existing API tokens could not be revoked; retry logout.',
+  });
 });
 
 app.post('/api/me/change-email', authenticateToken, async (req: any, res) => {
@@ -1715,9 +2411,11 @@ app.post('/api/me/change-email', authenticateToken, async (req: any, res) => {
   saveConfig(config);
 
   const token = issueTokenForUser(updatedUser);
+  const csrfToken = setAuthenticationCookies(req, res, token);
   res.json({
     success: true,
     token,
+    csrfToken,
     me: serializeAuthenticatedUser(toAuthenticatedUser(updatedUser)),
   });
 });
@@ -1752,10 +2450,13 @@ app.post('/api/me/change-password', authenticateToken, async (req: any, res) => 
   config.users[userIndex] = {
     ...user,
     passwordHash: await bcrypt.hash(newPassword, 10),
+    tokenVersion: user.tokenVersion + 1,
     updatedAt: new Date().toISOString(),
   };
   saveConfig(config);
-  res.json({ success: true });
+  const token = issueTokenForUser(config.users[userIndex] as WebUser);
+  const csrfToken = setAuthenticationCookies(req, res, token);
+  res.json({ success: true, csrfToken });
 });
 
 app.get('/api/admin/users', authenticateToken, requireAdmin, (req: any, res) => {
@@ -1794,6 +2495,7 @@ app.post('/api/admin/users', authenticateToken, requireAdmin, async (req: any, r
     username,
     email,
     passwordHash: await bcrypt.hash(password, 10),
+    tokenVersion: 0,
     role,
     permissions,
     createdAt: nowIso,
@@ -1861,6 +2563,7 @@ app.put('/api/admin/users/:id', authenticateToken, requireAdmin, (req: any, res)
     email,
     role: requestedRole,
     permissions,
+    tokenVersion: user.tokenVersion + 1,
     updatedAt: new Date().toISOString(),
   };
 
@@ -1889,6 +2592,7 @@ app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin,
   config.users[userIndex] = {
     ...user,
     passwordHash: await bcrypt.hash(newPassword, 10),
+    tokenVersion: user.tokenVersion + 1,
     updatedAt: new Date().toISOString(),
   };
   saveConfig(config);
@@ -1940,14 +2644,860 @@ app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, (req: any, r
   });
 });
 
+// --- Provider-neutral sources, credentials, and inbound ingestion ---
+
+app.get('/api/sources', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const configVersion = getConfigVersion(config);
+  const visibleDestinationIds = new Set(getVisibleMappings(config, req.user).map((mapping) => mapping.id));
+  res.json(
+    config.sources
+      .map((source) => ({
+        ...source,
+        ...configVersion,
+        routes: config.routes.filter(
+          (route) => route.sourceId === source.id && visibleDestinationIds.has(route.destinationId),
+        ).map((route) => ({ ...route, ...configVersion })),
+      }))
+      .filter((source) => req.user.isAdmin || source.routes.length > 0),
+  );
+});
+
+app.post('/api/sources', authenticateToken, requireAdmin, (req: any, res) => {
+  try {
+    if (
+      req.body?.token ||
+      req.body?.secret ||
+      req.body?.apiKey ||
+      req.body?.hmacSecret ||
+      req.body?.credentials
+    ) {
+      res.status(400).json({ error: 'Source configuration must not contain ingestion credentials.' });
+      return;
+    }
+    const type = req.body?.type as 'x' | 'webhook' | 'api';
+    if (!['x', 'webhook', 'api'].includes(type)) throw new Error('Source type must be x, webhook, or api.');
+    const rawName =
+      type === 'x'
+        ? normalizeTwitterUsername(req.body?.username) ?? ''
+        : String(req.body?.name ?? '').trim();
+    const username =
+      type === 'x' ? rawName : rawName.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-|-$/g, '');
+    if (!username) throw new Error('A valid source username or name is required.');
+    const config = getConfig();
+    if (config.sources.some((source) => source.type === type && source.username === username)) {
+      res.status(409).json({ error: 'Source already exists.' });
+      return;
+    }
+    const sourceId = randomUUID();
+    const now = new Date().toISOString();
+    config.sources.push({
+      id: sourceId,
+      type,
+      username,
+      name: rawName,
+      enabled: req.body?.enabled !== false,
+      filters: normalizeSourceFilters(req.body?.filters ?? DEFAULT_SOURCE_FILTERS),
+      schedule: normalizeSourceSchedule(req.body?.schedule ?? DEFAULT_SOURCE_SCHEDULE),
+      state: { consecutiveFailures: 0 },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const destinationIds: string[] = Array.isArray(req.body?.destinationIds)
+      ? [...new Set<string>(req.body.destinationIds.filter((id: unknown): id is string => typeof id === 'string'))]
+      : [];
+    for (const destinationId of destinationIds) {
+      if (!config.destinations.some((destination) => destination.id === destinationId)) continue;
+      config.routes.push({
+        id: randomUUID(),
+        sourceId,
+        destinationId,
+        enabled: true,
+        filters: normalizeSourceFilters(req.body?.filters ?? DEFAULT_SOURCE_FILTERS),
+        routingPolicy: normalizeRoutingPolicy(req.body?.routingPolicy ?? DEFAULT_ROUTING_POLICY),
+        moderationPolicy: normalizeModerationPolicy(req.body?.moderationPolicy ?? DEFAULT_MODERATION_POLICY),
+        duplicateSuppression: normalizeDuplicateSuppression(
+          req.body?.duplicateSuppression ?? DEFAULT_DUPLICATE_SUPPRESSION,
+        ),
+        delivery: {
+          ...DEFAULT_ROUTE_DELIVERY,
+          digest: { ...DEFAULT_ROUTE_DELIVERY.digest },
+        },
+        relationship: { sourcePaused: false, profileSyncSource: false, pinSyncSource: false },
+        metadata: { legacyMappingIds: [] },
+      });
+    }
+    saveCanonicalConfig(config);
+    res.status(201).json(config.sources.find((source) => source.id === sourceId));
+  } catch (error) {
+    sendSafeError(res, 400, 'INVALID_SOURCE', error);
+  }
+});
+
+app.patch('/api/sources/:id', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    if (req.body?.token || req.body?.secret || req.body?.credentials) {
+      throw new Error('Source configuration must not contain credentials.');
+    }
+    const config = getConfig();
+    if (rejectStaleConfigMutation(config, req.body, res)) return;
+    const source = config.sources.find((candidate) => candidate.id === req.params.id);
+    if (!source) {
+      res.status(404).json({ error: 'Source not found.' });
+      return;
+    }
+    if (typeof req.body?.enabled === 'boolean') source.enabled = req.body.enabled;
+    if (typeof req.body?.name === 'string' && req.body.name.trim()) source.name = req.body.name.trim();
+    if (req.body?.filters !== undefined) source.filters = normalizeSourceFilters(req.body.filters);
+    if (req.body?.schedule !== undefined) source.schedule = normalizeSourceSchedule(req.body.schedule);
+    source.updatedAt = new Date().toISOString();
+    saveCanonicalConfig(config);
+    res.json({ ...source, ...getConfigVersion(config) });
+  } catch (error) {
+    sendSafeError(res, 400, 'INVALID_SOURCE', error);
+  }
+});
+
+app.delete('/api/sources/:id', authenticateToken, requireAdmin, (req, res) => {
+  if (req.body?.confirmation !== `DELETE SOURCE ${req.params.id}`) {
+    res.status(400).json({ error: 'Typed confirmation is required.' });
+    return;
+  }
+  const config = getConfig();
+  const source = config.sources.find((candidate) => candidate.id === req.params.id);
+  if (!source) {
+    res.status(404).json({ error: 'Source not found.' });
+    return;
+  }
+  const routes = config.routes.filter((route) => route.sourceId === source.id);
+  let cancelledImmediate = 0;
+  let cancelledDigest = 0;
+  for (const route of routes) {
+    cancelledImmediate += postQueueService.cancelPendingByRouteId(route.id);
+    cancelledDigest += digestEntryService.cancelPending(route.id);
+    for (const job of digestJobService.list().filter((candidate) => candidate.routeId === route.id)) {
+      digestJobService.cancel(job.id);
+    }
+  }
+  for (const credential of ingestionCredentialService
+    .list()
+    .filter((candidate) => candidate.sourceId === source.id && !candidate.revokedAt)) {
+    ingestionCredentialService.revoke(credential.id);
+  }
+  config.routes = config.routes.filter((route) => route.sourceId !== source.id);
+  config.sources = config.sources.filter((candidate) => candidate.id !== source.id);
+  saveCanonicalConfig(config);
+  res.json({ deleted: true, cancelledImmediate, cancelledDigest });
+});
+
+app.post('/api/sources/:id/routes', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const config = getConfig();
+    if (rejectStaleConfigMutation(config, req.body, res)) return;
+    const source = config.sources.find((candidate) => candidate.id === req.params.id);
+    const destination = config.destinations.find((candidate) => candidate.id === req.body?.destinationId);
+    if (!source || !destination) throw new Error('Source or destination not found.');
+    if (
+      config.routes.some(
+        (route) => route.sourceId === source.id && route.destinationId === destination.id,
+      )
+    ) {
+      res.status(409).json({ error: 'Route already exists.' });
+      return;
+    }
+    const route = {
+      id: randomUUID(),
+      sourceId: source.id,
+      destinationId: destination.id,
+      enabled: true,
+      filters: normalizeSourceFilters(req.body?.filters ?? source.filters),
+      routingPolicy: normalizeRoutingPolicy(req.body?.routingPolicy ?? DEFAULT_ROUTING_POLICY),
+      moderationPolicy: normalizeModerationPolicy(req.body?.moderationPolicy ?? DEFAULT_MODERATION_POLICY),
+      duplicateSuppression: normalizeDuplicateSuppression(
+        req.body?.duplicateSuppression ?? DEFAULT_DUPLICATE_SUPPRESSION,
+      ),
+      delivery: normalizeRouteDelivery(req.body?.delivery ?? DEFAULT_ROUTE_DELIVERY),
+      relationship: { sourcePaused: false, profileSyncSource: false, pinSyncSource: false },
+      metadata: { legacyMappingIds: [] },
+    };
+    config.routes.push(route);
+    saveCanonicalConfig(config);
+    if (route.delivery.mode === 'digest') {
+      digestJobService.arm(destination.id, route.id, nextDigestRun(route.delivery.digest));
+    }
+    res.status(201).json({ ...route, ...getConfigVersion(config) });
+  } catch (error) {
+    sendSafeError(res, 400, 'INVALID_ROUTE', error);
+  }
+});
+
+app.delete('/api/routes/:id', authenticateToken, requireAdmin, (req, res) => {
+  if (req.body?.confirmation !== `DELETE ROUTE ${req.params.id}`) {
+    res.status(400).json({ error: 'Typed confirmation is required.' });
+    return;
+  }
+  const config = getConfig();
+  const route = config.routes.find((candidate) => candidate.id === req.params.id);
+  if (!route) {
+    res.status(404).json({ error: 'Route not found.' });
+    return;
+  }
+  const cancelledImmediate = postQueueService.cancelPendingByRouteId(route.id);
+  const cancelledDigest = digestEntryService.cancelPending(route.id);
+  for (const job of digestJobService.list().filter((candidate) => candidate.routeId === route.id)) {
+    digestJobService.cancel(job.id);
+  }
+  config.routes = config.routes.filter((candidate) => candidate.id !== route.id);
+  saveCanonicalConfig(config);
+  res.json({ deleted: true, cancelledImmediate, cancelledDigest });
+});
+
+app.patch('/api/routes/:id/delivery', authenticateToken, requireAdmin, (req: any, res) => {
+  try {
+    const config = getConfig();
+    if (rejectStaleConfigMutation(config, req.body, res)) return;
+    const route = config.routes.find((candidate) => candidate.id === req.params.id);
+    if (!route) {
+      res.status(404).json({ error: 'Route not found.' });
+      return;
+    }
+    route.delivery = normalizeRouteDelivery({
+      mode: req.body?.mode,
+      digest: {
+        ...DEFAULT_ROUTE_DELIVERY.digest,
+        ...(route.delivery?.digest ?? {}),
+        ...(req.body?.digest ?? {}),
+        enabled: req.body?.mode === 'digest',
+      },
+    });
+    saveCanonicalConfig(config);
+    if (route.delivery.mode === 'digest') {
+      digestJobService.arm(
+        route.destinationId,
+        route.id,
+        nextDigestRun(route.delivery.digest),
+      );
+    }
+    res.json({ ...route.delivery, ...getConfigVersion(config) });
+  } catch (error) {
+    sendSafeError(res, 400, 'INVALID_DIGEST_POLICY', error);
+  }
+});
+
+app.post('/api/ingest/v1/posts', ingestionRateLimiter, async (req: any, res) => {
+  const remoteAddressHash = hashAuditValue(getRequestIp(req));
+  let credential: ReturnType<typeof ingestionCredentialService.authenticate>;
+  let sourceId: string | undefined;
+  let externalPostId: string | undefined;
+  let idempotencyKey: string | undefined;
+  let idempotencyClaimed = false;
+  const audit = (outcome: string, statusCode: number, routeTrace?: unknown): void => {
+    metricsService.increment(statusCode < 400 ? 'ingestionAccepted' : 'ingestionRejected');
+    ingestionAuditService.record({
+      credentialId: credential?.id,
+      sourceId,
+      externalPostId,
+      idempotencyKeyHash: idempotencyKey ? hashAuditValue(idempotencyKey) : undefined,
+      outcome,
+      statusCode,
+      routeTrace,
+      remoteAddressHash,
+    });
+  };
+  try {
+    if (
+      process.env.NODE_ENV === 'production' &&
+      process.env.ALLOW_INSECURE_INGESTION !== 'true' &&
+      !req.secure
+    ) {
+      throw new Error('Inbound ingestion requires HTTPS. Configure a trusted TLS reverse proxy.');
+    }
+    const token = getBearerToken(req);
+    credential = token ? ingestionCredentialService.authenticate(token) : null;
+    if (!credential) {
+      audit('unauthorized', 401);
+      res.status(401).json({ error: { code: 'INVALID_INGESTION_TOKEN', message: 'Invalid ingestion credential.' } });
+      return;
+    }
+    if (!credential.scopes.includes('posts:write')) {
+      audit('scope-denied', 403);
+      res.status(403).json({ error: { code: 'SCOPE_DENIED', message: 'Credential lacks posts:write scope.' } });
+      return;
+    }
+    sourceId = credential.sourceId;
+    if (credential.hmacEnabled) {
+      const timestamp = req.get('x-t2b-timestamp') ?? '';
+      const nonce = req.get('x-t2b-nonce') ?? '';
+      const signature = req.get('x-t2b-signature') ?? '';
+      verifyIngestionHmac({
+        secret: ingestionCredentialService.getHmacSecret(credential.id) ?? '',
+        timestamp,
+        nonce,
+        signature,
+        rawBody: req.rawBody ?? Buffer.from(JSON.stringify(req.body)),
+      });
+      if (
+        !ingestionReplayService.consumeNonce(
+          credential.id,
+          nonce,
+          Date.now() + INGESTION_TIMESTAMP_WINDOW_MS,
+        )
+      ) {
+        audit('replay-rejected', 409);
+        res.status(409).json({ error: { code: 'REPLAY_DETECTED', message: 'Nonce has already been used.' } });
+        return;
+      }
+    }
+    const post = validateNormalizedPost(req.body);
+    externalPostId = post.externalId;
+    if (post.sourceId !== credential.sourceId || !['webhook', 'api'].includes(post.sourceType)) {
+      audit('source-binding-denied', 403);
+      res.status(403).json({ error: { code: 'SOURCE_BINDING_DENIED', message: 'Credential is not bound to this source.' } });
+      return;
+    }
+    idempotencyKey = req.get('idempotency-key')?.trim();
+    if (!idempotencyKey || !/^[A-Za-z0-9._:-]{8,200}$/.test(idempotencyKey)) {
+      throw new Error('A valid Idempotency-Key header is required.');
+    }
+    const claim = ingestionReplayService.claimIdempotency({
+      sourceId: post.sourceId,
+      idempotencyKey,
+      externalPostId: post.externalId,
+    });
+    if (!claim.accepted) {
+      if (claim.conflict) {
+        audit('idempotency-conflict', 409);
+        res.status(409).json({ error: { code: 'IDEMPOTENCY_CONFLICT', message: 'Key or external post was already used.' } });
+        return;
+      }
+      audit('idempotent-replay', 200, claim.response);
+      res.json(claim.response ?? { duplicate: true, externalId: post.externalId });
+      return;
+    }
+    idempotencyClaimed = true;
+    const result = routeNormalizedPost(getConfig(), post, idempotencyKey);
+    ingestionReplayService.saveResponse(post.sourceId, idempotencyKey, result);
+    idempotencyClaimed = false;
+    audit('accepted', 202, result.routes);
+    res.status(202).json(result);
+  } catch (error) {
+    if (idempotencyClaimed && sourceId && idempotencyKey && externalPostId) {
+      ingestionReplayService.releasePending(sourceId, idempotencyKey, externalPostId);
+    }
+    audit('rejected', 400);
+    sendSafeError(res, 400, 'INGESTION_REJECTED', error);
+  }
+});
+
 // --- Mapping Routes ---
 
-app.get('/api/mappings', authenticateToken, (req: any, res) => {
+app.get(['/api/destinations', '/api/mappings'], authenticateToken, (req: any, res) => {
   const config = getConfig();
   const usersById = createUserLookupById(config);
   const visibleMappings = getVisibleMappings(config, req.user);
   res.json(visibleMappings.map((mapping) => sanitizeMapping(mapping, usersById, req.user)));
 });
+
+app.post('/api/sources/parse', authenticateToken, (req, res) => {
+  res.json(parseTwitterUsernameInput(req.body?.sources ?? req.body?.twitterUsernames, req.body?.existing));
+});
+
+app.post('/api/policies/preview', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const destination = config.destinations.find((candidate) => candidate.id === req.body?.destinationId);
+  const route = config.routes.find((candidate) => candidate.id === req.body?.routeId);
+  const mapping = destination ? config.mappings.find((candidate) => candidate.id === destination.id) : undefined;
+  if (!destination || !route || route.destinationId !== destination.id || !mapping) {
+    res.status(404).json({ error: 'Destination route not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to preview this route.' });
+    return;
+  }
+  const previewDestination = {
+    ...destination,
+    moderationPolicy:
+      req.body?.moderationPolicy === undefined
+        ? destination.moderationPolicy
+        : normalizeModerationPolicy(req.body.moderationPolicy),
+  };
+  const previewRoute = {
+    ...route,
+    routingPolicy:
+      req.body?.routingPolicy === undefined ? route.routingPolicy : normalizeRoutingPolicy(req.body.routingPolicy),
+    moderationPolicy:
+      req.body?.routeModerationPolicy === undefined
+        ? route.moderationPolicy
+        : normalizeModerationPolicy(req.body.routeModerationPolicy),
+  };
+  res.json({
+    dryRun: true,
+    decision: evaluateContentPolicy(previewDestination, previewRoute, req.body?.metadata ?? {}),
+  });
+});
+
+app.patch('/api/destinations/:id/content-policies', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const destination = config.destinations.find((candidate) => candidate.id === req.params.id);
+  const mapping = config.mappings.find((candidate) => candidate.id === req.params.id);
+  if (!destination || !mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to edit this destination.' });
+    return;
+  }
+  if (req.body?.moderationPolicy !== undefined) {
+    destination.moderationPolicy = normalizeModerationPolicy(req.body.moderationPolicy);
+  }
+  if (req.body?.aiOverrides !== undefined) {
+    destination.aiOverrides = normalizeAiOverrides(req.body.aiOverrides);
+  }
+  if (req.body?.duplicateSuppression !== undefined) {
+    destination.duplicateSuppression = normalizeDuplicateSuppression(req.body.duplicateSuppression);
+  }
+  const route = config.routes.find(
+    (candidate) => candidate.id === req.body?.routeId && candidate.destinationId === destination.id,
+  );
+  if (req.body?.routeId && !route) {
+    res.status(404).json({ error: 'Route not found.' });
+    return;
+  }
+  if (route) {
+    if (req.body.routingPolicy !== undefined) route.routingPolicy = normalizeRoutingPolicy(req.body.routingPolicy);
+    if (req.body.routeModerationPolicy !== undefined) {
+      route.moderationPolicy = normalizeModerationPolicy(req.body.routeModerationPolicy);
+    }
+    if (req.body.routeDuplicateSuppression !== undefined) {
+      route.duplicateSuppression = normalizeDuplicateSuppression(req.body.routeDuplicateSuppression);
+    }
+  }
+  saveCanonicalConfig(config);
+  res.json({ success: true, destination, route, ...getConfigVersion(config) });
+});
+
+app.get(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  res.json({
+    destinationId: mapping.id,
+    destinationState: mapping.enabled ? 'enabled' : 'paused',
+    sources: mapping.twitterUsernames.map((username) => getSourceImpact(mapping, username)),
+  });
+});
+
+app.get(
+  ['/api/destinations/:id/sources/:username/impact', '/api/mappings/:id/sources/:username/impact'],
+  authenticateToken,
+  (req: any, res) => {
+  const config = getConfig();
+  const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
+  const username = normalizeTwitterUsername(req.params.username);
+  if (!mapping || !username || !mapping.twitterUsernames.includes(username)) {
+    res.status(404).json({ error: 'Destination source not found.' });
+    return;
+  }
+    res.json(getSourceImpact(mapping, username));
+  },
+);
+
+app.post(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to update this destination.' });
+    return;
+  }
+  const updatedMapping: AccountMapping = {
+    ...mapping,
+    twitterUsernames: [...mapping.twitterUsernames],
+    pausedTwitterUsernames: [...(mapping.pausedTwitterUsernames ?? [])],
+  };
+  const result = addDestinationSources(updatedMapping, req.body?.sources ?? req.body?.twitterUsernames);
+  if (result.added.length > 0) {
+    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+    config.mappings[index] = updatedMapping;
+    saveConfig(config);
+  }
+  res.json({
+    ...result,
+    ...getConfigVersion(config),
+    sourceCount: updatedMapping.twitterUsernames.length,
+    automaticBackfill: false,
+    message:
+      result.added.length > 0
+        ? `Added ${result.added.length} source(s). No history was backfilled.`
+        : 'No sources were added.',
+  });
+});
+
+app.patch(
+  ['/api/destinations/:id/sources/:username', '/api/mappings/:id/sources/:username'],
+  authenticateToken,
+  (req: any, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to update this destination.' });
+    return;
+  }
+  const state = req.body?.state;
+  if (state !== undefined && state !== 'enabled' && state !== 'paused') {
+    res.status(400).json({ error: 'Source state must be enabled or paused.' });
+    return;
+  }
+  const cancelPendingQueue = req.body?.cancelPendingQueue ?? false;
+  if (typeof cancelPendingQueue !== 'boolean') {
+    res.status(400).json({ error: 'cancelPendingQueue must be a boolean.' });
+    return;
+  }
+  try {
+    const normalizedUsername = normalizeTwitterUsername(req.params.username);
+    const source = config.sources.find((candidate) => candidate.username === normalizedUsername);
+    if (!source) throw new Error('Canonical source not found.');
+    const canonicalRoute = config.routes.find(
+      (route) => route.sourceId === source.id && route.destinationId === mapping.id,
+    );
+    if (!canonicalRoute) throw new Error('Canonical route not found.');
+    if (req.body?.schedule !== undefined) {
+      const affectedDestinationIds = new Set(
+        config.routes.filter((route) => route.sourceId === source.id).map((route) => route.destinationId),
+      );
+      const unauthorizedSharedDestination = config.mappings.find(
+        (candidate) => affectedDestinationIds.has(candidate.id) && !canManageMapping(req.user, candidate),
+      );
+      if (unauthorizedSharedDestination) {
+        res.status(403).json({
+          error: 'This canonical source is shared with a destination you cannot manage; an administrator must edit its policy.',
+        });
+        return;
+      }
+    }
+    const updatedMapping: AccountMapping = {
+      ...mapping,
+      twitterUsernames: [...mapping.twitterUsernames],
+      pausedTwitterUsernames: [...(mapping.pausedTwitterUsernames ?? [])],
+    };
+    const username =
+      state === undefined
+        ? source.username
+        : setDestinationSourcePaused(updatedMapping, req.params.username, state === 'paused');
+    if (req.body?.filters !== undefined) {
+      canonicalRoute.filters = parseSourceFiltersInput(req.body.filters, canonicalRoute.filters);
+    }
+    if (req.body?.schedule !== undefined) {
+      source.schedule = parseSourceScheduleInput(req.body.schedule, source.schedule);
+    }
+    source.updatedAt = new Date().toISOString();
+    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+    config.mappings[index] = updatedMapping;
+    const routeId = mapping.routeIdsByUsername?.[username];
+    const cancelledQueueItems =
+      state === 'paused' && cancelPendingQueue
+        ? routeId
+          ? postQueueService.cancelPendingByRouteId(routeId)
+          : postQueueService.cancelPendingByMappingAndSource(mapping.id, username)
+        : 0;
+    saveConfig(config);
+    res.json({
+      success: true,
+      ...getConfigVersion(config),
+      username,
+      state: state ?? (updatedMapping.pausedTwitterUsernames?.includes(username) ? 'paused' : 'enabled'),
+      filters: canonicalRoute.filters,
+      schedule: source.schedule,
+      runtime: runtimeStateService.getSource(source.id),
+      cancelledQueueItems,
+      queuedItemsPreserved: !cancelPendingQueue,
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Could not change source state.') });
+  }
+  },
+);
+
+app.post(
+  [
+    '/api/destinations/:id/sources/:username/filter-preview',
+    '/api/mappings/:id/sources/:username/filter-preview',
+  ],
+  authenticateToken,
+  (req: any, res) => {
+    const config = getConfig();
+    const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
+    const username = normalizeTwitterUsername(req.params.username);
+    const source = config.sources.find((candidate) => candidate.username === username);
+    const route = source
+      ? config.routes.find((candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping?.id)
+      : undefined;
+    if (!mapping || !source || !route || !mapping.twitterUsernames.includes(source.username)) {
+      res.status(404).json({ error: 'Destination source not found.' });
+      return;
+    }
+    if (!isRecord(req.body?.metadata)) {
+      res.status(400).json({ error: 'metadata must be an object.' });
+      return;
+    }
+    const metadata = req.body.metadata;
+    res.json(
+      evaluateSourceFilter(
+        route.filters,
+        {
+          text: typeof metadata.text === 'string' ? metadata.text : undefined,
+          language: typeof metadata.language === 'string' ? metadata.language : undefined,
+          sensitive: metadata.sensitive === true,
+          hasMedia: metadata.hasMedia === true,
+          isRepost: metadata.isRepost === true,
+          isQuote: metadata.isQuote === true,
+          isReply: metadata.isReply === true,
+          authorUsername: typeof metadata.authorUsername === 'string' ? metadata.authorUsername : source.username,
+          authorId: typeof metadata.authorId === 'string' ? metadata.authorId : undefined,
+          replyToUsername: typeof metadata.replyToUsername === 'string' ? metadata.replyToUsername : undefined,
+          replyToUserId: typeof metadata.replyToUserId === 'string' ? metadata.replyToUserId : undefined,
+          expectedSourceUsername: source.username,
+        },
+        { sourceEnabled: source.enabled },
+      ),
+    );
+  },
+);
+
+app.delete(
+  ['/api/destinations/:id/sources/:username', '/api/mappings/:id/sources/:username'],
+  authenticateToken,
+  (req: any, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to update this destination.' });
+    return;
+  }
+  const cancelPendingQueue = req.body?.cancelPendingQueue ?? req.query?.cancelPendingQueue === 'true';
+  const deleteHistory = req.body?.deleteHistory ?? req.query?.deleteHistory === 'true';
+  if (typeof cancelPendingQueue !== 'boolean' || typeof deleteHistory !== 'boolean') {
+    res.status(400).json({ error: 'cancelPendingQueue and deleteHistory must be explicit booleans.' });
+    return;
+  }
+  const username = normalizeTwitterUsername(req.params.username);
+  if (!username) {
+    res.status(400).json({ error: 'Invalid X source username.' });
+    return;
+  }
+  const impact = mapping.twitterUsernames.includes(username) ? getSourceImpact(mapping, username) : undefined;
+  try {
+    const updatedMapping: AccountMapping = {
+      ...mapping,
+      twitterUsernames: [...mapping.twitterUsernames],
+      pausedTwitterUsernames: [...(mapping.pausedTwitterUsernames ?? [])],
+    };
+    removeDestinationSource(updatedMapping, username);
+    const cancelledQueueItems = cancelPendingQueue
+      ? postQueueService.cancelPendingByMappingAndSource(mapping.id, username)
+      : 0;
+    const deletedHistoryItems = deleteHistory
+      ? dbService.deleteTweetsBySourceForDestination(username, getDestinationStorageKey(mapping))
+      : 0;
+    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+    config.mappings[index] = updatedMapping;
+    saveConfig(config);
+    res.json({
+      success: true,
+      ...getConfigVersion(config),
+      removed: username,
+      impact,
+      cancelledQueueItems,
+      deletedHistoryItems,
+      queuedItemsPreserved: !cancelPendingQueue,
+      historyPreserved: !deleteHistory,
+    });
+  } catch (error) {
+    res.status(409).json({
+      error: getErrorMessage(error, 'Could not remove source.'),
+      impact,
+    });
+  }
+  },
+);
+
+app.post(
+  ['/api/destinations/:id/sources/:username/backfill', '/api/mappings/:id/sources/:username/backfill'],
+  authenticateToken,
+  (req: any, res) => {
+  if (!canQueueBackfills(req.user)) {
+    res.status(403).json({ error: 'You do not have permission to queue backfills.' });
+    return;
+  }
+  const config = getConfig();
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  const username = normalizeTwitterUsername(req.params.username);
+  if (!mapping || !username || !mapping.twitterUsernames.includes(username)) {
+    res.status(404).json({ error: 'Destination source not found.' });
+    return;
+  }
+  const canonicalSource = config.sources.find((source) => source.username === username);
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have access to this destination.' });
+    return;
+  }
+  if (!mapping.enabled || !canonicalSource?.enabled || mapping.pausedTwitterUsernames?.includes(username)) {
+    res.status(409).json({ error: 'Resume the destination and source before requesting a backfill.' });
+    return;
+  }
+  const parsedLimit = Number(req.body?.limit);
+  const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 200)) : undefined;
+  const requestId = randomUUID();
+  pendingBackfills = pendingBackfills.filter((entry) => entry.id !== mapping.id);
+  pendingBackfills.push({
+    id: mapping.id,
+    sourceUsernames: [username],
+    limit,
+    queuedAt: Date.now(),
+    sequence: backfillSequence++,
+    requestId,
+  });
+  pendingBackfills.sort((a, b) => a.sequence - b.sequence);
+  signalSchedulerWake('backfill', mapping.id);
+  res.json({ success: true, requestId, sourceUsername: username, explicitBackfill: true });
+  },
+);
+
+app.patch(['/api/destinations/:id/state', '/api/mappings/:id/state'], authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to update this destination.' });
+    return;
+  }
+  const state = req.body?.state;
+  if (state !== 'enabled' && state !== 'paused') {
+    res.status(400).json({ error: 'Destination state must be enabled or paused.' });
+    return;
+  }
+  if (state === 'enabled') {
+    const duplicate = findDuplicateActiveDestination(config.mappings, mapping, mapping.id);
+    if (duplicate) {
+      res.status(409).json(getDuplicateDestinationPayload(duplicate));
+      return;
+    }
+  }
+  mapping.enabled = state === 'enabled';
+  saveConfig(config);
+  res.json({ success: true, state, queuedItemsPreserved: true, ...getConfigVersion(config) });
+});
+
+app.post(
+  ['/api/destinations/:id/credentials/test', '/api/mappings/:id/credentials/test'],
+  credentialRateLimiter,
+  authenticateToken,
+  async (req: any, res) => {
+  const config = getConfig();
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to test this destination.' });
+    return;
+  }
+  const password =
+    typeof req.body?.bskyPassword === 'string' && req.body.bskyPassword.length > 0
+      ? req.body.bskyPassword
+      : mapping.bskyPassword;
+  try {
+    const validation = await validateBlueskyCredentials({
+      bskyIdentifier: normalizeOptionalString(req.body?.bskyIdentifier) || mapping.bskyIdentifier,
+      bskyPassword: password,
+      bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl) || mapping.bskyServiceUrl,
+    });
+    res.json({ ...validation, readOnly: true });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Credential test failed.') });
+  }
+  },
+);
+
+app.patch(
+  ['/api/destinations/:id/credentials', '/api/mappings/:id/credentials'],
+  credentialRateLimiter,
+  authenticateToken,
+  async (req: any, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to update this destination.' });
+    return;
+  }
+  const password =
+    typeof req.body?.bskyPassword === 'string' && req.body.bskyPassword.length > 0
+      ? req.body.bskyPassword
+      : mapping.bskyPassword;
+  try {
+    const validation = await validateBlueskyCredentials({
+      bskyIdentifier: normalizeOptionalString(req.body?.bskyIdentifier) || mapping.bskyIdentifier,
+      bskyPassword: password,
+      bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl) || mapping.bskyServiceUrl,
+    });
+    const candidate = applyValidatedDestinationIdentity({ ...mapping, bskyPassword: password }, validation);
+    const duplicate = findDuplicateActiveDestination(config.mappings, candidate, mapping.id);
+    if (duplicate) {
+      res.status(409).json(getDuplicateDestinationPayload(duplicate));
+      return;
+    }
+    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+    const previousStorageKey = getDestinationStorageKey(mapping);
+    const nextStorageKey = getDestinationStorageKey(candidate);
+    clearCachedAgent(mapping);
+    clearCachedAgent(candidate);
+    config.mappings[index] = candidate;
+    saveConfig(config);
+    const rekeyed = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+    res.json({
+      success: true,
+      destination: sanitizeMapping(candidate, createUserLookupById(config), req.user),
+      credentialsValidated: true,
+      profileChanged: false,
+      policiesChanged: false,
+      sourcesChanged: false,
+      rekeyed,
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Credential update failed.') });
+  }
+  },
+);
 
 app.get('/api/groups', authenticateToken, (req: any, res) => {
   const config = getConfig();
@@ -2122,14 +3672,14 @@ app.post('/api/onboarding/twitter-profile', authenticateToken, async (req: any, 
   }
 });
 
-app.post('/api/onboarding/bsky-credentials', authenticateToken, async (req: any, res) => {
+app.post('/api/onboarding/bsky-credentials', credentialRateLimiter, authenticateToken, async (req: any, res) => {
   if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
     res.status(403).json({ error: 'You do not have permission to create mappings.' });
     return;
   }
 
   const bskyIdentifier = normalizeOptionalString(req.body?.bskyIdentifier);
-  const bskyPassword = normalizeOptionalString(req.body?.bskyPassword);
+  const bskyPassword = typeof req.body?.bskyPassword === 'string' ? req.body.bskyPassword : undefined;
   const bskyServiceUrl = normalizeOptionalString(req.body?.bskyServiceUrl);
 
   if (!bskyIdentifier || !bskyPassword) {
@@ -2143,13 +3693,23 @@ app.post('/api/onboarding/bsky-credentials', authenticateToken, async (req: any,
       bskyPassword,
       bskyServiceUrl,
     });
+    const duplicate = findDuplicateActiveDestination(getConfig().mappings, {
+      bskyIdentifier: validation.handle,
+      bskyCanonicalHandle: validation.handle,
+      bskyDid: validation.did,
+      bskyServiceUrl: validation.serviceUrl,
+    });
+    if (duplicate) {
+      res.status(409).json(getDuplicateDestinationPayload(duplicate));
+      return;
+    }
     res.json(validation);
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Failed to validate Bluesky credentials.') });
   }
 });
 
-app.post('/api/mappings', authenticateToken, async (req: any, res) => {
+app.post(['/api/destinations', '/api/mappings'], authenticateToken, async (req: any, res) => {
   if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
     res.status(403).json({ error: 'You do not have permission to create mappings.' });
     return;
@@ -2157,16 +3717,48 @@ app.post('/api/mappings', authenticateToken, async (req: any, res) => {
 
   const config = getConfig();
   const usersById = createUserLookupById(config);
-  const twitterUsernames = parseTwitterUsernames(req.body?.twitterUsernames);
+  const sourceParsing = parseTwitterUsernameInput(req.body?.twitterUsernames ?? req.body?.sources);
+  const twitterUsernames = sourceParsing.added;
   if (twitterUsernames.length === 0) {
-    res.status(400).json({ error: 'At least one Twitter username is required.' });
+    res.status(400).json({
+      error: 'At least one valid X username is required.',
+      sourceParsing,
+    });
+    return;
+  }
+  if (sourceParsing.invalid.length > 0) {
+    res.status(400).json({
+      error: 'One or more X usernames are invalid.',
+      sourceParsing,
+    });
     return;
   }
 
-  const bskyIdentifier = normalizeActor(req.body?.bskyIdentifier || '');
-  const bskyPassword = normalizeOptionalString(req.body?.bskyPassword);
+  const bskyIdentifier = normalizeOptionalString(req.body?.bskyIdentifier);
+  const bskyPassword = typeof req.body?.bskyPassword === 'string' ? req.body.bskyPassword : undefined;
   if (!bskyIdentifier || !bskyPassword) {
     res.status(400).json({ error: 'Bluesky identifier and app password are required.' });
+    return;
+  }
+  let destinationValidation: Awaited<ReturnType<typeof validateBlueskyCredentials>>;
+  try {
+    destinationValidation = await validateBlueskyCredentials({
+      bskyIdentifier,
+      bskyPassword,
+      bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl),
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Failed to validate Bluesky credentials.') });
+    return;
+  }
+  const duplicate = findDuplicateActiveDestination(config.mappings, {
+    bskyIdentifier: destinationValidation.handle,
+    bskyCanonicalHandle: destinationValidation.handle,
+    bskyDid: destinationValidation.did,
+    bskyServiceUrl: destinationValidation.serviceUrl,
+  });
+  if (duplicate) {
+    res.status(409).json(getDuplicateDestinationPayload(duplicate));
     return;
   }
 
@@ -2190,63 +3782,64 @@ app.post('/api/mappings', authenticateToken, async (req: any, res) => {
     (ownerUser ? getUserPublicLabel(ownerUser) : getActorPublicLabel(req.user));
   const normalizedGroupName = normalizeGroupName(req.body?.groupName);
   const normalizedGroupEmoji = normalizeGroupEmoji(req.body?.groupEmoji);
-  const profileSyncSourceUsername = resolveProfileSyncSourceUsername({
-    twitterUsernames,
-    requestedSource: req.body?.profileSyncSourceUsername,
-  });
+  let profileSyncSourceUsername: string | undefined;
+  try {
+    profileSyncSourceUsername = resolveStrictPolicySource(twitterUsernames, req.body?.profileSyncSourceUsername);
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Invalid profile source.') });
+    return;
+  }
+  const defaultPolicies = createDefaultMappingPolicies(twitterUsernames.length, profileSyncSourceUsername);
+  let postingPolicy: PostingPolicy;
+  let profileManagement: ProfileManagementPolicy;
+  try {
+    postingPolicy = parsePostingPolicyInput(req.body?.postingPolicy, defaultPolicies.postingPolicy);
+    profileManagement = parseProfileManagementInput(
+      req.body?.profileManagement,
+      defaultPolicies.profileManagement,
+      twitterUsernames,
+    );
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Invalid destination policy.') });
+    return;
+  }
 
-  const newMapping: AccountMapping = {
+  const newMapping = applyValidatedDestinationIdentity({
     id: randomUUID(),
     twitterUsernames,
-    bskyIdentifier,
+    pausedTwitterUsernames: [],
+    bskyIdentifier: destinationValidation.handle,
     bskyPassword,
-    bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl) || 'https://bsky.social',
+    bskyServiceUrl: destinationValidation.serviceUrl,
     enabled: true,
     owner,
     groupName: normalizedGroupName || undefined,
     groupEmoji: normalizedGroupEmoji || undefined,
     createdByUserId,
-    profileSyncSourceUsername,
+    postingPolicy,
+    aiOverrides: defaultPolicies.aiOverrides,
+    moderationPolicy: defaultPolicies.moderationPolicy,
+    duplicateSuppression: defaultPolicies.duplicateSuppression,
+    profileManagement,
+    profileSyncSourceUsername: profileManagement.profileSync.sourceUsername,
     hasBotLabel: false,
-  };
+  }, destinationValidation);
 
   ensureGroupExists(config, normalizedGroupName, normalizedGroupEmoji);
   config.mappings.push(newMapping);
   saveConfig(config);
 
-  try {
-    const labelResult = await ensureBlueskyBotSelfLabel({
-      bskyIdentifier: newMapping.bskyIdentifier,
-      bskyPassword: newMapping.bskyPassword,
-      bskyServiceUrl: newMapping.bskyServiceUrl,
-    });
-
-    if (labelResult.hasBotLabel && !newMapping.hasBotLabel) {
-      newMapping.hasBotLabel = true;
-      saveConfig(config);
-    }
-
-    for (const key of [
-      normalizeActor(newMapping.bskyIdentifier),
-      normalizeActor(labelResult.bsky.handle),
-      normalizeActor(labelResult.bsky.did),
-    ]) {
-      if (key) {
-        profileCache.delete(key);
-      }
-    }
-  } catch (error) {
-    console.warn(
-      `[mapping:${newMapping.id}] Failed to apply Bluesky bot self-label during mapping creation: ${getErrorMessage(error)}`,
-    );
-  }
-
-  res.json(sanitizeMapping(newMapping, createUserLookupById(config), req.user));
+  res.json({
+    ...sanitizeMapping(newMapping, createUserLookupById(config), req.user),
+    sourceParsing,
+    automaticBackfill: false,
+  });
 });
 
-app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
+app.put(['/api/destinations/:id', '/api/mappings/:id'], authenticateToken, (req: any, res) => {
   const { id } = req.params;
   const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
   const usersById = createUserLookupById(config);
   const index = config.mappings.findIndex((mapping) => mapping.id === id);
   const existingMapping = config.mappings[index];
@@ -2261,24 +3854,20 @@ app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
     return;
   }
 
-  let twitterUsernames: string[] = existingMapping.twitterUsernames;
-  if (req.body?.twitterUsernames !== undefined) {
-    twitterUsernames = parseTwitterUsernames(req.body.twitterUsernames);
-    if (twitterUsernames.length === 0) {
-      res.status(400).json({ error: 'At least one Twitter username is required.' });
-      return;
-    }
+  const protectedFields = ['twitterUsernames', 'sources', 'bskyIdentifier', 'bskyPassword', 'bskyServiceUrl'].filter(
+    (field) => Object.hasOwn(req.body ?? {}, field),
+  );
+  if (protectedFields.length > 0) {
+    res.status(400).json({
+      error:
+        'Use the source management and destination credential endpoints for source or credential changes. Policy edits never accept an app password.',
+      protectedFields,
+    });
+    return;
   }
 
-  let bskyIdentifier = existingMapping.bskyIdentifier;
-  if (req.body?.bskyIdentifier !== undefined) {
-    const normalizedIdentifier = normalizeActor(req.body?.bskyIdentifier);
-    if (!normalizedIdentifier) {
-      res.status(400).json({ error: 'Invalid Bluesky identifier.' });
-      return;
-    }
-    bskyIdentifier = normalizedIdentifier;
-  }
+  const twitterUsernames = existingMapping.twitterUsernames;
+  const bskyIdentifier = existingMapping.bskyIdentifier;
 
   let createdByUserId = existingMapping.createdByUserId || req.user.id;
   if (req.body?.createdByUserId !== undefined) {
@@ -2313,24 +3902,48 @@ app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
       ? normalizeOptionalString(req.body?.owner) || existingMapping.owner
       : existingMapping.owner || (ownerUser ? getUserPublicLabel(ownerUser) : undefined);
 
-  const profileSyncSourceUsername = resolveProfileSyncSourceUsername({
-    twitterUsernames,
-    requestedSource: req.body?.profileSyncSourceUsername,
-    fallbackSource: existingMapping.profileSyncSourceUsername,
-  });
+  let profileSyncSourceUsername: string | undefined;
+  try {
+    profileSyncSourceUsername = resolveStrictPolicySource(
+      twitterUsernames,
+      req.body?.profileSyncSourceUsername,
+      existingMapping.profileManagement.profileSync.sourceUsername,
+    );
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Invalid profile source.') });
+    return;
+  }
+  let postingPolicy: PostingPolicy;
+  let profileManagement: ProfileManagementPolicy;
+  try {
+    postingPolicy = parsePostingPolicyInput(req.body?.postingPolicy, existingMapping.postingPolicy);
+    profileManagement = parseProfileManagementInput(
+      req.body?.profileManagement,
+      existingMapping.profileManagement,
+      twitterUsernames,
+    );
+    if (req.body?.profileSyncSourceUsername !== undefined) {
+      profileManagement.profileSync.sourceUsername = profileSyncSourceUsername;
+    }
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Invalid destination policy.') });
+    return;
+  }
 
   const updatedMapping: AccountMapping = {
     ...existingMapping,
     twitterUsernames,
     bskyIdentifier,
-    bskyPassword: normalizeOptionalString(req.body?.bskyPassword) || existingMapping.bskyPassword,
-    bskyServiceUrl: normalizeOptionalString(req.body?.bskyServiceUrl) || existingMapping.bskyServiceUrl,
+    bskyPassword: existingMapping.bskyPassword,
+    bskyServiceUrl: existingMapping.bskyServiceUrl,
     enabled: normalizeBoolean(req.body?.enabled, existingMapping.enabled),
     owner,
     groupName: nextGroupName,
     groupEmoji: nextGroupEmoji,
     createdByUserId,
-    profileSyncSourceUsername,
+    postingPolicy,
+    profileManagement,
+    profileSyncSourceUsername: profileManagement.profileSync.sourceUsername,
   };
 
   ensureGroupExists(config, nextGroupName, nextGroupEmoji);
@@ -2339,7 +3952,60 @@ app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
   res.json(sanitizeMapping(updatedMapping, createUserLookupById(config), req.user));
 });
 
-app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, async (req: any, res) => {
+app.post('/api/mappings/:id/profile/preview', authenticateToken, async (req: any, res) => {
+  const config = getConfig();
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to preview this mapping.' });
+    return;
+  }
+  const decision = evaluateProfileMutation(mapping, 'profile-preview', {
+    requestedSource: req.body?.sourceUsername ?? req.body?.sourceTwitterUsername,
+  });
+  if (!decision.allowed || !decision.sourceUsername) {
+    res.status(400).json({ error: decision.reason || 'A valid profile source is required.' });
+    return;
+  }
+  try {
+    const [twitterProfile, profiles] = await Promise.all([
+      fetchTwitterMirrorProfile(decision.sourceUsername),
+      fetchProfilesByActor([mapping.bskyIdentifier]),
+    ]);
+    const current = profiles[normalizeActor(mapping.bskyIdentifier)] || {};
+    const fields = mapping.profileManagement.profileSync.fields;
+    const proposed = {
+      displayName: fields.displayName ? twitterProfile.mirroredDisplayName : current.displayName,
+      description: fields.description ? twitterProfile.mirroredDescription : current.description,
+      avatarUrl: fields.avatar ? twitterProfile.avatarUrl : current.avatar,
+      bannerUrl: fields.banner ? twitterProfile.bannerUrl : current.banner,
+    };
+    res.json({
+      sourceUsername: decision.sourceUsername,
+      current: {
+        displayName: current.displayName,
+        description: current.description,
+        avatarUrl: current.avatar,
+        bannerUrl: current.banner,
+      },
+      proposed,
+      changes: {
+        displayName: fields.displayName && current.displayName !== proposed.displayName,
+        description: fields.description && current.description !== proposed.description,
+        avatar: fields.avatar && current.avatar !== proposed.avatarUrl,
+        banner: fields.banner && current.banner !== proposed.bannerUrl,
+      },
+      readOnly: true,
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Failed to build profile preview.') });
+  }
+});
+
+const handleProfileApplyRequest = async (req: any, res: any) => {
   const { id } = req.params;
   const config = getConfig();
   const mappingIndex = config.mappings.findIndex((entry) => entry.id === id);
@@ -2355,17 +4021,29 @@ app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, async
     return;
   }
 
-  const sourceTwitterUsername = resolveProfileSyncSourceUsername({
-    twitterUsernames: mapping.twitterUsernames,
-    requestedSource: req.body?.sourceTwitterUsername,
-    fallbackSource: mapping.profileSyncSourceUsername,
-  });
-
-  if (!sourceTwitterUsername) {
-    res.status(400).json({ error: 'Mapping has no Twitter source usernames.' });
+  const isExplicitApply = req.path.endsWith('/profile/apply');
+  if (isExplicitApply && !isRecord(req.body?.fields)) {
+    res.status(400).json({ error: 'Explicit profile fields are required.' });
     return;
   }
-
+  let authorization: ReturnType<typeof assertProfileMutationAllowed>;
+  try {
+    authorization = assertProfileMutationAllowed(mapping, 'profile-apply', {
+      requestedSource: req.body?.sourceUsername ?? req.body?.sourceTwitterUsername,
+      requestedFields: isRecord(req.body?.fields)
+        ? (req.body.fields as Partial<ProfileFieldPolicy>)
+        : mapping.profileManagement.profileSync.fields,
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Profile mutation is not allowed.') });
+    return;
+  }
+  const sourceTwitterUsername = authorization.sourceUsername;
+  const fields = authorization.fields;
+  if (!sourceTwitterUsername || !fields) {
+    res.status(400).json({ error: 'A source and explicit fields are required.' });
+    return;
+  }
   try {
     const result = await syncBlueskyProfileFromTwitter({
       twitterUsername: sourceTwitterUsername,
@@ -2373,6 +4051,11 @@ app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, async
       bskyPassword: mapping.bskyPassword,
       bskyServiceUrl: mapping.bskyServiceUrl,
       previousSync: getMappingMirrorSyncState(mapping),
+      syncDisplayName: fields.displayName,
+      syncDescription: fields.description,
+      syncAvatar: fields.avatar,
+      syncBanner: fields.banner,
+      authorization,
     });
 
     const updatedMapping = applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result);
@@ -2398,7 +4081,10 @@ app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, async
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Failed to sync Bluesky profile from Twitter.') });
   }
-});
+};
+
+app.post('/api/mappings/:id/profile/apply', authenticateToken, handleProfileApplyRequest);
+app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, handleProfileApplyRequest);
 
 app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, async (req: any, res) => {
   const { id } = req.params;
@@ -2416,14 +4102,19 @@ app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, async (req: an
     return;
   }
 
-  const sourceTwitterUsername = resolveProfileSyncSourceUsername({
-    twitterUsernames: mapping.twitterUsernames,
-    requestedSource: req.body?.sourceTwitterUsername,
-    fallbackSource: mapping.profileSyncSourceUsername,
-  });
-
+  let authorization: ReturnType<typeof assertProfileMutationAllowed>;
+  try {
+    authorization = assertProfileMutationAllowed(mapping, 'profile-apply', {
+      requestedSource: req.body?.sourceUsername ?? req.body?.sourceTwitterUsername,
+      requestedFields: { description: true },
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Bio mutation is not allowed.') });
+    return;
+  }
+  const sourceTwitterUsername = authorization.sourceUsername;
   if (!sourceTwitterUsername) {
-    res.status(400).json({ error: 'Mapping has no Twitter source usernames.' });
+    res.status(400).json({ error: 'A valid profile source is required.' });
     return;
   }
 
@@ -2438,6 +4129,7 @@ app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, async (req: an
       syncDescription: true,
       syncAvatar: false,
       syncBanner: false,
+      authorization,
     });
 
     const updatedMapping = applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result);
@@ -2495,10 +4187,12 @@ app.post('/api/mappings/bot-label-all', authenticateToken, async (req: any, res)
 
   for (const mapping of targets) {
     try {
+      const authorization = assertProfileMutationAllowed(mapping, 'bot-label');
       const result = await ensureBlueskyBotSelfLabel({
         bskyIdentifier: mapping.bskyIdentifier,
         bskyPassword: mapping.bskyPassword,
         bskyServiceUrl: mapping.bskyServiceUrl,
+        authorization,
       });
 
       if (result.updated) {
@@ -2576,10 +4270,11 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
 
   for (const mapping of targets) {
     try {
-      const sourceTwitterUsername = resolveProfileSyncSourceUsername({
-        twitterUsernames: mapping.twitterUsernames,
-        fallbackSource: mapping.profileSyncSourceUsername,
+      const authorization = assertProfileMutationAllowed(mapping, 'display-name-suffix');
+      const sourceDecision = evaluateProfileMutation(mapping, 'profile-preview', {
+        requestedSource: mapping.profileManagement.profileSync.sourceUsername,
       });
+      const sourceTwitterUsername = sourceDecision.sourceUsername;
       if (!sourceTwitterUsername) {
         failed += 1;
         failedMappings.push({
@@ -2595,6 +4290,7 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
         bskyPassword: mapping.bskyPassword,
         bskyServiceUrl: mapping.bskyServiceUrl,
         twitterUsername: sourceTwitterUsername,
+        authorization,
       });
 
       if (result.updated) {
@@ -2659,6 +4355,10 @@ app.post('/api/mappings/:id/bridge-to-fediverse', authenticateToken, async (req:
 
   if (!canManageMapping(req.user, mapping)) {
     res.status(403).json({ error: 'You do not have permission to bridge this mapping.' });
+    return;
+  }
+  if (req.body?.confirmed !== true) {
+    res.status(400).json({ error: 'Explicit confirmation is required before enabling the Fediverse bridge.' });
     return;
   }
 
@@ -2763,7 +4463,10 @@ app.delete('/api/mappings/:id', authenticateToken, (req: any, res) => {
 
   config.mappings = config.mappings.filter((entry) => entry.id !== id);
   pendingBackfills = pendingBackfills.filter((entry) => entry.id !== id);
-  postQueueService.deleteByMappingId(id);
+  const destination = findDestinationByLegacyId(config, id);
+  for (const destinationId of [id, ...(destination?.metadata.legacyMappingIds ?? [])]) {
+    postQueueService.deleteByMappingId(destinationId);
+  }
   saveConfig(config);
   res.json({ success: true });
 });
@@ -2796,7 +4499,7 @@ app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, 
   try {
     const deletedCount = await deleteAllPosts(id);
 
-    dbService.deleteTweetsByBskyIdentifier(mapping.bskyIdentifier);
+    dbService.deleteTweetsByBskyIdentifier(getDestinationStorageKey(mapping));
 
     res.json({
       success: true,
@@ -2812,44 +4515,255 @@ app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, 
 
 app.get('/api/twitter-config', authenticateToken, requireAdmin, (_req, res) => {
   const config = getConfig();
-  res.json(config.twitter);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.json({
+    ...getConfigVersion(config),
+    authToken: '',
+    ct0: '',
+    backupAuthToken: '',
+    backupCt0: '',
+    hasAuthToken: Boolean(config.twitter.authToken),
+    hasCt0: Boolean(config.twitter.ct0),
+    hasBackupAuthToken: Boolean(config.twitter.backupAuthToken),
+    hasBackupCt0: Boolean(config.twitter.backupCt0),
+  });
 });
 
-app.post('/api/twitter-config', authenticateToken, requireAdmin, (req, res) => {
+app.post('/api/twitter-config', credentialRateLimiter, authenticateToken, requireAdmin, (req, res) => {
   const { authToken, ct0, backupAuthToken, backupCt0 } = req.body;
   const config = getConfig();
-  config.twitter = { authToken, ct0, backupAuthToken, backupCt0 };
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  config.twitter = {
+    authToken: typeof authToken === 'string' && authToken.length > 0 ? authToken : config.twitter.authToken,
+    ct0: typeof ct0 === 'string' && ct0.length > 0 ? ct0 : config.twitter.ct0,
+    backupAuthToken:
+      typeof backupAuthToken === 'string' && backupAuthToken.length > 0
+        ? backupAuthToken
+        : config.twitter.backupAuthToken,
+    backupCt0: typeof backupCt0 === 'string' && backupCt0.length > 0 ? backupCt0 : config.twitter.backupCt0,
+  };
+  if (!config.twitter.authToken || !config.twitter.ct0) {
+    res.status(400).json({ error: 'Primary auth token and ct0 are required.' });
+    return;
+  }
   saveConfig(config);
-  res.json({ success: true });
+  res.json({ success: true, ...getConfigVersion(config) });
 });
 
 app.get('/api/ai-config', authenticateToken, requireAdmin, (_req, res) => {
   const config = getConfig();
-  const aiConfig = config.ai || {
-    provider: 'gemini',
-    apiKey: config.geminiApiKey || '',
-  };
-  res.json(aiConfig);
+  const aiConfig = config.ai;
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.json({
+    ...getConfigVersion(config),
+    enabled: aiConfig.enabled,
+    purpose: aiConfig.purpose,
+    provider: aiConfig.provider,
+    model: aiConfig.model,
+    baseUrl: aiConfig.baseUrl,
+    apiKey: '',
+    hasApiKey: Boolean(aiConfig.apiKey || config.geminiApiKey),
+    maxAltTextChars: aiConfig.maxAltTextChars,
+    privacyDescription: aiConfig.privacyDescription,
+    textCapabilities: aiConfig.textCapabilities,
+  });
 });
 
-app.post('/api/ai-config', authenticateToken, requireAdmin, (req, res) => {
-  const { provider, apiKey, model, baseUrl } = req.body;
+app.post('/api/ai-config', credentialRateLimiter, authenticateToken, requireAdmin, (req, res) => {
+  const { enabled, provider, apiKey, model, baseUrl, maxAltTextChars, privacyDescription, textCapabilities } =
+    req.body;
   const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  if (!['gemini', 'openai', 'anthropic', 'custom'].includes(provider)) {
+    res.status(400).json({ error: 'Unsupported AI provider.' });
+    return;
+  }
 
   config.ai = {
-    provider,
-    apiKey,
+    ...config.ai,
+    enabled: enabled === true,
+    purpose: 'image-alt-text',
+    provider: provider as AppConfig['ai']['provider'],
+    apiKey: typeof apiKey === 'string' && apiKey.length > 0 ? apiKey : config.ai?.apiKey || config.geminiApiKey,
     model: model || undefined,
     baseUrl: baseUrl || undefined,
+    maxAltTextChars,
+    privacyDescription,
+    textCapabilities:
+      textCapabilities && typeof textCapabilities === 'object'
+        ? Object.fromEntries(
+            (['translation', 'summarization', 'cleanup', 'hashtags'] as const).map((capability) => [
+              capability,
+              {
+                ...config.ai.textCapabilities[capability],
+                ...textCapabilities[capability],
+                enabled: textCapabilities[capability]?.enabled === true,
+                purpose: capability,
+              },
+            ]),
+          ) as AppConfig['ai']['textCapabilities']
+        : config.ai.textCapabilities,
   };
 
   config.geminiApiKey = undefined; // legacy field; dropped from config.json on save
 
   saveConfig(config);
-  res.json({ success: true });
+  res.json({ success: true, ...getConfigVersion(config) });
+});
+
+app.post('/api/ai-config/test', credentialRateLimiter, authenticateToken, requireAdmin, async (_req, res) => {
+  const result = await testAIProvider();
+  res.status(result.success ? 200 : 400).json(result);
+});
+
+app.post('/api/ai/preview-text', credentialRateLimiter, authenticateToken, requireAdmin, async (req, res) => {
+  const capability = req.body?.capability as AITextCapability;
+  if (!['translation', 'summarization', 'cleanup', 'hashtags'].includes(capability)) {
+    res.status(400).json({ error: 'Unknown text capability.' });
+    return;
+  }
+  const text = typeof req.body?.text === 'string' ? req.body.text.slice(0, 5000) : '';
+  if (!text) {
+    res.status(400).json({ error: 'Preview text is required.' });
+    return;
+  }
+  try {
+    res.json(await previewTextCapability({ capability, text }));
+  } catch (error) {
+    sendSafeError(res, 502, 'AI_PREVIEW_FAILED', error);
+  }
+});
+
+app.post('/api/mappings/:id/posting/preview', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
+  try {
+    const policy = parsePostingPolicyInput(req.body?.postingPolicy, mapping.postingPolicy);
+    const twitterUsername =
+      normalizeUsername(req.body?.twitterUsername) ||
+      mapping.twitterUsernames.find((username) => username.length > 0) ||
+      'source';
+    const tweetId = normalizeOptionalString(req.body?.tweetId) || '1234567890';
+    const originalPostUrl = `https://x.com/${twitterUsername}/status/${tweetId}`;
+    const result = applyPostingPolicy(normalizeOptionalString(req.body?.text) || 'Example post text…', policy, {
+      twitterUsername,
+      tweetId,
+      originalPostUrl,
+      destinationIdentifier: mapping.bskyIdentifier,
+      sourceCount: mapping.twitterUsernames.length,
+      isReply: req.body?.isReply === true,
+      isThreadRoot: req.body?.isThreadRoot !== false && req.body?.isReply !== true,
+    });
+    res.json({ ...result, policy, queuedItemsUseCurrentPolicy: true });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Invalid posting policy preview.') });
+  }
+});
+
+app.patch('/api/mappings/:id/migration-review', authenticateToken, requireAdmin, (req, res) => {
+  const config = getConfig();
+  if (rejectStaleConfigMutation(config, req.body, res)) return;
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
+  if (!mapping.migrationReview) {
+    res.status(400).json({ error: 'This mapping has no migration review notice.' });
+    return;
+  }
+  mapping.migrationReview = {
+    ...mapping.migrationReview,
+    needsAdminReview: false,
+    reviewedAt: new Date().toISOString(),
+  };
+  saveConfig(config);
+  res.json({ success: true, migrationReview: mapping.migrationReview, ...getConfigVersion(config) });
 });
 
 // --- Status & Actions Routes ---
+
+app.get('/api/health/details', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const visibleMappings = getVisibleMappings(config, req.user);
+  const queue = postQueueService.getCounts();
+  const visibleDestinationIds = new Set(visibleMappings.map((mapping) => mapping.id));
+  const digestJobs = digestJobService.list().filter((job) => visibleDestinationIds.has(job.destinationId));
+  const digestEntries = digestEntryService
+    .list({ limit: 1000 })
+    .filter((entry) => visibleDestinationIds.has(entry.destinationId));
+  const now = Date.now();
+  const twitterRuntime = authRuntimeStateService.get('twitter');
+  res.json({
+    ...getPublicHealth(),
+    databaseMigration: databaseHealthService.check().latestMigration,
+    queue: {
+      depth: queue.pending + queue.processing + queue.failed,
+      pending: queue.pending,
+      processing: queue.processing,
+      failed: queue.failed,
+      oldestAgeMs: queue.perMapping.reduce<number | null>((oldest, entry) => {
+        if (entry.oldest_enqueued_at === null) return oldest;
+        const age = Math.max(0, now - entry.oldest_enqueued_at);
+        return oldest === null ? age : Math.max(oldest, age);
+      }, null),
+    },
+    digests: {
+      pendingEntries: digestEntries.filter((entry) => entry.status === 'pending').length,
+      processingJobs: digestJobs.filter((job) => job.status === 'processing').length,
+      failedJobs: digestJobs.filter((job) => job.status === 'failed').length,
+      nextRunAt: digestJobs.reduce<number | null>(
+        (next, job) => (next === null ? job.nextRunAt : Math.min(next, job.nextRunAt)),
+        null,
+      ),
+    },
+    cookies: {
+      primaryConfigured: Boolean(config.twitter.authToken && config.twitter.ct0),
+      backupConfigured: Boolean(config.twitter.backupAuthToken && config.twitter.backupCt0),
+      active: twitterRuntime?.activeSlot,
+      lastSuccessAt: twitterRuntime?.lastSuccessAt,
+      lastAuthenticationFailureAt: twitterRuntime?.lastFailureAt,
+      lastAuthenticationFailureCategory: twitterRuntime?.lastErrorCategory,
+    },
+    destinations: visibleMappings.map((mapping) => ({
+      id: mapping.id,
+      identifier: mapping.bskyIdentifier,
+      runtime: runtimeStateService.getDestination(mapping.id),
+      queue: queue.perMapping.find((entry) => entry.destination_id === mapping.id) ?? null,
+      profile: {
+        mutationAllowed: mapping.profileManagement.allowProfileMutation,
+        mode: mapping.profileManagement.profileSync.mode,
+      },
+      attribution: mapping.postingPolicy.attribution.mode,
+      sources: mapping.twitterUsernames.map((username) => {
+        const source = config.sources.find((candidate) => candidate.username === username);
+        return {
+          id: source?.id,
+          username,
+          runtime: source ? runtimeStateService.getSource(source.id) : null,
+        };
+      }),
+    })),
+  });
+});
+
+app.get('/api/metrics', authenticateToken, requireAdmin, (_req, res) => {
+  res.json(metricsService.snapshot());
+});
+
+app.get('/api/metrics/prometheus', authenticateToken, requireAdmin, (_req, res) => {
+  if (process.env.ENABLE_PROMETHEUS_METRICS !== 'true') {
+    res.status(404).json({ error: 'Prometheus metrics are disabled.' });
+    return;
+  }
+  res.type('text/plain; version=0.0.4').send(metricsService.toPrometheus());
+});
 
 app.get('/api/status', authenticateToken, (req: any, res) => {
   const config = getConfig();
@@ -2906,9 +4820,10 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
 
   res.json({
     lastCheckTime,
-    nextCheckTime,
+    nextCheckTime: config.scheduler.enabled ? nextCheckTime : null,
     nextCheckMinutes: Math.ceil(nextRunMs / 60000),
-    checkIntervalMinutes: config.checkIntervalMinutes,
+    checkIntervalMinutes: getSchedulerIntervalMinutes(config),
+    scheduler: buildSchedulerSettingsResponse(settingsRouterDependencies, config),
     pendingBackfills: scopedPendingBackfills.map((backfill, index) => ({
       ...backfill,
       position: index + 1,
@@ -2926,21 +4841,405 @@ app.get('/api/queue', authenticateToken, (req: any, res) => {
   const limitRaw = Number(req.query.limit);
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 200;
 
+  const items = postQueueService.listItems({ mappingIds: visibleMappingIds, limit }).map((item) => {
+    const destination = config.destinations.find((candidate) => candidate.id === item.destination_id);
+    const route = config.routes.find((candidate) => candidate.id === item.route_id);
+    const current = destination && route ? createPolicySnapshot({ destination, route, ai: config.ai }) : undefined;
+    return {
+      ...item,
+      policyDifference: current
+        ? diffPolicySnapshots(parsePolicySnapshot(item.policy_snapshot), current)
+        : { changed: true, fields: ['missing-current-policy'] },
+    };
+  });
   res.json({
     counts: postQueueService.getCounts().perMapping.filter((entry) => visibleMappingIds.has(entry.mapping_id)),
-    items: postQueueService.listItems({ mappingIds: visibleMappingIds, limit }),
+    items,
   });
 });
 
-app.post('/api/queue/retry-failed', authenticateToken, requireAdmin, (_req, res) => {
-  const retried = postQueueService.retryFailed();
-  res.json({ success: true, message: `${retried} failed tweet(s) requeued.` });
+const queueScopeForPath = (kind: string, id: string) => {
+  if (kind === 'destination') return { destinationId: id };
+  if (kind === 'route') return { routeId: id };
+  if (kind === 'source') return { sourceId: id };
+  if (kind === 'request') return { requestId: id };
+  return null;
+};
+
+const canOperateQueueScope = (user: AuthenticatedUser, scope: Parameters<typeof postQueueService.inspect>[0]): boolean => {
+  if (isActorAdmin(user)) return true;
+  const config = getConfig();
+  const matching = postQueueService.inspect(scope);
+  if (matching.length > 0) {
+    return matching.every((item) => {
+      const mapping = config.mappings.find((candidate) => candidate.id === item.mapping_id);
+      return Boolean(mapping && canManageMapping(user, mapping));
+    });
+  }
+  const destinationId = scope.destinationId ??
+    (scope.routeId ? config.routes.find((route) => route.id === scope.routeId)?.destinationId : undefined);
+  const mapping = config.mappings.find(
+    (candidate) => candidate.id === scope.mappingId || candidate.id === destinationId,
+  );
+  return Boolean(mapping && canManageMapping(user, mapping));
+};
+
+app.use(
+  createQueueControlRouter({
+    authenticateToken,
+    requireAdmin,
+    scopeForPath: queueScopeForPath,
+    canOperate: (user, scope) =>
+      canOperateQueueScope(
+        user as AuthenticatedUser,
+        scope as Parameters<typeof canOperateQueueScope>[1],
+      ),
+    inspect: (scope) => postQueueService.inspect(scope),
+    retryFailed: (scope) => postQueueService.retryFailed(scope),
+    clearFailed: (scope) => postQueueService.clearFailed(scope),
+    cancelPending: (scope) => postQueueService.cancelPending(scope),
+  }),
+);
+
+app.get('/api/queue/items/:bskyIdentifier/:tweetId', authenticateToken, (req: any, res) => {
+  const scope = { bskyIdentifier: req.params.bskyIdentifier, twitterId: req.params.tweetId };
+  if (!canOperateQueueScope(req.user, scope)) {
+    res.status(403).json({ error: 'You do not have permission to inspect this queue item.' });
+    return;
+  }
+  const item = postQueueService.inspect(scope)[0];
+  if (!item) {
+    res.status(404).json({ error: 'Queue item not found.' });
+    return;
+  }
+  res.json(item);
 });
 
-app.delete('/api/queue/failed', authenticateToken, requireAdmin, (_req, res) => {
-  const cleared = postQueueService.clearFailed();
-  res.json({ success: true, message: `${cleared} failed tweet(s) removed from the queue.` });
+app.post('/api/queue/items/:bskyIdentifier/:tweetId/retry', authenticateToken, (req: any, res) => {
+  const scope = { bskyIdentifier: req.params.bskyIdentifier, twitterId: req.params.tweetId };
+  if (!canOperateQueueScope(req.user, scope)) {
+    res.status(403).json({ error: 'You do not have permission to retry this queue item.' });
+    return;
+  }
+  const item = postQueueService.inspect(scope)[0];
+  if (!item) {
+    res.status(404).json({ error: 'Queue item not found.' });
+    return;
+  }
+  if (item.status !== 'failed') {
+    res.status(409).json({ error: 'Only failed queue items can be retried.' });
+    return;
+  }
+  res.json({ success: true, affected: postQueueService.retryFailed(scope) });
 });
+
+app.post('/api/queue/items/:bskyIdentifier/:tweetId/reevaluate-policy', authenticateToken, async (req: any, res) => {
+  const scope = { bskyIdentifier: req.params.bskyIdentifier, twitterId: req.params.tweetId };
+  if (!canOperateQueueScope(req.user, scope)) {
+    res.status(403).json({ error: 'You do not have permission to update this queue item.' });
+    return;
+  }
+  if (!req.user.isAdmin && !req.user.permissions.reevaluateQueuePolicies) {
+    res.status(403).json({ error: 'Re-evaluating queued policy snapshots requires explicit permission.' });
+    return;
+  }
+  if (req.get('x-queue-confirmation') !== 'REEVALUATE_POLICY') {
+    res.status(400).json({ error: 'Policy re-evaluation requires x-queue-confirmation: REEVALUATE_POLICY.' });
+    return;
+  }
+  const config = getConfig();
+  try {
+    const item = postQueueService.getItem(scope);
+    if (!item) {
+      res.status(404).json({ error: 'Queue item not found.' });
+      return;
+    }
+    if (item.status === 'processing') {
+      res.status(409).json({ error: 'Processing queue items are immutable.' });
+      return;
+    }
+    const destination = config.destinations.find((candidate) => candidate.id === item.destination_id);
+    const route = config.routes.find((candidate) => candidate.id === item.route_id);
+    if (!destination || !route) {
+      res.status(409).json({ error: 'Current destination policy is unavailable.' });
+      return;
+    }
+    // Queued items are not always X posts, so the payload has to be normalized
+    // by source type; parsing a webhook/API item as an X tweet yields empty
+    // text and misclassified content.
+    const { post, imageUrls: mediaUrls } = queuedPostForPolicyEvaluation(item);
+    const metadata = {
+      ...contentPolicyMetadataForPost(post),
+      // Routing predicates match the configured source username, not its id.
+      sourceUsername: item.twitter_username,
+      createdAt: item.source_created_at,
+    };
+    const contentDecision = evaluateContentPolicy(destination, route, metadata);
+    const dedupPolicy = route.duplicateSuppression.enabled
+      ? route.duplicateSuppression
+      : destination.duplicateSuppression;
+    let duplicate = null;
+    let imageHash: string | undefined;
+    if (contentDecision.allowed && dedupPolicy.enabled) {
+      if (dedupPolicy.perceptualImageHash) {
+        imageHash = combinePerceptualHashes(
+          (await computePerceptualHashes(mediaUrls, { enabled: true })).hashes,
+        );
+      }
+      duplicate = duplicateFingerprintService.findRecent({
+        destinationId: destination.id,
+        routeId: route.id,
+        routeScoped: route.duplicateSuppression.enabled,
+        textUrlHash: contentSha256(post.text, post.urls),
+        imageHash,
+        since: Date.now() - dedupPolicy.windowHours * 60 * 60 * 1000,
+        excludeExternalPostId: item.external_post_id,
+      });
+    }
+    const decision = duplicate
+      ? {
+          allowed: false,
+          reason: 'duplicate-suppressed',
+          detail: String(duplicate.id),
+          decisionVersion: contentDecision.decisionVersion,
+          trace: [
+            ...contentDecision.trace,
+            { policy: 'duplicate-suppression', predicate: 'recent-fingerprint', matched: true },
+          ],
+        }
+      : {
+          ...contentDecision,
+          trace: [
+            ...contentDecision.trace,
+            {
+              policy: 'duplicate-suppression',
+              predicate: 'recent-fingerprint',
+              matched: false,
+              detail: dedupPolicy.enabled ? 'checked' : 'disabled',
+            },
+          ],
+        };
+    if (!decision.allowed) {
+      res.status(409).json({ success: false, affected: 0, decision });
+      return;
+    }
+    const snapshot = createPolicySnapshot({ destination, route, ai: config.ai });
+    const affected = postQueueService.rewritePolicySnapshots(
+      scope,
+      req.user.id,
+      typeof req.body?.reason === 'string' ? req.body.reason : 'User requested current policy',
+      () => ({
+        policyVersion: POLICY_SNAPSHOT_VERSION,
+        policySnapshot: serializePolicySnapshot(snapshot),
+        decisionVersion: decision.decisionVersion,
+        decisionTrace: JSON.stringify(decision.trace),
+      }),
+    );
+    metricsService.increment('snapshotRewrites', affected);
+    if (affected > 0) {
+      policyOverrideAuditService.record({
+        destinationId: destination.id,
+        routeId: route.id,
+        externalPostId: item.external_post_id,
+        actorId: req.user.id,
+        action: 'current-policy-requeue',
+        priorReason: item.status === 'failed' ? item.last_error : undefined,
+        decisionVersion: decision.decisionVersion,
+        decisionTrace: JSON.stringify(decision.trace),
+        policyHash: snapshot.hash,
+      });
+    }
+    res.json({ success: true, affected, decision, policyHash: snapshot.hash, requeued: item.status === 'failed' });
+  } catch (error) {
+    sendSafeError(res, 409, 'POLICY_SNAPSHOT_UPDATE_FAILED', error);
+  }
+});
+
+app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateToken, async (req: any, res) => {
+  const config = getConfig();
+  const destination = config.destinations.find((candidate) => candidate.id === req.params.destinationId);
+  const mapping = config.mappings.find((candidate) => candidate.id === req.params.destinationId);
+  if (!destination || !mapping) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  if (
+    !canManageMapping(req.user, mapping) ||
+    (!req.user.isAdmin && !req.user.permissions.reevaluateQueuePolicies)
+  ) {
+    res.status(403).json({ error: 'Override requeue requires destination access and policy permission.' });
+    return;
+  }
+  if (req.get('x-queue-confirmation') !== 'OVERRIDE_POLICY_SKIP') {
+    res.status(400).json({ error: 'Override requeue requires x-queue-confirmation: OVERRIDE_POLICY_SKIP.' });
+    return;
+  }
+  const skipped = dbService.getPost(req.params.tweetId, destination.id);
+  if (!skipped || skipped.status !== 'skipped') {
+    res.status(404).json({ error: 'Retained skipped item not found.' });
+    return;
+  }
+  if (skipped.override_requeued_at) {
+    res.status(409).json({ error: 'This skipped item was already override-requeued.' });
+    return;
+  }
+  const retained = parseRetainedCandidate(skipped.retained_candidate_json);
+  if (!retained) {
+    res.status(410).json({ error: 'The retained candidate is missing, invalid, or expired.' });
+    return;
+  }
+  const route = config.routes.find(
+    (candidate) => candidate.id === skipped.route_id && candidate.destinationId === destination.id,
+  );
+  if (!route) {
+    res.status(409).json({ error: 'The current route no longer exists.' });
+    return;
+  }
+  const contentDecision = evaluateContentPolicy(destination, route, retained.normalized);
+  const dedupPolicy = route.duplicateSuppression.enabled
+    ? route.duplicateSuppression
+    : destination.duplicateSuppression;
+  let imageHash: string | undefined;
+  if (contentDecision.allowed && dedupPolicy.enabled && dedupPolicy.perceptualImageHash) {
+    imageHash = combinePerceptualHashes(
+      (await computePerceptualHashes(retained.normalized.mediaUrls, { enabled: true })).hashes,
+    );
+  }
+  const textUrlHash = contentSha256(retained.normalized.text ?? '', retained.normalized.urls);
+  const duplicate =
+    contentDecision.allowed && dedupPolicy.enabled
+      ? duplicateFingerprintService.findRecent({
+          destinationId: destination.id,
+          routeId: route.id,
+          routeScoped: route.duplicateSuppression.enabled,
+          textUrlHash,
+          imageHash,
+          since: Date.now() - dedupPolicy.windowHours * 60 * 60 * 1000,
+          excludeExternalPostId: retained.normalized.externalPostId,
+        })
+      : null;
+  const policyDecision = duplicate
+    ? {
+        allowed: false,
+        reason: 'duplicate-suppressed',
+        decisionVersion: contentDecision.decisionVersion,
+        trace: [
+          ...contentDecision.trace,
+          { policy: 'duplicate-suppression', predicate: 'recent-fingerprint', matched: true },
+        ],
+      }
+    : contentDecision;
+  const explicitOverride = req.body?.override === true;
+  if (!policyDecision.allowed && !explicitOverride) {
+    res.status(409).json({ success: false, affected: 0, decision: policyDecision, requiresOverride: true });
+    return;
+  }
+  const decision = explicitOverride
+    ? {
+        ...policyDecision,
+        allowed: true,
+        reason: 'authorized-policy-override',
+        trace: [
+          ...policyDecision.trace,
+          { policy: 'authorized-override', predicate: 'explicit-confirmation', matched: true },
+        ],
+      }
+    : policyDecision;
+  const snapshot = createPolicySnapshot({ destination, route, ai: config.ai });
+  const affected = postQueueService.enqueue([
+    {
+      twitter_id: retained.normalized.externalPostId,
+      bsky_identifier: destination.storageKey,
+      mapping_id: mapping.id,
+      twitter_username: retained.normalized.sourceUsername || skipped.twitter_username,
+      source_type: 'x',
+      external_post_id: retained.normalized.externalPostId,
+      destination_id: destination.id,
+      route_id: route.id,
+      source_id: skipped.source_id,
+      source_created_at: retained.normalized.createdAt,
+      policy_version: POLICY_SNAPSHOT_VERSION,
+      policy_snapshot: serializePolicySnapshot(snapshot),
+      decision_version: decision.decisionVersion,
+      decision_trace: JSON.stringify(decision.trace),
+      kind: 'backfill',
+      request_id: `override-${randomUUID()}`,
+      tweet_json: JSON.stringify(retained.sourcePayload),
+      tweet_text: retained.normalized.text?.slice(0, 300),
+    },
+  ]);
+  if (affected !== 1) {
+    res.status(409).json({ error: 'The retained candidate is already queued.' });
+    return;
+  }
+  dbService.markOverrideRequeued(retained.normalized.externalPostId, destination.id, req.user.id);
+  if (dedupPolicy.enabled) {
+    duplicateFingerprintService.record({
+      destinationId: destination.id,
+      routeId: route.id,
+      externalPostId: retained.normalized.externalPostId,
+      textUrlHash,
+      imageHash,
+      overrideOfId: duplicate?.id,
+    });
+  }
+  policyOverrideAuditService.record({
+    destinationId: destination.id,
+    routeId: route.id,
+    externalPostId: retained.normalized.externalPostId,
+    actorId: req.user.id,
+    action: 'override-requeue',
+    priorReason: skipped.skip_reason,
+    decisionVersion: decision.decisionVersion,
+    decisionTrace: JSON.stringify(decision.trace),
+    policyHash: snapshot.hash,
+  });
+  dbService.consumeSkippedOverride(retained.normalized.externalPostId, destination.id);
+  res.json({ success: true, affected, decision, policyHash: snapshot.hash, retainedDegraded: retained.degraded });
+});
+
+app.post(
+  ['/api/destinations/:id/queue/retry-failed', '/api/mappings/:id/queue/retry-failed'],
+  authenticateToken,
+  (req: any, res) => {
+  const scope = { destinationId: req.params.id };
+  if (!canOperateQueueScope(req.user, scope)) {
+    res.status(403).json({ error: 'You do not have permission to operate on this destination queue.' });
+    return;
+  }
+  res.json({ success: true, affected: postQueueService.retryFailed(scope) });
+  },
+);
+
+app.delete(
+  ['/api/destinations/:id/queue/failed', '/api/mappings/:id/queue/failed'],
+  authenticateToken,
+  (req: any, res) => {
+  const scope = { destinationId: req.params.id };
+  if (!canOperateQueueScope(req.user, scope)) {
+    res.status(403).json({ error: 'You do not have permission to operate on this destination queue.' });
+    return;
+  }
+  res.json({ success: true, affected: postQueueService.clearFailed(scope) });
+  },
+);
+
+app.delete(
+  ['/api/destinations/:id/queue/pending', '/api/mappings/:id/queue/pending'],
+  authenticateToken,
+  (req: any, res) => {
+  const scope = { destinationId: req.params.id };
+  if (!canOperateQueueScope(req.user, scope)) {
+    res.status(403).json({ error: 'You do not have permission to operate on this destination queue.' });
+    return;
+  }
+  if (req.get('x-queue-confirmation') !== 'CLEAR_PENDING') {
+    res.status(400).json({ error: 'Bulk pending cancellation requires x-queue-confirmation: CLEAR_PENDING.' });
+    return;
+  }
+  res.json({ success: true, affected: postQueueService.cancelPending(scope) });
+  },
+);
 
 app.get('/api/version', authenticateToken, (_req, res) => {
   res.json(getRuntimeVersionInfo());
@@ -3012,8 +5311,13 @@ app.post('/api/backfill/:id', authenticateToken, (req: any, res) => {
     return;
   }
 
-  if (!Array.isArray(mapping.twitterUsernames) || mapping.twitterUsernames.length === 0) {
-    res.status(400).json({ error: 'Mapping has no Twitter source accounts configured.' });
+  if (!mapping.enabled) {
+    res.status(409).json({ error: 'Resume the destination before requesting a backfill.' });
+    return;
+  }
+  const activeSources = getActiveTwitterUsernames(mapping);
+  if (activeSources.length === 0) {
+    res.status(400).json({ error: 'Destination has no enabled X sources.' });
     return;
   }
 
@@ -3031,11 +5335,11 @@ app.post('/api/backfill/:id', authenticateToken, (req: any, res) => {
     requestId,
   });
   pendingBackfills.sort((a, b) => a.sequence - b.sequence);
-  signalSchedulerWake();
+  signalSchedulerWake('backfill', id);
 
   res.json({
     success: true,
-    message: `Backfill queued for @${mapping.twitterUsernames.join(', ')}`,
+    message: `Backfill queued for @${activeSources.join(', ')}`,
     requestId,
   });
 });
@@ -3064,10 +5368,24 @@ app.post('/api/pin-sync/:id', authenticateToken, (req: any, res) => {
     res.status(400).json({ error: 'Mapping has no Twitter source accounts configured.' });
     return;
   }
+  let authorization: ReturnType<typeof assertProfileMutationAllowed>;
+  try {
+    authorization = assertProfileMutationAllowed(mapping, 'pin-sync-manual', {
+      requestedSource: req.body?.sourceUsername,
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Pin synchronization is not allowed.') });
+    return;
+  }
 
   pendingPinSyncs = pendingPinSyncs.filter((entry) => entry.id !== id);
-  pendingPinSyncs.push({ id, queuedAt: Date.now(), requestId: randomUUID() });
-  signalSchedulerWake();
+  pendingPinSyncs.push({
+    id,
+    queuedAt: Date.now(),
+    requestId: randomUUID(),
+    sourceUsername: authorization.sourceUsername,
+  });
+  signalSchedulerWake('pin-sync', id);
 
   res.json({
     success: true,
@@ -3098,39 +5416,58 @@ app.delete('/api/backfill/:id', authenticateToken, (req: any, res) => {
 
 // --- Config Management Routes ---
 
-app.get('/api/config/export', authenticateToken, requireAdmin, (_req, res) => {
-  const config = getConfig();
-  const { users, ...cleanConfig } = config;
-
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', 'attachment; filename=tweets-2-bsky-config.json');
-  res.json(cleanConfig);
+app.post('/api/config/migration-report', authenticateToken, requireAdmin, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  try {
+    const report = getConfigMigrationReport(req.body?.config);
+    res.json(report);
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Could not inspect configuration migration.') });
+  }
 });
 
-app.post('/api/config/import', authenticateToken, requireAdmin, (req, res) => {
+app.get('/api/config/export', authenticateToken, requireAdmin, async (req: any, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  const requestedMode = req.query.mode ?? 'redacted';
+  if (requestedMode !== 'redacted' && requestedMode !== 'full') {
+    res.status(400).json({ error: 'Export mode must be redacted or full.' });
+    return;
+  }
+  if (requestedMode === 'full' && req.get('x-config-export-confirmation') !== 'EXPORT_WITH_SECRETS') {
+    res.status(403).json({
+      error: 'Full export requires the x-config-export-confirmation: EXPORT_WITH_SECRETS header.',
+    });
+    return;
+  }
+  if (requestedMode === 'full' && !(await verifyCurrentAdminPassword(req))) {
+    res.status(401).json({ error: 'Current admin password verification is required for a full export.' });
+    return;
+  }
+
+  const config = getConfig();
+  const exportData = createConfigExport(config, requestedMode);
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename=tweets-2-bsky-config-${requestedMode}.json`);
+  res.json(exportData);
+});
+
+app.post('/api/config/import', importRestoreRateLimiter, authenticateToken, requireAdmin, requireJsonObject, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
   try {
-    const importData = req.body;
     const currentConfig = getConfig();
-
-    if (!importData.mappings || !Array.isArray(importData.mappings)) {
-      res.status(400).json({ error: 'Invalid config format: missing mappings array' });
-      return;
-    }
-
-    const newConfig = {
-      ...currentConfig,
-      mappings: importData.mappings,
-      groups: Array.isArray(importData.groups) ? importData.groups : currentConfig.groups,
-      twitter: importData.twitter || currentConfig.twitter,
-      ai: importData.ai || currentConfig.ai,
-      checkIntervalMinutes: importData.checkIntervalMinutes || currentConfig.checkIntervalMinutes,
-    };
-
+    if (rejectMissingOrStaleConfigRevision(currentConfig, req.body, res)) return;
+    const newConfig = mergeImportedConfig(currentConfig, req.body);
     saveConfig(newConfig);
     res.json({ success: true, message: 'Configuration imported successfully' });
   } catch (err) {
-    console.error('Import failed:', err);
-    res.status(500).json({ error: 'Failed to process import file' });
+    if (sendConfigConflictIfStale(err, res)) return;
+    console.error('Import failed:', sanitizeForDiagnostics(err));
+    res.status(400).json({
+      error: 'Failed to process import file.',
+    });
   }
 });
 
@@ -3243,7 +5580,7 @@ app.get('/api/posts/enriched', authenticateToken, async (req: any, res) => {
 export function updateLastCheckTime() {
   const config = getConfig();
   lastCheckTime = Date.now();
-  nextCheckTime = lastCheckTime + (config.checkIntervalMinutes || 5) * 60 * 1000;
+  nextCheckTime = getNextCheckTimestamp(lastCheckTime, getSchedulerIntervalMinutes(config));
 }
 
 export function updateAppStatus(status: Partial<AppStatus>) {
@@ -3263,7 +5600,17 @@ export function getNextCheckTime(): number {
 }
 
 export function getSchedulerWakeSignal(): number {
-  return schedulerWakeSignal;
+  return schedulerCommandState.sequence;
+}
+
+export function getSchedulerCommandsSince(sequence: number) {
+  return readSchedulerCommandsSince(schedulerCommandState, sequence);
+}
+
+export function recalculateNextCheckTime(intervalMinutes = getSchedulerIntervalMinutes(getConfig())): number {
+  nextCheckTime = getNextCheckTimestamp(Date.now(), intervalMinutes);
+  signalSchedulerWake('reschedule');
+  return nextCheckTime;
 }
 
 export function triggerImmediateRun(): void {
@@ -3277,6 +5624,29 @@ export function clearBackfill(id: string, requestId?: string) {
   }
   pendingBackfills = pendingBackfills.filter((bid) => bid.id !== id);
 }
+
+app.use((error: any, _req: any, res: any, next: any) => {
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+  if (error?.type === 'entity.too.large' || error?.status === 413) {
+    sendSafeError(res, 413, 'BODY_TOO_LARGE', 'Request body exceeds this route limit.');
+    return;
+  }
+  if (error instanceof SyntaxError && 'body' in error) {
+    sendSafeError(res, 400, 'INVALID_JSON', 'Request body is not valid JSON.');
+    return;
+  }
+  if (sendConfigConflictIfStale(error, res)) {
+    return;
+  }
+  sendSafeError(res, 500, 'INTERNAL_ERROR', error);
+});
+
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: { code: 'NOT_FOUND', message: 'API route not found.' } });
+});
 
 // Serve the frontend for any other route (middleware approach for Express 5)
 app.use((_req, res) => {

@@ -33,6 +33,14 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "dist", "*.json"]
+    "ignore": [
+      "node_modules",
+      "dist",
+      "web/dist",
+      "playwright-report",
+      "test-results",
+      "blob-report",
+      "*.json"
+    ]
   }
 }

@@ -1,15 +1,44 @@
 import { BskyAgent } from '@atproto/api';
 import { getConfig } from './config-manager.js';
+import { getCanonicalDestinationKey } from './mapping-helpers.js';
+import { runtimeStateService } from './db.js';
 
 const activeAgents = new Map<string, BskyAgent>();
 
+export function clearCachedAgent(mapping: {
+  bskyIdentifier: string;
+  bskyServiceUrl?: string;
+  bskyDid?: string;
+  bskyCanonicalHandle?: string;
+}): void {
+  activeAgents.delete(getCanonicalDestinationKey(mapping));
+}
+
+/**
+ * Drops a cached agent whose session the PDS no longer accepts, so the next
+ * call authenticates again. Without this a revoked or expired refresh token
+ * leaves the destination permanently broken until the process restarts, since
+ * `getAgent` keeps handing back the dead agent.
+ */
+export function invalidateCachedAgentOnAuthFailure(
+  mapping: { bskyIdentifier: string; bskyServiceUrl?: string; bskyDid?: string; bskyCanonicalHandle?: string },
+  errorCategory: string,
+): boolean {
+  if (errorCategory !== 'bsky-auth') return false;
+  const cacheKey = getCanonicalDestinationKey(mapping);
+  return activeAgents.delete(cacheKey);
+}
+
 export async function getAgent(mapping: {
+  id?: string;
   bskyIdentifier: string;
   bskyPassword: string;
   bskyServiceUrl?: string;
+  bskyDid?: string;
+  bskyCanonicalHandle?: string;
 }): Promise<BskyAgent | null> {
   const serviceUrl = mapping.bskyServiceUrl || 'https://bsky.social';
-  const cacheKey = `${mapping.bskyIdentifier}-${serviceUrl}`;
+  const cacheKey = getCanonicalDestinationKey(mapping);
   const existing = activeAgents.get(cacheKey);
   if (existing) return existing;
 
@@ -17,8 +46,16 @@ export async function getAgent(mapping: {
   try {
     await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
     activeAgents.set(cacheKey, agent);
+    if (mapping.id) runtimeStateService.recordDestinationEvent(mapping.id, 'login');
     return agent;
   } catch (err) {
+    if (mapping.id) {
+      runtimeStateService.recordDestinationFailure(
+        mapping.id,
+        'login',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
     console.error(`Failed to login to Bluesky for ${mapping.bskyIdentifier} on ${serviceUrl}:`, err);
     return null;
   }

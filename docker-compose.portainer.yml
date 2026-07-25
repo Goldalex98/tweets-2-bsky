@@ -10,6 +10,11 @@ services:
     environment:
       TWEETS2BSKY_DATA_DIR: /app/data
       JWT_SECRET: ${JWT_SECRET}
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
+      TRUST_PROXY: "true"
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      ENABLE_PROMETHEUS_METRICS: ${ENABLE_PROMETHEUS_METRICS:-false}
+      INGESTION_RATE_LIMIT_PER_MINUTE: ${INGESTION_RATE_LIMIT_PER_MINUTE:-120}
       TZ: America/New_York
 
     expose:
@@ -17,6 +22,13 @@ services:
 
     volumes:
       - tweets2bsky_data:/app/data
+
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
 
     networks:
       - proxy

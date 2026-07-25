@@ -1,15 +1,29 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
 processed_tweets.json
 config.json
 config.json.bak
 config.json.tmp
+config.json.pre-*-backup
 processed/
 npm-debug.log
 .DS_Store
 data/
 web/dist/
+test-results/
+playwright-report/
+blob-report/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.t2b-backup
+*.log
+.jwt-secret
+secrets/
+backups/
 
 # Mac Dashboard App
 macos-dashboard/

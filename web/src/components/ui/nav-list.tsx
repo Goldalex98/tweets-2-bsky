@@ -17,7 +17,9 @@ interface NavListProps<T extends string> {
 
 export function NavList<T extends string>({ items, activeId, onSelect, className, ariaLabel }: NavListProps<T>) {
   return (
-    <nav className={cn('flex flex-col gap-0.5', className)} role="tablist" aria-label={ariaLabel ?? 'Navigation Tabs'}>
+    // These buttons swap the whole page region rather than a tabpanel, so they
+    // are navigation controls with aria-current instead of ARIA tabs.
+    <nav className={cn('flex flex-col gap-0.5', className)} aria-label={ariaLabel ?? 'Section navigation'}>
       {items.map((item) => {
         const Icon = item.icon;
         const isActive = item.id === activeId;
@@ -25,11 +27,10 @@ export function NavList<T extends string>({ items, activeId, onSelect, className
           <button
             key={item.id}
             type="button"
-            role="tab"
-            aria-selected={isActive}
+            aria-current={isActive ? 'page' : undefined}
             onClick={() => onSelect(item.id)}
             className={cn(
-              'flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors',
+              'flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
               isActive ? 'bg-foreground text-background' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
             )}
           >

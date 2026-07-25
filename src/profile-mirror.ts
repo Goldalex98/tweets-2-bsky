@@ -4,6 +4,7 @@ import { Scraper, type Profile as TwitterProfile } from '@the-convocation/twitte
 import axios from 'axios';
 import sharp from 'sharp';
 import { getConfig } from './config-manager.js';
+import type { ProfileMutationDecision } from './profile-policy.js';
 
 const PROFILE_IMAGE_MAX_BYTES = 1_000_000;
 const PROFILE_IMAGE_TARGET_BYTES = 950 * 1024;
@@ -539,6 +540,11 @@ export const buildMirroredDisplayName = (name: string | undefined, username: str
   return truncateGraphemes(merged, 64);
 };
 
+export const buildProfileDisplayName = (name: string | undefined, username: string): string => {
+  const cleanedName = stripMirrorDisplaySuffixes(normalizeWhitespace(name || ''));
+  return truncateGraphemes(cleanedName || `@${normalizeTwitterUsername(username)}`, 64);
+};
+
 export const buildMirroredDescription = (biography: string | undefined, username: string): string => {
   const normalizedUsername = normalizeTwitterUsername(username);
   const intro = `Unofficial mirror account of https://x.com/${normalizedUsername} from Twitter`;
@@ -584,7 +590,7 @@ export const fetchTwitterMirrorProfile = async (inputUsername: string): Promise<
         biography: cleanedBio,
         avatarUrl: normalizeTwitterAvatarUrl(profile.avatar),
         bannerUrl: normalizeTwitterBannerUrl(profile.banner),
-        mirroredDisplayName: buildMirroredDisplayName(cleanedName, resolvedUsername),
+        mirroredDisplayName: buildProfileDisplayName(cleanedName, resolvedUsername),
         mirroredDescription: buildMirroredDescription(cleanedBio, resolvedUsername),
       };
     } catch (error) {
@@ -642,7 +648,11 @@ export const ensureBlueskyBotSelfLabel = async (args: {
   bskyIdentifier: string;
   bskyPassword: string;
   bskyServiceUrl?: string;
+  authorization: ProfileMutationDecision & { allowed: true };
 }): Promise<EnsureBotSelfLabelResult> => {
+  if (args.authorization.action !== 'bot-label') {
+    throw new Error('Bot self-label mutation requires bot-label policy authorization.');
+  }
   const { agent, credentials } = await loginBlueskyAgent(args);
   const repo = agent.session?.did || credentials.did;
   if (!repo) {
@@ -712,7 +722,11 @@ export const ensureBlueskyDisplayNameBotSuffix = async (args: {
   bskyPassword: string;
   bskyServiceUrl?: string;
   twitterUsername?: string;
+  authorization: ProfileMutationDecision & { allowed: true };
 }): Promise<EnsureDisplayNameBotSuffixResult> => {
+  if (args.authorization.action !== 'display-name-suffix') {
+    throw new Error('Display-name mutation requires display-name-suffix policy authorization.');
+  }
   const { agent, credentials } = await loginBlueskyAgent(args);
   const repo = agent.session?.did || credentials.did;
   if (!repo) {
@@ -913,15 +927,23 @@ export const syncBlueskyProfileFromTwitter = async (args: {
   syncDescription?: boolean;
   syncAvatar?: boolean;
   syncBanner?: boolean;
+  authorization: ProfileMutationDecision & { allowed: true };
 }): Promise<MirrorProfileSyncResult> => {
+  if (args.authorization.action !== 'profile-apply' && args.authorization.action !== 'profile-sync-scheduled') {
+    throw new Error('Profile synchronization requires profile policy authorization.');
+  }
+  const authorizedFields = args.authorization.fields;
+  if (!authorizedFields) {
+    throw new Error('Profile synchronization requires explicitly authorized fields.');
+  }
   const twitterProfile = await fetchTwitterMirrorProfile(args.twitterUsername);
   const nextMirrorState = buildMirrorStateFromTwitterProfile(twitterProfile);
   const rawChanged = hasMirrorStateChanges(args.previousSync, nextMirrorState);
   const changed = {
-    displayName: (args.syncDisplayName ?? true) ? rawChanged.displayName : false,
-    description: (args.syncDescription ?? true) ? rawChanged.description : false,
-    avatar: (args.syncAvatar ?? true) ? rawChanged.avatar : false,
-    banner: (args.syncBanner ?? true) ? rawChanged.banner : false,
+    displayName: authorizedFields.displayName && (args.syncDisplayName ?? true) ? rawChanged.displayName : false,
+    description: authorizedFields.description && (args.syncDescription ?? true) ? rawChanged.description : false,
+    avatar: authorizedFields.avatar && (args.syncAvatar ?? true) ? rawChanged.avatar : false,
+    banner: authorizedFields.banner && (args.syncBanner ?? true) ? rawChanged.banner : false,
   };
   const bsky = await validateBlueskyCredentials({
     bskyIdentifier: args.bskyIdentifier,

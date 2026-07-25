@@ -1,0 +1,76 @@
+name: Quality
+
+# Default-branch pushes reach this suite through the Docker publish workflows,
+# which call it before building. A push trigger here would run it a third time.
+on:
+  workflow_call:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.9'
+
+      - name: Cache Bun packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Advisories against the resolved tree, not the declared ranges: stale
+      # lockfile pins are how this project accumulated 68 advisories unnoticed.
+      - name: Audit dependencies
+        run: bun audit --audit-level=high
+
+      - name: Check lint
+        run: bun run lint:check
+
+      - name: Typecheck server
+        run: bun run typecheck:server
+
+      - name: Typecheck web
+        run: bun run typecheck:web
+
+      - name: Run unit tests
+        run: bun run test:unit
+
+      - name: Run integration tests
+        run: bun run test:integration
+
+      - name: Run copied-volume release tests
+        run: bun run test:release
+
+      - name: Build
+        run: bun run build
+
+      - name: Install Playwright Chromium
+        run: bun run playwright:install --with-deps
+
+      - name: Run mocked dashboard E2E
+        run: bun run test:e2e
+
+      - name: Upload failed E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 5

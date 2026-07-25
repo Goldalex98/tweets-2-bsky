@@ -5,6 +5,11 @@
 **Primary runtime:** Bun, TypeScript, Express, React, SQLite  
 **Purpose:** Evolve the project from a basic X-to-Bluesky mapping tool into a safer, clearer, aggregate-account-friendly cross-posting platform.
 
+> **Status: historical.** Most of this plan has shipped, and some sections still describe
+> pre-enhancement behavior or list delivered features as optional. For the architecture, APIs, and
+> configuration that exist today, read `docs/architecture.md` and the rest of `docs/`. Remaining
+> unimplemented work is tracked under "Future ideas" in `docs/architecture.md`.
+
 ---
 
 ## 1. Executive Summary

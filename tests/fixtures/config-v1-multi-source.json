@@ -1,0 +1,27 @@
+{
+  "twitter": {
+    "authToken": "<redacted>",
+    "ct0": "<redacted>",
+    "backupAuthToken": "<redacted>",
+    "backupCt0": "<redacted>"
+  },
+  "mappings": [
+    {
+      "id": "legacy-multi",
+      "twitterUsernames": [" Primary_Source ", "@SECONDARY_SRC", "primary_source"],
+      "bskyIdentifier": "AGGREGATE.EXAMPLE",
+      "bskyPassword": "<redacted>",
+      "profileSyncSourceUsername": "@missing-source"
+    }
+  ],
+  "groups": [
+    {
+      "name": "Research"
+    },
+    {
+      "name": "research",
+      "emoji": "duplicate"
+    }
+  ],
+  "checkIntervalMinutes": 7.6
+}

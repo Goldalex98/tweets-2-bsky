@@ -1,29 +1,57 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import { getConfig } from './config-manager.js';
+import type {
+  AIConfig,
+  AITextCapability,
+  DestinationAIOverrides,
+} from './config/schemas.js';
+import { aiProviderUsageService } from './db.js';
 
-interface ResolvedAiProvider {
+export interface ResolvedAiProvider {
   provider: 'gemini' | 'openai' | 'anthropic' | 'custom';
   apiKey?: string;
   model?: string;
   baseUrl?: string;
 }
 
+export interface AIProviderRequest {
+  purpose: 'image-alt-text' | AITextCapability | 'provider-test';
+  prompt: string;
+  image?: { buffer: Buffer; mimeType: string };
+  maxOutputChars: number;
+}
+
+export interface AIProviderClient {
+  complete(request: AIProviderRequest): Promise<string | undefined>;
+}
+
 // Determine Provider and Credentials.
 // Priority: AI Config > Legacy Gemini Config > Environment Variables.
 // Returns null when alt-text generation is effectively disabled (no usable credentials).
-function resolveAiProvider(): ResolvedAiProvider | null {
-  const config = getConfig();
-
-  const provider = config.ai?.provider || 'gemini';
-  let apiKey = config.ai?.apiKey;
-  let model = config.ai?.model;
-  const baseUrl = config.ai?.baseUrl;
+export function resolveAiProvider(
+  aiConfig: AIConfig = getConfig().ai,
+  overrides?: DestinationAIOverrides,
+  purpose: 'image-alt-text' | AITextCapability = 'image-alt-text',
+): ResolvedAiProvider | null {
+  const provider = aiConfig.provider || 'gemini';
+  const override =
+    purpose === 'image-alt-text'
+      ? overrides?.imageAltText
+      : overrides?.textCapabilities[purpose];
+  const globallyEnabled =
+    purpose === 'image-alt-text'
+      ? aiConfig.enabled
+      : aiConfig.textCapabilities[purpose].enabled;
+  if (override === 'disabled' || (override !== 'enabled' && !globallyEnabled)) return null;
+  let apiKey = aiConfig.apiKey;
+  let model = aiConfig.model;
+  const baseUrl = aiConfig.baseUrl;
 
   // Fallbacks for Environment Variables
   if (!apiKey) {
     if (process.env.AI_API_KEY) apiKey = process.env.AI_API_KEY;
-    else if (provider === 'gemini') apiKey = config.geminiApiKey || process.env.GEMINI_API_KEY;
+    else if (provider === 'gemini') apiKey = process.env.GEMINI_API_KEY;
     else if (provider === 'openai') apiKey = process.env.OPENAI_API_KEY;
     else if (provider === 'anthropic') apiKey = process.env.ANTHROPIC_API_KEY;
   }
@@ -56,45 +84,80 @@ function resolveAiProvider(): ResolvedAiProvider | null {
 
 // Whether alt-text generation is configured/enabled at all. Many instances
 // run without it; callers should skip the generation step entirely when false.
-export function isAltTextConfigured(): boolean {
-  return resolveAiProvider() !== null;
+export function isAltTextConfigured(overrides?: DestinationAIOverrides, aiConfig = getConfig().ai): boolean {
+  return resolveAiProvider(aiConfig, overrides) !== null;
 }
 
 export async function generateAltText(
   buffer: Buffer,
   mimeType: string,
   contextText: string,
+  options: { overrides?: DestinationAIOverrides; client?: AIProviderClient; config?: AIConfig } = {},
 ): Promise<string | undefined> {
-  const resolved = resolveAiProvider();
+  const aiConfig = options.config ?? getConfig().ai;
+  const resolved = resolveAiProvider(aiConfig, options.overrides);
   if (!resolved) {
     return undefined;
   }
   const { provider, apiKey, model, baseUrl } = resolved;
+  const started = Date.now();
+  aiProviderUsageService.record({
+    purpose: 'image-alt-text',
+    provider,
+    model,
+    status: 'request',
+    latencyMs: 0,
+  });
 
   try {
     const prompt = buildAltTextPrompt(contextText);
-    switch (provider) {
-      case 'gemini':
-        // apiKey is guaranteed by check above
-        return normalizeAltTextOutput(
-          await callGemini(apiKey!, model || 'models/gemini-2.5-flash', buffer, mimeType, prompt),
-        );
-      case 'openai':
-      case 'custom':
-        return normalizeAltTextOutput(
-          await callOpenAICompatible(apiKey, model || 'gpt-4o', baseUrl, buffer, mimeType, prompt),
-        );
-      case 'anthropic':
-        // apiKey is guaranteed by check above
-        return normalizeAltTextOutput(
-          await callAnthropic(apiKey!, model || 'claude-3-5-sonnet-20241022', baseUrl, buffer, mimeType, prompt),
-        );
-      default:
-        console.warn(`[AI] ⚠️ Unknown provider: ${provider}`);
-        return undefined;
+    let raw: string | undefined;
+    if (options.client) {
+      raw = await options.client.complete({
+        purpose: 'image-alt-text',
+        prompt,
+        image: { buffer, mimeType },
+        maxOutputChars: aiConfig.maxAltTextChars,
+      });
+    } else {
+      switch (provider) {
+        case 'gemini':
+          raw = await callGemini(apiKey ?? '', model || 'models/gemini-2.5-flash', buffer, mimeType, prompt);
+          break;
+        case 'openai':
+        case 'custom':
+          raw = await callOpenAICompatible(apiKey, model || 'gpt-4o', baseUrl, buffer, mimeType, prompt);
+          break;
+        case 'anthropic':
+          raw = await callAnthropic(
+            apiKey ?? '',
+            model || 'claude-3-5-sonnet-20241022',
+            baseUrl,
+            buffer,
+            mimeType,
+            prompt,
+          );
+          break;
+      }
     }
+    aiProviderUsageService.record({
+      purpose: 'image-alt-text',
+      provider,
+      model,
+      status: 'success',
+      latencyMs: Date.now() - started,
+    });
+    return normalizeAltTextOutput(raw, aiConfig.maxAltTextChars);
   } catch (err) {
-    console.warn(`[AI] ⚠️ Failed to generate alt text with ${provider}: ${(err as Error).message}`);
+    aiProviderUsageService.record({
+      purpose: 'image-alt-text',
+      provider,
+      model,
+      status: 'failure',
+      latencyMs: Date.now() - started,
+      errorCategory: 'provider-error',
+    });
+    console.warn(`[AI] ⚠️ Failed to generate alt text with ${provider}: ${sanitizeProviderError(err)}`);
     return undefined;
   }
 }
@@ -119,7 +182,7 @@ function buildAltTextPrompt(contextText: string): string {
   ].join(' ');
 }
 
-function normalizeAltTextOutput(output: string | undefined): string | undefined {
+function normalizeAltTextOutput(output: string | undefined, maxChars = 1000): string | undefined {
   if (!output) return undefined;
 
   let cleaned = output.trim();
@@ -138,7 +201,7 @@ function normalizeAltTextOutput(output: string | undefined): string | undefined 
   cleaned = cleaned.replace(/^[\-\*\d\.\)]+\s*/g, '').trim();
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
-  return cleaned || undefined;
+  return cleaned ? cleaned.slice(0, maxChars).trim() : undefined;
 }
 
 async function callGemini(
@@ -265,4 +328,245 @@ async function callAnthropic(
   });
 
   return response.data.content[0]?.text || undefined;
+}
+
+function sanitizeProviderError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw
+    .replace(/(?:sk|AIza|Bearer)[-_A-Za-z0-9.]{8,}/g, '[redacted]')
+    .replace(/[\r\n\t]+/g, ' ')
+    .slice(0, 240);
+}
+
+async function callProviderText(
+  resolved: ResolvedAiProvider,
+  prompt: string,
+): Promise<string | undefined> {
+  if (resolved.provider === 'gemini') {
+    const model = new GoogleGenerativeAI(resolved.apiKey ?? '').getGenerativeModel(
+      { model: resolved.model || 'models/gemini-2.5-flash' },
+      { timeout: 60_000 },
+    );
+    const result = await model.generateContent(prompt);
+    return (await result.response).text();
+  }
+  if (resolved.provider === 'anthropic') {
+    const url = resolved.baseUrl
+      ? `${resolved.baseUrl.replace(/\/+$/, '')}/v1/messages`
+      : 'https://api.anthropic.com/v1/messages';
+    const response = await axios.post(
+      url,
+      {
+        model: resolved.model || 'claude-3-5-sonnet-20241022',
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }],
+      },
+      {
+        headers: {
+          'x-api-key': resolved.apiKey ?? '',
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json',
+        },
+        timeout: 60_000,
+      },
+    );
+    return response.data.content?.[0]?.text;
+  }
+  const url = resolved.baseUrl
+    ? `${resolved.baseUrl.replace(/\/+$/, '')}/chat/completions`
+    : 'https://api.openai.com/v1/chat/completions';
+  const response = await axios.post(
+    url,
+    {
+      model: resolved.model || 'gpt-4o',
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 500,
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(resolved.apiKey ? { Authorization: `Bearer ${resolved.apiKey}` } : {}),
+      },
+      timeout: 60_000,
+    },
+  );
+  return response.data.choices?.[0]?.message?.content;
+}
+
+export function createAIProviderClient(resolved: ResolvedAiProvider): AIProviderClient {
+  return {
+    async complete(request) {
+      const image = request.image;
+      if (!image) return callProviderText(resolved, request.prompt);
+      const empty = Buffer.alloc(0);
+      const buffer = image?.buffer ?? empty;
+      const mimeType = image?.mimeType ?? 'image/png';
+      switch (resolved.provider) {
+        case 'gemini':
+          return callGemini(
+            resolved.apiKey ?? '',
+            resolved.model || 'models/gemini-2.5-flash',
+            buffer,
+            mimeType,
+            request.prompt,
+          );
+        case 'openai':
+        case 'custom':
+          return callOpenAICompatible(
+            resolved.apiKey,
+            resolved.model || 'gpt-4o',
+            resolved.baseUrl,
+            buffer,
+            mimeType,
+            request.prompt,
+          );
+        case 'anthropic':
+          return callAnthropic(
+            resolved.apiKey ?? '',
+            resolved.model || 'claude-3-5-sonnet-20241022',
+            resolved.baseUrl,
+            buffer,
+            mimeType,
+            request.prompt,
+          );
+      }
+    },
+  };
+}
+
+// Public-domain-style generated 1x1 transparent PNG. Provider tests never use
+// or read user media.
+const DISCLOSED_TEST_IMAGE = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
+
+export async function testAIProvider(options: {
+  config?: AIConfig;
+  client?: AIProviderClient;
+  recordUsage?: typeof aiProviderUsageService.record;
+} = {}): Promise<{
+  success: boolean;
+  provider: string;
+  model?: string;
+  latencyMs: number;
+  testPayload: 'generated-1x1-transparent-png';
+  error?: string;
+}> {
+  const config = options.config ?? getConfig().ai;
+  // Provider testing is explicit and may validate credentials before the
+  // feature toggle is enabled.
+  const resolved = resolveAiProvider({ ...config, enabled: true });
+  if (!resolved) {
+    return {
+      success: false,
+      provider: config.provider,
+      model: config.model,
+      latencyMs: 0,
+      testPayload: 'generated-1x1-transparent-png',
+      error: 'Provider credentials or base URL are incomplete.',
+    };
+  }
+  const client = options.client ?? createAIProviderClient(resolved);
+  const record = options.recordUsage ?? aiProviderUsageService.record.bind(aiProviderUsageService);
+  const started = Date.now();
+  record({
+    purpose: 'provider-test',
+    provider: resolved.provider,
+    model: resolved.model,
+    status: 'request',
+    latencyMs: 0,
+  });
+  try {
+    await client.complete({
+      purpose: 'provider-test',
+      prompt: 'Connectivity test. Briefly identify this disclosed generated transparent test image.',
+      image: { buffer: DISCLOSED_TEST_IMAGE, mimeType: 'image/png' },
+      maxOutputChars: 80,
+    });
+    const latencyMs = Date.now() - started;
+    record({
+      purpose: 'provider-test',
+      provider: resolved.provider,
+      model: resolved.model,
+      status: 'success',
+      latencyMs,
+    });
+    return {
+      success: true,
+      provider: resolved.provider,
+      model: resolved.model,
+      latencyMs,
+      testPayload: 'generated-1x1-transparent-png',
+    };
+  } catch (error) {
+    const latencyMs = Date.now() - started;
+    record({
+      purpose: 'provider-test',
+      provider: resolved.provider,
+      model: resolved.model,
+      status: 'failure',
+      latencyMs,
+      errorCategory: 'provider-error',
+    });
+    return {
+      success: false,
+      provider: resolved.provider,
+      model: resolved.model,
+      latencyMs,
+      testPayload: 'generated-1x1-transparent-png',
+      error: sanitizeProviderError(error),
+    };
+  }
+}
+
+export async function previewTextCapability(input: {
+  capability: AITextCapability;
+  text: string;
+  overrides?: DestinationAIOverrides;
+  client?: AIProviderClient;
+}): Promise<{ enabled: boolean; purpose: AITextCapability; output?: string }> {
+  const config = getConfig();
+  const resolved = resolveAiProvider(config.ai, input.overrides, input.capability);
+  if (!resolved) return { enabled: false, purpose: input.capability };
+  const client = input.client ?? createAIProviderClient(resolved);
+  const instruction: Record<AITextCapability, string> = {
+    translation: 'Translate the post while preserving meaning. Return only the translated text.',
+    summarization: 'Summarize the post faithfully. Return only the summary.',
+    cleanup: 'Clean up grammar and readability without changing meaning. Return only the rewritten text.',
+    hashtags: 'Suggest relevant hashtags. Return only a short space-separated hashtag list.',
+  };
+  const started = Date.now();
+  aiProviderUsageService.record({
+    purpose: input.capability,
+    provider: resolved.provider,
+    model: resolved.model,
+    status: 'request',
+    latencyMs: 0,
+  });
+  try {
+    const output = await client.complete({
+      purpose: input.capability,
+      prompt: `${instruction[input.capability]}\n\nPost:\n${input.text.slice(0, 5000)}`,
+      maxOutputChars: 2000,
+    });
+    aiProviderUsageService.record({
+      purpose: input.capability,
+      provider: resolved.provider,
+      model: resolved.model,
+      status: 'success',
+      latencyMs: Date.now() - started,
+    });
+    return { enabled: true, purpose: input.capability, output: output?.slice(0, 2000).trim() };
+  } catch (error) {
+    aiProviderUsageService.record({
+      purpose: input.capability,
+      provider: resolved.provider,
+      model: resolved.model,
+      status: 'failure',
+      latencyMs: Date.now() - started,
+      errorCategory: 'provider-error',
+    });
+    throw new Error(sanitizeProviderError(error));
+  }
 }

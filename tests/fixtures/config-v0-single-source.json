@@ -1,0 +1,16 @@
+{
+  "twitter": {
+    "authToken": "<redacted>",
+    "ct0": "<redacted>"
+  },
+  "mappings": [
+    {
+      "id": "legacy-single",
+      "twitterUsername": " @Legacy_Source ",
+      "bskyIdentifier": "LEGACY.EXAMPLE",
+      "bskyPassword": "<redacted>",
+      "enabled": true
+    }
+  ],
+  "checkIntervalMinutes": 5
+}

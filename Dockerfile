@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1-slim AS build
+FROM oven/bun:1.3.9-slim AS build
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN bun run build \
   && bun install --frozen-lockfile --production
 
 
-FROM oven/bun:1-slim AS runtime
+FROM oven/bun:1.3.9-slim AS runtime
 
 WORKDIR /app
 
@@ -32,7 +32,6 @@ ENV NODE_ENV=production \
   HOST=0.0.0.0 \
   PORT=3000 \
   TWEETS2BSKY_DATA_DIR=/app/data \
-  SCHEDULED_ACCOUNT_TIMEOUT_MS=480000 \
   CHROME_BIN=/usr/bin/chromium \
   PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
@@ -57,7 +56,7 @@ VOLUME ["/app/data"]
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 CMD ["bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/api/auth/bootstrap-status').then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 CMD ["bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/readyz').then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bun", "dist/index.js"]

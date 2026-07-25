@@ -2,6 +2,11 @@
 
 Cross-post from Twitter/X to Bluesky with thread support, media handling, account mapping, and a web dashboard.
 
+Current release: app `2.0.0`, schema v6 with canonical sources, destinations, routes, durable
+queue/checkpoints, content routing/moderation/dedup, webhook/API ingestion, digests, encrypted
+configuration, and WAL-consistent backup/restore. Bun is the canonical runtime and package manager;
+`bun.lock` is the only lockfile (never add `package-lock.json`).
+
 This repo is also mirrored on Tangled: [j4ck.xyz/tweets2bsky](https://tangled.org/j4ck.xyz/tweets2bsky)
 
 ## How It Works (Simple)
@@ -143,6 +148,17 @@ kill "$(cat data/runtime/tweets-2-bsky.pid)"
 4. Add a mapping (Twitter source usernames -> Bluesky account).
 5. Click `Run now`.
 
+## Security and Disaster Recovery
+
+The dashboard uses `HttpOnly` session cookies with CSRF protection; bearer tokens remain supported
+for CLI/automation. Optional `CONFIG_ENCRYPTION_KEY` encryption protects persisted provider
+credentials with AES-256-GCM. Settings → Data Management can create redacted or full
+WAL-consistent backup bundles and validate/restore them; full browser backups and restore apply
+require current-admin reauthentication and typed confirmation.
+
+See [Security, encryption, backups, and restore](docs/security-and-backups.md) for key generation,
+Docker environment settings, key-loss recovery, CLI migration/rotation, backup, and restore steps.
+
 ## Twitter/X Integration Notes
 
 - This project does not use Twitter's paid official API.
@@ -163,6 +179,21 @@ The daemon splits each cycle into two independent halves so posting never delays
 The queue survives restarts: anything mid-flight when the process dies is re-armed on boot, and duplicates are impossible because the queue and the processed-history table share the same tweet-id key. Tweets that repeatedly fail to post are parked as `failed` (visible in the dashboard, with admin Retry/Clear buttons) instead of retrying forever.
 
 The dashboard's queue numbers read straight from SQLite, so what you see queued is exactly what will post.
+
+Queue operations are scoped by item, route/source, destination, or request. Failed items can be inspected,
+retried, or cleared; pending items can be cancelled (bulk cancellation requires explicit confirmation).
+Items already being processed are protected from deletion. Long posts save a checkpoint after every
+successful Bluesky thread chunk and resume from the first missing chunk after a crash or retry.
+
+Operational endpoints:
+
+- `GET /healthz` and `GET /readyz` are minimal unauthenticated probes with no account identifiers.
+- `GET /api/health/details` and `GET /api/metrics` require dashboard authentication.
+- `GET /api/metrics/prometheus` is admin-only and available when `ENABLE_PROMETHEUS_METRICS=true`.
+
+Generic webhook notifications can be configured under Settings or with `bun run cli -- notifications`.
+Webhooks support event filters, HMAC signatures, retry/backoff, HTTPS enforcement, and private-network
+blocking. The URL and signing secret are never returned by the settings API.
 
 Tuning (optional `.env` values, sensible defaults built in):
 
@@ -194,6 +225,10 @@ bun run cli -- run-now
 bun run cli -- run-now --dry-run
 bun run cli -- add-mapping
 bun run cli -- backfill <mapping-id-or-handle> --limit 50
+bun run cli -- queue-list --destination <destination-id>
+bun run cli -- queue-item <destination-storage-key> <tweet-id> --action retry
+bun run cli -- queue-scope cancel-pending --route <route-id> --confirm-clear-pending
+bun run cli -- notifications
 ```
 
 ## Updating
@@ -227,14 +262,54 @@ Security basics:
 - Set an explicit `JWT_SECRET` in `.env` for predictable secret management.
 - Keep `config.json`, cookie values, and `.env` private.
 
+## Webhook/API ingestion and digests
+
+Admins can create canonical `webhook` or `api` sources, connect them to one or
+more destinations, and create source-bound credentials. Tokens and optional
+HMAC secrets are displayed once; only a token hash and an encrypted HMAC secret
+are retained. Send normalized posts to `POST /api/ingest/v1/posts` with
+`Authorization: Bearer ...` and a unique `Idempotency-Key`. HMAC credentials
+also require `X-T2B-Timestamp`, `X-T2B-Nonce`, and `X-T2B-Signature`.
+
+Inbound traffic must terminate HTTPS at a trusted reverse proxy. Set
+`TRUST_PROXY=true` only when that proxy overwrites forwarding headers. Docker
+and Portainer deployments should persist the data directory (SQLite contains
+credentials, replay state, digest entries, and checkpoints) and provide the
+same `CONFIG_ENCRYPTION_KEY` after every restart.
+
+Routes independently select immediate or digest delivery. Digest routes have a
+timezone/cadence, grouping template, and size limits; preview and manual
+publish operations never remove entries. Failed digest jobs retry separately
+from the immediate queue and resume from durable chunk checkpoints.
+
+## Documentation
+
+- [Architecture and current compatibility model](docs/architecture.md)
+- [Configuration migration and schema](docs/config-v3-migration.md)
+- [Aggregate destinations, profile policy, scheduler, sources, queue, notifications, ingestion, and digests](docs/operations.md)
+- [AI, routing, moderation, and deduplication](docs/content-routing-and-ai.md)
+- [X and Bluesky rate limits, and how the app stays inside them](docs/rate-limits.md)
+- [Security, encryption, backup, and restore](docs/security-and-backups.md)
+- [Development, release validation, upgrade, and rollback](docs/development-and-release.md)
+
+Sections labeled **Future ideas** describe roadmap concepts only; all other behavior above is implemented
+and covered by unit, integration, copied-volume release, or mocked browser tests.
+
 ## Development
 
 ```bash
+bun install --frozen-lockfile
 bun run dev
 bun run dev:web
 bun run build
+bun run lint:check
 bun run typecheck
-bun run lint
+bun run test:unit
+bun run test:integration
+bun run test:release
+bun run playwright:install
+bun run test:e2e
+bun run release:validate
 ```
 
 ## Troubleshooting
