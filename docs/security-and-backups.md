@@ -19,6 +19,22 @@ cross-origin dashboard access. With no origin list, cross-origin browser access 
 Password changes, admin password resets, and role/permission changes increment the user's token
 version and immediately invalidate previously issued sessions and bearer tokens.
 
+Destructive admin dashboard actions also require **step-up authentication**: the caller must supply
+the current admin password (`password` body field or `x-reauth-password`) and a typed confirmation
+string (`confirmation` body field or `x-destructive-confirmation`). The confirmation tokens are:
+
+| Action | Confirmation |
+|--------|--------------|
+| Delete all Bluesky posts for a destination | `DELETE_ALL_POSTS` |
+| Run in-app service update | `RUN_UPDATE` |
+| Import configuration | `IMPORT_CONFIG` |
+| Reset another user's password | `RESET_USER_PASSWORD` |
+| Clear all queued backfills | `CLEAR_ALL_BACKFILLS` |
+| Full config export / full backup create & restore | existing `EXPORT_WITH_SECRETS` / backup confirmations |
+
+Bulk destination backfill additionally requires the `queueBackfills` permission (admins always pass)
+and rejects unknown destination ids with HTTP 404 instead of treating them as managed.
+
 Signing out does the same: `POST /api/logout` clears the browser cookies **and** increments the token
 version, so it is an all-sessions logout. Every other browser session and every bearer token issued
 for that account stops working, because clearing a cookie cannot retire a token an attacker already

@@ -1179,8 +1179,21 @@ export default function DashboardApp() {
                 })
               }
               onRunUpdate={() => {
+                const confirmation = window.prompt('Type RUN_UPDATE to start a service update.');
+                if (confirmation !== 'RUN_UPDATE') return;
+                const password = window.prompt('Enter your admin password to confirm.');
+                if (!password) return;
                 setUpdateBusy(true);
-                void api.post('/api/update').then(() => settings.refresh()).then(() => showNotice('success', 'Update started.')).catch((error) => handleError(error, 'Failed to start update.')).finally(() => setUpdateBusy(false));
+                void api
+                  .post(
+                    '/api/update',
+                    { confirmation: 'RUN_UPDATE', password },
+                    { headers: { 'x-destructive-confirmation': 'RUN_UPDATE', 'x-reauth-password': password } },
+                  )
+                  .then(() => settings.refresh())
+                  .then(() => showNotice('success', 'Update started.'))
+                  .catch((error) => handleError(error, 'Failed to start update.'))
+                  .finally(() => setUpdateBusy(false));
               }}
               onAddDestination={openAdd}
               onExport={() => void run(async () => {
@@ -1322,13 +1335,34 @@ export default function DashboardApp() {
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (!file) return;
-          void run(async () => {
-            const version = settings.scheduler;
-            if (!version) throw new Error('Settings are still loading; retry the import in a moment.');
-            await api.post('/api/config/import', withConfigVersion(JSON.parse(await file.text()), version));
-            await Promise.all([destinations.fetchDestinations(), settings.refresh()]);
-          }, 'Configuration imported.');
-          event.target.value = '';
+          void (async () => {
+            const confirmation = window.prompt('Type IMPORT_CONFIG to import this configuration.');
+            if (confirmation !== 'IMPORT_CONFIG') {
+              event.target.value = '';
+              return;
+            }
+            const password = window.prompt('Enter your admin password to confirm the import.');
+            if (!password) {
+              event.target.value = '';
+              return;
+            }
+            await run(async () => {
+              const version = settings.scheduler;
+              if (!version) throw new Error('Settings are still loading; retry the import in a moment.');
+              const payload = withConfigVersion(
+                { ...JSON.parse(await file.text()), confirmation: 'IMPORT_CONFIG', password },
+                version,
+              );
+              await api.post('/api/config/import', payload, {
+                headers: {
+                  'x-destructive-confirmation': 'IMPORT_CONFIG',
+                  'x-reauth-password': password,
+                },
+              });
+              await Promise.all([destinations.fetchDestinations(), settings.refresh()]);
+            }, 'Configuration imported.');
+            event.target.value = '';
+          })();
         }}
       />
       <input

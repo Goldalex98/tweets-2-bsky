@@ -116,6 +116,7 @@ import {
   getDestinationStorageKey,
   normalizeTwitterUsername,
   parseTwitterUsernameInput,
+  resolveDestinationStorageKey,
   resolveProfileSyncSourceUsername,
 } from './mapping-helpers.js';
 import { applyPostingPolicy, validateAttributionTemplate } from './post-transform.js';
@@ -2261,6 +2262,39 @@ const verifyCurrentAdminPassword = async (request: AuthedRequest): Promise<boole
   return Boolean(user && (await bcrypt.compare(password, user.passwordHash)));
 };
 
+/** Typed confirmation + current-admin password for destructive admin mutations. */
+const requireDestructiveAdminStepUp = async (
+  request: AuthedRequest,
+  response: Response,
+  expectedConfirmation: string,
+): Promise<boolean> => {
+  const header =
+    typeof request.headers['x-destructive-confirmation'] === 'string'
+      ? request.headers['x-destructive-confirmation']
+      : undefined;
+  const bodyConfirmation =
+    typeof request.body?.confirmation === 'string' ? request.body.confirmation : undefined;
+  if (header !== expectedConfirmation && bodyConfirmation !== expectedConfirmation) {
+    response.status(403).json({
+      error: {
+        code: 'CONFIRMATION_REQUIRED',
+        message: `Confirmation ${expectedConfirmation} is required.`,
+      },
+    });
+    return false;
+  }
+  if (!(await verifyCurrentAdminPassword(request))) {
+    response.status(401).json({
+      error: {
+        code: 'REAUTHENTICATION_FAILED',
+        message: 'Current admin password verification is required.',
+      },
+    });
+    return false;
+  }
+  return true;
+};
+
 function reconcileUpdateJobState() {
   if (!updateJobState.running) {
     return;
@@ -2453,6 +2487,7 @@ app.use(
     saveCanonicalConfig,
     rejectStaleConfigMutation,
     canManageDestination,
+    canQueueBackfills: (user) => canQueueBackfills(user as AuthenticatedUser),
     queueBackfill,
     sendSafeError,
   }),
@@ -2830,7 +2865,8 @@ app.put('/api/admin/users/:id', authenticateToken, requireAdmin, asAuthedHandler
   res.json(summary || null);
 }));
 
-app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'RESET_USER_PASSWORD'))) return;
   const { id } = req.params;
   const config = getConfig();
   const userIndex = config.users.findIndex((user) => user.id === id);
@@ -2855,7 +2891,7 @@ app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin,
   };
   saveConfig(config);
   res.json({ success: true });
-});
+}));
 
 app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   const { id } = req.params;
@@ -4907,7 +4943,8 @@ app.delete('/api/mappings/:id/cache', authenticateToken, requireAdmin, (req, res
   res.json({ success: true, message: 'Cache cleared for all associated accounts' });
 });
 
-app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'DELETE_ALL_POSTS'))) return;
   const id = routeParam(typeof req.params.id === 'string' ? req.params.id : undefined);
   if (!id) {
     res.status(400).json({ error: 'Missing destination id.' });
@@ -4923,17 +4960,17 @@ app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, 
   try {
     const deletedCount = await deleteAllPosts(id);
 
-    dbService.deleteTweetsByBskyIdentifier(getDestinationStorageKey(mapping));
+    dbService.deleteTweetsByBskyIdentifier(resolveDestinationStorageKey(mapping));
 
     res.json({
       success: true,
       message: `Deleted ${deletedCount} posts from ${mapping.bskyIdentifier} and cleared local cache.`,
     });
   } catch (err) {
-    console.error('Failed to delete all posts:', err);
-    res.status(500).json({ error: (err as Error).message });
+    console.error('Failed to delete all posts:', sanitizeForDiagnostics(err));
+    sendSafeError(res, 500, 'DELETE_ALL_POSTS_FAILED', err);
   }
-});
+}));
 
 // --- Twitter Config Routes (Admin Only) ---
 
@@ -5696,7 +5733,8 @@ app.get('/api/update-status', authenticateToken, requireAdmin, (_req, res) => {
   res.json(getUpdateStatusPayload());
 });
 
-app.post('/api/update', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
+app.post('/api/update', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'RUN_UPDATE'))) return;
   const startedBy = getActorLabel(req.user);
   const result = startUpdateJob(startedBy);
   if (!result.ok) {
@@ -5724,7 +5762,8 @@ app.post('/api/run-now', authenticateToken, asAuthedHandler((req, res) => {
   res.json({ success: true, message: 'Check triggered' });
 }));
 
-app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res) => {
+app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
+  if (!(await requireDestructiveAdminStepUp(req, res, 'CLEAR_ALL_BACKFILLS'))) return;
   pendingBackfills = [];
   postQueueService.cancelPendingBackfills();
   updateAppStatus({
@@ -5735,7 +5774,7 @@ app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res)
   });
   signalSchedulerWake();
   res.json({ success: true, message: 'All backfills cleared' });
-});
+}));
 
 app.post('/api/backfill/:id', authenticateToken, asAuthedHandler((req, res) => {
   if (!canQueueBackfills(req.user)) {
@@ -5898,23 +5937,36 @@ app.get('/api/config/export', authenticateToken, requireAdmin, asAuthedHandler(a
   res.json(exportData);
 }));
 
-app.post('/api/config/import', importRestoreRateLimiter, authenticateToken, requireAdmin, requireJsonObject, (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Pragma', 'no-cache');
-  try {
-    const currentConfig = getConfig();
-    if (rejectMissingOrStaleConfigRevision(currentConfig, req.body, res)) return;
-    const newConfig = mergeImportedConfig(currentConfig, req.body);
-    saveConfig(newConfig);
-    res.json({ success: true, message: 'Configuration imported successfully' });
-  } catch (err) {
-    if (sendConfigConflictIfStale(err, res)) return;
-    console.error('Import failed:', sanitizeForDiagnostics(err));
-    res.status(400).json({
-      error: 'Failed to process import file.',
-    });
-  }
-});
+app.post(
+  '/api/config/import',
+  importRestoreRateLimiter,
+  authenticateToken,
+  requireAdmin,
+  requireJsonObject,
+  asAuthedHandler(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    if (!(await requireDestructiveAdminStepUp(req, res, 'IMPORT_CONFIG'))) return;
+    try {
+      const currentConfig = getConfig();
+      if (rejectMissingOrStaleConfigRevision(currentConfig, req.body, res)) return;
+      const {
+        password: _reauthPassword,
+        confirmation: _confirmation,
+        ...importPayload
+      } = req.body as Record<string, unknown>;
+      const newConfig = mergeImportedConfig(currentConfig, importPayload);
+      saveConfig(newConfig);
+      res.json({ success: true, message: 'Configuration imported successfully' });
+    } catch (err) {
+      if (sendConfigConflictIfStale(err, res)) return;
+      console.error('Import failed:', sanitizeForDiagnostics(err));
+      res.status(400).json({
+        error: 'Failed to process import file.',
+      });
+    }
+  }),
+);
 
 app.get('/api/recent-activity', authenticateToken, asAuthedHandler((req, res) => {
   const limitCandidate = req.query.limit ? Number(req.query.limit) : 50;

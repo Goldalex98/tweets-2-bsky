@@ -7,6 +7,8 @@ import type { AppConfig } from '../../src/config/schemas.js';
 async function withServer(
   overrides: {
     canManage?: boolean;
+    canQueueBackfills?: boolean;
+    isAdmin?: boolean;
     destinations?: Array<{ id: string; enabled: boolean; groupName?: string; groupEmoji?: string }>;
   },
   run: (baseUrl: string, helpers: { getConfig(): AppConfig; queued: string[] }) => Promise<void>,
@@ -20,11 +22,17 @@ async function withServer(
     ],
   } as unknown as AppConfig;
   const queued: string[] = [];
-  type TestAuthedRequest = Request & { user: { id: string; isAdmin: boolean } };
+  type TestAuthedRequest = Request & {
+    user: { id: string; isAdmin: boolean; permissions?: { queueBackfills?: boolean } };
+  };
   const app = express();
   app.use(express.json());
   app.use((req: TestAuthedRequest, _res: Response, next: NextFunction) => {
-    req.user = { id: 'u1', isAdmin: true };
+    req.user = {
+      id: 'u1',
+      isAdmin: overrides.isAdmin !== false,
+      permissions: { queueBackfills: overrides.canQueueBackfills !== false },
+    };
     next();
   });
   app.use(
@@ -37,6 +45,7 @@ async function withServer(
       },
       rejectStaleConfigMutation: () => false,
       canManageDestination: () => overrides.canManage !== false,
+      canQueueBackfills: (user) => Boolean(user.isAdmin || user.permissions?.queueBackfills),
       queueBackfill: (ids) => {
         queued.push(...ids);
         return { queued: ids.length, skipped: 0 };
@@ -134,6 +143,30 @@ describe('bulk destinations router', () => {
       });
       expect(ok.status).toBe(200);
       expect(queued).toEqual(['d1', 'd2']);
+    });
+  });
+
+  test('rejects bulk backfill without queueBackfills permission', async () => {
+    await withServer({ isAdmin: false, canQueueBackfills: false, canManage: true }, async (baseUrl, { queued }) => {
+      const response = await fetch(`${baseUrl}/api/destinations/bulk/backfill`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ destinationIds: ['d1'], confirmation: 'BACKFILL 1' }),
+      });
+      expect(response.status).toBe(403);
+      expect(queued).toEqual([]);
+    });
+  });
+
+  test('rejects unknown destination ids for bulk backfill', async () => {
+    await withServer({}, async (baseUrl, { queued }) => {
+      const response = await fetch(`${baseUrl}/api/destinations/bulk/backfill`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ destinationIds: ['d1', 'missing'], confirmation: 'BACKFILL 2' }),
+      });
+      expect(response.status).toBe(404);
+      expect(queued).toEqual([]);
     });
   });
 });

@@ -3,7 +3,7 @@ import type { AppConfig } from '../config/schemas.js';
 import type { ConfigVersion } from '../config-manager.js';
 
 type AuthenticatedRequest = Request & {
-  user: { id: string; isAdmin: boolean };
+  user: { id: string; isAdmin: boolean; permissions?: { queueBackfills?: boolean } };
 };
 
 export interface BulkDestinationsRouterDependencies {
@@ -14,6 +14,7 @@ export interface BulkDestinationsRouterDependencies {
   saveCanonicalConfig(config: AppConfig): void;
   rejectStaleConfigMutation(config: AppConfig, body: unknown, response: Response): boolean;
   canManageDestination(user: { id: string; isAdmin: boolean }, destinationId: string): boolean;
+  canQueueBackfills(user: { id: string; isAdmin: boolean; permissions?: { queueBackfills?: boolean } }): boolean;
   queueBackfill(destinationIds: string[]): { queued: number; skipped: number };
   sendSafeError(response: Response, status: number, code: string, error: unknown): void;
 }
@@ -114,6 +115,11 @@ export function createBulkDestinationsRouter(dependencies: BulkDestinationsRoute
     dependencies.authenticateToken,
     (request, response) => {
     try {
+      const user = authedUser(request);
+      if (!dependencies.canQueueBackfills(user)) {
+        response.status(403).json({ error: 'You do not have permission to queue backfills.' });
+        return;
+      }
       const ids = parseIds(request.body?.destinationIds);
       if (ids.length === 0) {
         response.status(400).json({ error: 'destinationIds are required.' });
@@ -127,8 +133,13 @@ export function createBulkDestinationsRouter(dependencies: BulkDestinationsRoute
         response.status(400).json({ error: `Typed confirmation BACKFILL ${ids.length} is required.` });
         return;
       }
+      const config = dependencies.getConfig();
       for (const id of ids) {
-        if (!dependencies.canManageDestination(authedUser(request), id)) {
+        if (!config.destinations.some((entry) => entry.id === id)) {
+          response.status(404).json({ error: `Destination ${id} was not found.` });
+          return;
+        }
+        if (!dependencies.canManageDestination(user, id)) {
           response.status(403).json({ error: `You cannot manage destination ${id}.` });
           return;
         }

@@ -90,6 +90,8 @@ Browser sessions use `HttpOnly` cookies and CSRF tokens. CLI automation may use 
 
 Redacted backups preserve the current deployment's users and credentials during restore. Full backups contain encrypted credentials and require current-admin reauthentication plus typed confirmation. Validation is dry-run and no-write. Restore stages SQLite for startup replacement and retains pre-restore rollback artifacts.
 
+Destructive dashboard operations (service update, config import, delete-all-posts, admin password reset, clear-all backfills) require the same style of current-admin password reauthentication and a typed confirmation token. See [security and backups](security-and-backups.md).
+
 ## Webhook/API ingestion
 
 Create a `webhook` or `api` source, connect routes, then create a source-bound credential. The token and optional HMAC secret are shown once.
