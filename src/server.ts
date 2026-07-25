@@ -5785,6 +5785,8 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
   if (affected !== 1) {
     // The skip record is already consumed; restore it so the retained
     // candidate is not lost and the caller can retry the override.
+    // Keep the original created_at (via saveTweet) so settlement does not
+    // treat this restored skip as fresher than the already-queued item.
     dbService.saveTweet({ ...skipped, override_requeued_at: undefined, override_requeued_by: undefined });
     res.status(409).json({ error: 'The retained candidate is already queued.' });
     return;

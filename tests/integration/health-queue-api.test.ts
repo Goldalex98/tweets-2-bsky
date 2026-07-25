@@ -202,6 +202,7 @@ test('health is redacted and queue operations are permission scoped with active 
               }),
               status: 'skipped',
             });
+            const skipCreatedAtBeforeCollision = dbService.getPost('503', mapping.id)?.created_at;
             postQueueService.enqueue([{
               twitter_id: '503',
               bsky_identifier: 'did:plc:test-destination',
@@ -212,12 +213,23 @@ test('health is redacted and queue operations are permission scoped with active 
               kind: 'scheduled',
               tweet_json: '{}',
             }]);
+            const queuedBeforeCollision = postQueueService.getItem({
+              twitterId: '503',
+              bskyIdentifier: 'did:plc:test-destination',
+            });
             const collidingOverride = await json('/api/activity/' + mapping.id + '/503/override-requeue', {
               method: 'POST',
               headers: { ...adminAuth, 'x-queue-confirmation': 'OVERRIDE_POLICY_SKIP' },
               body: JSON.stringify({ override: true }),
             });
             const skipRecordAfterFailedOverride = dbService.getPost('503', mapping.id);
+            const restoredCreatedAtMs = skipRecordAfterFailedOverride?.created_at
+              ? Date.parse(
+                  /(?:Z|[+-]\d{2}:?\d{2})$/.test(skipRecordAfterFailedOverride.created_at)
+                    ? skipRecordAfterFailedOverride.created_at
+                    : skipRecordAfterFailedOverride.created_at.replace(' ', 'T') + 'Z',
+                )
+              : NaN;
             postQueueService.claimNextBatch(new Set(), new Set([mapping.id]), undefined, 1);
             const activeDelete = await json('/api/queue/items/did%3Aplc%3Atest-destination/500', {
               method: 'DELETE',
@@ -260,6 +272,12 @@ test('health is redacted and queue operations are permission scoped with active 
                 skipRecordAfterFailedOverride !== null &&
                 skipRecordAfterFailedOverride.status === 'skipped' &&
                 !skipRecordAfterFailedOverride.override_requeued_at,
+              skipCreatedAtPreservedAfterCollision:
+                skipRecordAfterFailedOverride?.created_at === skipCreatedAtBeforeCollision,
+              restoredSkipStaleVersusQueuedItem:
+                Number.isFinite(restoredCreatedAtMs) &&
+                typeof queuedBeforeCollision?.enqueued_at === 'number' &&
+                restoredCreatedAtMs < queuedBeforeCollision.enqueued_at,
             }));
           } finally {
             await new Promise((resolve) => listener.close(resolve));
@@ -293,6 +311,8 @@ test('health is redacted and queue operations are permission scoped with active 
       queuedAfterOverrideStatus: 'pending',
       collidingOverrideStatus: 409,
       skipRecordRestoredAfterFailedOverride: true,
+      skipCreatedAtPreservedAfterCollision: true,
+      restoredSkipStaleVersusQueuedItem: true,
     });
     expect(result.cookieDiagnostics).toMatchObject({
       primaryConfigured: true,

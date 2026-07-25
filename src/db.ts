@@ -457,6 +457,10 @@ export const dbService = {
   },
 
   saveTweet(tweet: ProcessedTweet) {
+    // Preserve created_at on REPLACE when the caller still has it (e.g. restoring
+    // a skip after a colliding override-requeue). Dropping it would stamp
+    // CURRENT_TIMESTAMP and make settlement treat the restored skip as fresher
+    // than an already-queued item, silently dropping the queue row.
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO processed_tweets 
       (twitter_id, twitter_username, bsky_identifier, source_type, external_post_id,
@@ -464,8 +468,8 @@ export const dbService = {
        error_category, error_message, policy_version, policy_snapshot, decision_version, decision_trace,
        retained_candidate_json, retained_until, override_requeued_at, override_requeued_by, first_failure_at,
        last_failure_at, attempts, tweet_text, bsky_uri, bsky_cid, bsky_root_uri,
-       bsky_root_cid, bsky_tail_uri, bsky_tail_cid, delivery_diagnostics, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       bsky_root_cid, bsky_tail_uri, bsky_tail_cid, delivery_diagnostics, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
     `);
     stmt.run(
       tweet.twitter_id,
@@ -501,6 +505,7 @@ export const dbService = {
       tweet.bsky_tail_cid || null,
       tweet.delivery_diagnostics ?? null,
       tweet.status,
+      tweet.created_at ?? null,
     );
   },
 
