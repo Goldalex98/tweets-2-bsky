@@ -6,6 +6,7 @@ import { contentPolicyDedupMigration } from './005-content-policy-dedup.js';
 import { retainedPolicyCandidatesMigration } from './006-retained-policy-candidates.js';
 import { normalizedIngestionDigestsMigration } from './007-normalized-ingestion-digests.js';
 import { canonicalQueueIdentityMigration } from './008-canonical-queue-identity.js';
+import { deliveryDiagnosticsMigration } from './009-delivery-diagnostics.js';
 import type { DatabaseMigration, MigrationClock, MigrationDatabase } from './types.js';
 
 export type {
@@ -23,6 +24,7 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
   retainedPolicyCandidatesMigration,
   normalizedIngestionDigestsMigration,
   canonicalQueueIdentityMigration,
+  deliveryDiagnosticsMigration,
 ];
 
 const systemMigrationClock: MigrationClock = {

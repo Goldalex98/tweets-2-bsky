@@ -161,6 +161,7 @@ export interface ProcessedTweet {
   bsky_root_cid?: string;
   bsky_tail_uri?: string;
   bsky_tail_cid?: string;
+  delivery_diagnostics?: string;
   status: 'migrated' | 'skipped' | 'failed';
   created_at?: string;
 }
@@ -201,6 +202,7 @@ interface ProcessedTweetRow {
   bsky_root_cid?: string | null;
   bsky_tail_uri?: string | null;
   bsky_tail_cid?: string | null;
+  delivery_diagnostics?: string | null;
   status: ProcessedTweet['status'];
   created_at?: string;
 }
@@ -237,6 +239,7 @@ const rowToProcessedTweet = (row: ProcessedTweetRow): ProcessedTweet => ({
   bsky_root_cid: row.bsky_root_cid ?? undefined,
   bsky_tail_uri: row.bsky_tail_uri ?? undefined,
   bsky_tail_cid: row.bsky_tail_cid ?? undefined,
+  delivery_diagnostics: row.delivery_diagnostics ?? undefined,
   status: row.status,
   created_at: row.created_at,
 });
@@ -402,8 +405,8 @@ export const dbService = {
        error_category, error_message, policy_version, policy_snapshot, decision_version, decision_trace,
        retained_candidate_json, retained_until, override_requeued_at, override_requeued_by, first_failure_at,
        last_failure_at, attempts, tweet_text, bsky_uri, bsky_cid, bsky_root_uri,
-       bsky_root_cid, bsky_tail_uri, bsky_tail_cid, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       bsky_root_cid, bsky_tail_uri, bsky_tail_cid, delivery_diagnostics, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       tweet.twitter_id,
@@ -437,6 +440,7 @@ export const dbService = {
       tweet.bsky_root_cid || null,
       tweet.bsky_tail_uri || null,
       tweet.bsky_tail_cid || null,
+      tweet.delivery_diagnostics ?? null,
       tweet.status,
     );
   },
@@ -881,6 +885,7 @@ export interface QueueItem {
   last_failure_at?: number;
   enqueued_at: number;
   updated_at: number;
+  delivery_diagnostics?: string;
 }
 
 export interface QueueEnqueueInput {
@@ -990,6 +995,7 @@ const rowToQueueItem = (row: any): QueueItem => ({
   last_failure_at: row.last_failure_at ?? undefined,
   enqueued_at: row.enqueued_at,
   updated_at: row.updated_at,
+  delivery_diagnostics: row.delivery_diagnostics ?? undefined,
 });
 
 export interface QueueScope {
@@ -1216,6 +1222,12 @@ export const postQueueService = {
       twitter_username: group.twitter_username,
       items,
     };
+  },
+
+  setDeliveryDiagnostics(twitterId: string, bskyIdentifier: string, diagnosticsJson: string): void {
+    db.prepare(
+      'UPDATE post_queue SET delivery_diagnostics = ?, updated_at = ? WHERE twitter_id = ? AND bsky_identifier = ?',
+    ).run(diagnosticsJson, Date.now(), twitterId, bskyIdentifier.toLowerCase());
   },
 
   markDone(twitterId: string, bskyIdentifier: string): void {

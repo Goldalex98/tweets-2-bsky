@@ -350,6 +350,15 @@ export default function DashboardApp() {
         },
         pinSync: { ...mapping.profileManagement.pinSync },
       },
+      aiOverrides: {
+        imageAltText: mapping.aiOverrides?.imageAltText ?? 'inherit',
+        textCapabilities: {
+          translation: mapping.aiOverrides?.textCapabilities?.translation ?? 'inherit',
+          summarization: mapping.aiOverrides?.textCapabilities?.summarization ?? 'inherit',
+          cleanup: mapping.aiOverrides?.textCapabilities?.cleanup ?? 'inherit',
+          hashtags: mapping.aiOverrides?.textCapabilities?.hashtags ?? 'inherit',
+        },
+      },
     });
   };
 
@@ -374,6 +383,7 @@ export default function DashboardApp() {
         groupEmoji: editForm.groupEmoji.trim(),
         postingPolicy: editForm.postingPolicy,
         profileManagement: editForm.profileManagement,
+        aiOverrides: editForm.aiOverrides,
       });
       // syncSources refreshes the destination list itself.
       await destinations.syncSources(updated, editSources);
@@ -633,6 +643,22 @@ export default function DashboardApp() {
               onDelete={(mapping) => void run(() => destinations.deleteDestination(mapping), 'Destination deleted.')}
               onBackfill={(mapping) => void run(() => activity.requestBackfill(mapping.id), 'Backfill queued.')}
               onCancelBackfill={(mapping) => void run(() => activity.cancelBackfill(mapping.id), 'Backfill cancelled.')}
+              onApplyProfileSync={(mapping) =>
+                void run(
+                  () =>
+                    destinations.applyProfileSync(
+                      mapping,
+                      mapping.profileManagement.profileSync.sourceUsername,
+                    ),
+                  'Profile sync applied.',
+                )
+              }
+              onQueuePinSync={(mapping) =>
+                void run(
+                  () => destinations.queuePinSync(mapping, mapping.profileManagement.pinSync.sourceUsername),
+                  'Pin sync queued.',
+                )
+              }
             />
           ) : null}
           {activeTab === 'posts' ? (
@@ -670,6 +696,7 @@ export default function DashboardApp() {
                   identities: { destinationId: queueItem.destination_id, routeId: queueItem.route_id, sourceId: queueItem.source_id, requestId: queueItem.request_id, externalPostId: item.twitter_id },
                   policy: { version: item.policy_version, behavior: item.policy_snapshot ? 'snapshotted' : 'current' },
                   error: item.error_message,
+                  deliveryFallbacks: queueItem.delivery_diagnostics ?? item.delivery_diagnostics ?? null,
                 }, null, 2);
                 try {
                   await navigator.clipboard.writeText(diagnostic);
@@ -709,6 +736,7 @@ export default function DashboardApp() {
               setScheduler={settings.setScheduler}
               twitter={settings.twitterConfig}
               setTwitter={settings.setTwitterConfig}
+              cookieHealth={settings.cookieHealth}
               ai={settings.aiConfig}
               setAi={settings.setAiConfig}
               notifications={settings.notifications}
@@ -754,8 +782,12 @@ export default function DashboardApp() {
                 void settings.saveScheduler().then(() => showNotice('success', 'Scheduler saved.')).catch((error) => handleError(error, 'Failed to save scheduler.')).finally(() => setSchedulerSaving(false));
               }}
               onSaveTwitter={(event) => saveWithNotice(event, settings.saveTwitter, 'Twitter credentials saved.')}
-              onSaveAi={(event) => saveWithNotice(event, settings.saveAi, 'Image alt text settings saved.')}
+              onSaveAi={(event) => saveWithNotice(event, settings.saveAi, 'AI settings saved.')}
+              onPreviewAiText={(capability, text) => settings.previewAiText(capability, text)}
               onSaveNotifications={(event) => saveWithNotice(event, settings.saveNotifications, 'Notification settings saved.')}
+              onTestNotifications={() => {
+                void run(() => settings.testNotifications(), 'Test notification queued.');
+              }}
               onCreateUser={(event) => saveWithNotice(event, async () => {
                 await settings.createUser({
                   username: newUser.username || undefined,
@@ -843,6 +875,47 @@ export default function DashboardApp() {
             await destinations.saveCredentials(editingMapping, editForm.bskyPassword);
             setEditForm((current) => ({ ...current, bskyPassword: '' }));
           }, 'Credentials saved.');
+        }}
+        onSaveSourceFilters={async (username, filters) => {
+          if (!editingMapping) return;
+          await run(async () => {
+            await destinations.patchSource(editingMapping, username, { filters });
+          }, `Filters saved for @${username}.`);
+        }}
+        onPreviewSourceFilter={async (username, filters, metadata) => {
+          if (!editingMapping) throw new Error('No destination selected.');
+          return destinations.previewSourceFilter(editingMapping, username, filters, metadata);
+        }}
+        onPreviewPosting={async (input) => {
+          if (!editingMapping) throw new Error('No destination selected.');
+          return destinations.previewPostingPolicy(editingMapping, input);
+        }}
+        onPreviewProfileSync={() => {
+          if (!editingMapping) return;
+          void run(async () => {
+            await destinations.previewProfileSync(
+              editingMapping,
+              editForm.profileManagement.profileSync.sourceUsername,
+            );
+          }, 'Profile sync preview ready.');
+        }}
+        onApplyProfileSync={() => {
+          if (!editingMapping) return;
+          void run(async () => {
+            await destinations.applyProfileSync(
+              editingMapping,
+              editForm.profileManagement.profileSync.sourceUsername,
+            );
+          }, 'Profile sync applied.');
+        }}
+        onQueuePinSync={() => {
+          if (!editingMapping) return;
+          void run(async () => {
+            await destinations.queuePinSync(
+              editingMapping,
+              editForm.profileManagement.pinSync.sourceUsername,
+            );
+          }, 'Pin sync queued.');
         }}
       />
       <ConfirmDialog

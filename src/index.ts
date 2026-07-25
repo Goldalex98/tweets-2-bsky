@@ -14,11 +14,15 @@ import * as francModule from 'franc-min';
 import iso6391 from 'iso-639-1';
 import puppeteer from 'puppeteer-core';
 import sharp from 'sharp';
-import { generateAltText, isAltTextConfigured } from './ai-manager.js';
+import { applyTextCapabilities, generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { createBlueskyDigestDeliveryAdapter } from './adapters/bluesky-digest-delivery.js';
 import { createBlueskyNormalizedDeliveryAdapter } from './adapters/bluesky-normalized-delivery.js';
 import { contentSha256 } from './content-dedup.js';
 import { evaluateContentPolicy } from './content-policy.js';
+import {
+  type DeliveryFallbackEvent,
+  serializeDeliveryDiagnostics,
+} from './delivery-diagnostics.js';
 import { combinePerceptualHashes, computePerceptualHashes } from './media-dedup.js';
 import { createRetainedCandidate, serializeRetainedCandidate } from './retained-candidate.js';
 
@@ -247,6 +251,7 @@ function saveProcessedTweet(
   sourceCreatedAt?: number,
   skipReason?: string,
   checkpointed = false,
+  deliveryDiagnostics?: string,
 ): void {
   const config = getConfig();
   const source = config.sources.find((candidate) => candidate.username === twitterUsername.toLowerCase());
@@ -274,6 +279,7 @@ function saveProcessedTweet(
     bsky_root_cid: entry.root?.cid,
     bsky_tail_uri: entry.tail?.uri,
     bsky_tail_cid: entry.tail?.cid,
+    delivery_diagnostics: deliveryDiagnostics,
     status: entry.migrated || (entry.uri && entry.cid) ? 'migrated' : entry.skipped ? 'skipped' : 'failed',
   } as const;
   if (checkpointed && record.status === 'migrated') {
@@ -1598,6 +1604,7 @@ async function processTweets(
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'");
+    const deliveryFallbacks: DeliveryFallbackEvent[] = [];
 
     // 1. Link Expansion
     console.log(`[${twitterUsername}] 🔗 Expanding links...`);
@@ -1725,6 +1732,10 @@ async function processTweets(
           console.warn(`[${twitterUsername}] ⚠️ Video too long (${(duration / 1000).toFixed(1)}s). Fallback to link.`);
           const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
           if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+          deliveryFallbacks.push({
+            kind: 'video-link',
+            reason: `Video too long (${(duration / 1000).toFixed(1)}s)`,
+          });
           continue;
         }
 
@@ -1768,6 +1779,10 @@ async function processTweets(
               );
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
               if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+              deliveryFallbacks.push({
+                kind: 'video-link',
+                reason: `Video too large (${(buffer.length / 1024 / 1024).toFixed(2)}MB)`,
+              });
             } catch (err) {
               const errMsg = (err as Error).message;
               if (errMsg !== 'VIDEO_FALLBACK_503') {
@@ -1775,6 +1790,10 @@ async function processTweets(
               }
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
               if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+              deliveryFallbacks.push({
+                kind: 'video-link',
+                reason: errMsg === 'VIDEO_FALLBACK_503' ? 'Video processing unavailable (503)' : `Video upload failed: ${errMsg}`,
+              });
             }
           }
         }
@@ -1843,6 +1862,10 @@ async function processTweets(
                   image: blob,
                   aspectRatio: { width: ssResult.width, height: ssResult.height },
                 });
+                deliveryFallbacks.push({
+                  kind: 'quote-screenshot',
+                  reason: 'External quote screenshot attached',
+                });
               } catch (e) {
                 console.warn(`[${twitterUsername}] ⚠️ Failed to upload screenshot blob.`);
               }
@@ -1887,6 +1910,14 @@ async function processTweets(
     const hasScreenshot = images.some((img) => img.alt.startsWith('Quote Tweet:'));
     if (externalQuoteUrl && !quoteEmbed && !hasScreenshot && !text.includes(externalQuoteUrl)) {
       text += `\n\nQT: ${externalQuoteUrl}`;
+      deliveryFallbacks.push({
+        kind: 'quote-link',
+        reason: images.length >= 4
+          ? 'No image slots for quote screenshot'
+          : videoBlob
+            ? 'Quote screenshot skipped because video embed is present'
+            : 'Quote screenshot unavailable; appended QT link',
+      });
     }
 
     if (isSponsoredCard) {
@@ -1904,9 +1935,24 @@ async function processTweets(
     );
     const pollNote = buildPollNote(tweet.card, pollUrl);
     if (pollNote && !text.includes(pollUrl)) {
-      console.log(`[${twitterUsername}] 📊 Poll detected. Linking back to the original tweet.`);
+      console.log(`[${twitterUsername}] Poll detected. Linking back to the original tweet.`);
       text = `${text}\n\n${pollNote}`.trim();
+      deliveryFallbacks.push({ kind: 'poll-note', reason: 'Poll mirrored as text note with X link' });
     }
+    // When a poll has no other embed, attach an external URL card for the status.
+    if (pollNote && !quoteEmbed && !videoBlob && images.length === 0 && !linkCard) {
+      console.log(`[${twitterUsername}] Attaching poll link card for ${pollUrl}`);
+      linkCard = await fetchEmbedUrlCard(agent, pollUrl);
+      if (linkCard) {
+        deliveryFallbacks.push({ kind: 'poll-card', reason: 'Poll link card attached' });
+      }
+    }
+
+    const aiTransformed = await applyTextCapabilities(text, {
+      overrides: mapping.aiOverrides,
+      config: aiConfigOverride,
+    });
+    text = aiTransformed.text;
 
     const transformed = applyPostingPolicy(text, mapping.postingPolicy, {
       twitterUsername,
@@ -1918,6 +1964,14 @@ async function processTweets(
       isThreadRoot: !replyParentInfo,
     });
     text = transformed.text;
+    const deliveryDiagnosticsJson = serializeDeliveryDiagnostics(deliveryFallbacks);
+    if (deliveryDiagnosticsJson && !dryRun) {
+      try {
+        postQueueService.setDeliveryDiagnostics(tweetId, bskyIdentifier, deliveryDiagnosticsJson);
+      } catch {
+        // Queue row may already be gone or not yet claimed; processed history still records diagnostics.
+      }
+    }
 
     // 4. Threading and Posting
     const chunks = splitPostText(text);
@@ -2158,6 +2212,7 @@ async function processTweets(
           getTweetSourceCreatedAt(tweet),
           undefined,
           true,
+          deliveryDiagnosticsJson,
         );
         runtimeStateService.recordDestinationEvent(mapping.id, 'post');
         localProcessedMap[tweetId] = entry; // Update local map for subsequent replies in this batch

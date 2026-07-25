@@ -479,14 +479,23 @@ export function extractPollData(card?: TweetCard | null): PollData | null {
 }
 
 // Bottom-of-post note pointing readers at the original tweet's poll.
+// Bluesky has no poll embed, so this is informational text plus a link.
 export function buildPollNote(card: TweetCard | null | undefined, tweetUrl: string): string | null {
   const poll = extractPollData(card);
   if (!poll) return null;
 
+  const choiceCount = poll.choices.length;
   const choiceList = poll.choices.map((choice) => choice.label).join(' / ');
-  const summary = choiceList.length <= 60 ? ` (${choiceList})` : '';
+  const summary = choiceList.length <= 60 ? ` (${choiceList})` : ` (${choiceCount} choices)`;
   const action = poll.countsAreFinal ? 'see the results on X' : 'vote on X';
-  return `📊 This post has a poll${summary} — ${action}: ${tweetUrl}`;
+  let ends = '';
+  if (poll.endsAt) {
+    const endsAtMs = Date.parse(poll.endsAt);
+    if (Number.isFinite(endsAtMs)) {
+      ends = ` Ends ${new Date(endsAtMs).toISOString().slice(0, 16).replace('T', ' ')} UTC.`;
+    }
+  }
+  return `This post has a poll${summary}. ${action.charAt(0).toUpperCase()}${action.slice(1)}: ${tweetUrl}.${ends}`.trim();
 }
 
 // Check stage run for every tweet before media handling: the scraper only keeps

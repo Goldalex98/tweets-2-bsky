@@ -1,5 +1,10 @@
 import type { AccountMapping } from '../destinations/types';
 
+export interface DeliveryFallbackEvent {
+  kind: string;
+  reason: string;
+}
+
 export interface ActivityLog {
   twitter_id: string;
   twitter_username: string;
@@ -17,6 +22,7 @@ export interface ActivityLog {
   override_requeued_at?: number;
   attempts?: number;
   created_at?: string;
+  delivery_diagnostics?: string;
 }
 
 export interface QueueItemView {
@@ -44,6 +50,7 @@ export interface QueueItemView {
   first_failure_at?: number;
   last_failure_at?: number;
   tweet_text?: string;
+  delivery_diagnostics?: string;
 }
 
 export interface BskyFacetFeatureLink {

@@ -171,7 +171,12 @@ function ReviewStep(props: AddDestinationWizardProps) {
         sourceCount={props.sources.length}
         onFormChange={props.onFormChange}
       />
-      <ProfileMutationField idPrefix="new-destination" form={props.form} onFormChange={props.onFormChange} />
+      <ProfileMutationField
+        idPrefix="new-destination"
+        form={props.form}
+        sourceUsernames={props.sources}
+        onFormChange={props.onFormChange}
+      />
     </div>
   );
 }

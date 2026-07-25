@@ -3256,9 +3256,18 @@ app.post(
       return;
     }
     const metadata = req.body.metadata;
+    let filters = route.filters;
+    if (req.body?.filters !== undefined) {
+      try {
+        filters = parseSourceFiltersInput(req.body.filters, route.filters);
+      } catch (error) {
+        res.status(400).json({ error: getErrorMessage(error, 'Invalid filters for preview.') });
+        return;
+      }
+    }
     res.json(
       evaluateSourceFilter(
-        route.filters,
+        filters,
         {
           text: typeof metadata.text === 'string' ? metadata.text : undefined,
           language: typeof metadata.language === 'string' ? metadata.language : undefined,

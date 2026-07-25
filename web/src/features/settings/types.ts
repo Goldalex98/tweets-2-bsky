@@ -28,6 +28,13 @@ export interface AIConfig extends ConfigVersion {
   >;
 }
 
+export type NotificationEvent =
+  | 'twitter-auth-failure'
+  | 'bsky-auth-failure'
+  | 'queue-parked'
+  | 'queue-age'
+  | 'update-failure';
+
 export interface NotificationSettings extends ConfigVersion {
   enabled: boolean;
   webhookConfigured: boolean;
@@ -35,13 +42,19 @@ export interface NotificationSettings extends ConfigVersion {
   webhookUrl: string;
   webhookSecret: string;
   allowPrivate: boolean;
-  events: Record<
-    'twitter-auth-failure' | 'bsky-auth-failure' | 'queue-parked' | 'queue-age' | 'update-failure',
-    boolean
-  >;
+  events: Record<NotificationEvent, boolean>;
   maxAttempts: number;
   backoffMs: number;
   timeoutMs: number;
+}
+
+export interface CookieHealthStatus {
+  primaryConfigured: boolean;
+  backupConfigured: boolean;
+  active?: string;
+  lastSuccessAt?: number;
+  lastAuthenticationFailureAt?: number;
+  lastAuthenticationFailureCategory?: string;
 }
 
 export interface UserPermissions {

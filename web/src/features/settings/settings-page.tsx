@@ -23,6 +23,7 @@ import type {
   AccountSecurityPasswordState,
   AIConfig,
   AuthUser,
+  CookieHealthStatus,
   ManagedUser,
   NotificationSettings,
   RuntimeVersionInfo,
@@ -45,6 +46,7 @@ interface SettingsPageProps {
   setScheduler: Dispatch<SetStateAction<SchedulerSettings | null>>;
   twitter: TwitterConfig;
   setTwitter: Dispatch<SetStateAction<TwitterConfig>>;
+  cookieHealth: CookieHealthStatus | null;
   ai: AIConfig;
   setAi: Dispatch<SetStateAction<AIConfig>>;
   notifications: NotificationSettings;
@@ -80,7 +82,12 @@ interface SettingsPageProps {
   onSaveScheduler(event: FormEvent<HTMLFormElement>): void;
   onSaveTwitter(event: FormEvent<HTMLFormElement>): void;
   onSaveAi(event: FormEvent<HTMLFormElement>): void;
+  onPreviewAiText(
+    capability: 'translation' | 'summarization' | 'cleanup' | 'hashtags',
+    text: string,
+  ): Promise<{ enabled: boolean; output?: string }>;
   onSaveNotifications(event: FormEvent<HTMLFormElement>): void;
+  onTestNotifications(): void;
   onCreateUser(event: FormEvent<HTMLFormElement>): void;
   onEditUser(user: ManagedUser): void;
   onDeleteUser(user: ManagedUser): void;
@@ -94,6 +101,11 @@ interface SettingsPageProps {
 
 export function SettingsPage(props: SettingsPageProps) {
   const isAdmin = props.user.isAdmin;
+  const recentAuthFailure =
+    Boolean(props.cookieHealth?.lastAuthenticationFailureAt) &&
+    Date.now() - (props.cookieHealth?.lastAuthenticationFailureAt ?? 0) < 24 * 60 * 60 * 1000;
+  const twitterBadgeOk = Boolean(props.twitter.hasAuthToken) && !recentAuthFailure;
+  const twitterBadgeLabel = !props.twitter.hasAuthToken ? 'Off' : recentAuthFailure ? 'Auth issue' : 'On';
   const nav = [
     { id: 'account' as const, label: 'Account', icon: UserRound },
     ...(isAdmin
@@ -101,8 +113,32 @@ export function SettingsPage(props: SettingsPageProps) {
           { id: 'system' as const, label: 'System', icon: Settings2 },
           { id: 'scheduler' as const, label: 'Scheduler', icon: Settings2 },
           { id: 'users' as const, label: 'Users', icon: Users },
-          { id: 'twitter' as const, label: 'Twitter', icon: Bot, badge: <Badge variant={props.twitter.hasAuthToken ? 'success' : 'outline'}>{props.twitter.hasAuthToken ? 'On' : 'Off'}</Badge> },
-          { id: 'ai' as const, label: 'Image Alt Text', icon: SunMoon, badge: <Badge variant={props.ai.enabled ? 'success' : 'outline'}>{props.ai.enabled ? 'On' : 'Off'}</Badge> },
+          {
+            id: 'twitter' as const,
+            label: 'Twitter',
+            icon: Bot,
+            badge: <Badge variant={twitterBadgeOk ? 'success' : 'outline'}>{twitterBadgeLabel}</Badge>,
+          },
+          {
+            id: 'ai' as const,
+            label: 'AI',
+            icon: SunMoon,
+            badge: (
+              <Badge
+                variant={
+                  props.ai.enabled ||
+                  Object.values(props.ai.textCapabilities).some((capability) => capability.enabled)
+                    ? 'success'
+                    : 'outline'
+                }
+              >
+                {props.ai.enabled ||
+                Object.values(props.ai.textCapabilities).some((capability) => capability.enabled)
+                  ? 'On'
+                  : 'Off'}
+              </Badge>
+            ),
+          },
           { id: 'notifications' as const, label: 'Notifications', icon: Link2 },
           { id: 'ingestion' as const, label: 'Ingestion & digests', icon: Repeat2 },
           { id: 'data' as const, label: 'Data', icon: Download },
@@ -124,9 +160,33 @@ export function SettingsPage(props: SettingsPageProps) {
         {props.section === 'system' && isAdmin ? <SystemSection runtime={props.runtime} update={props.update} updating={props.updateBusy} canCreate={props.canCreateMappings} onUpdate={props.onRunUpdate} onAdd={props.onAddDestination} /> : null}
         {props.section === 'scheduler' && isAdmin && props.scheduler ? <SchedulerSection value={props.scheduler} setValue={props.setScheduler} saving={props.schedulerSaving} onSubmit={props.onSaveScheduler} /> : null}
         {props.section === 'users' && isAdmin ? <UsersSection users={props.users} form={props.newUser} setForm={props.setNewUser} editingId={props.editingUserId} busy={props.busy} onCreate={props.onCreateUser} onEdit={props.onEditUser} onDelete={props.onDeleteUser} /> : null}
-        {props.section === 'twitter' && isAdmin ? <TwitterSettingsSection value={props.twitter} setValue={props.setTwitter} busy={props.busy} onSubmit={props.onSaveTwitter} /> : null}
-        {props.section === 'ai' && isAdmin ? <AiSettingsSection value={props.ai} setValue={props.setAi} busy={props.busy} onSubmit={props.onSaveAi} /> : null}
-        {props.section === 'notifications' && isAdmin ? <NotificationsSection value={props.notifications} setValue={props.setNotifications} busy={props.busy} onSubmit={props.onSaveNotifications} /> : null}
+        {props.section === 'twitter' && isAdmin ? (
+          <TwitterSettingsSection
+            value={props.twitter}
+            setValue={props.setTwitter}
+            cookieHealth={props.cookieHealth}
+            busy={props.busy}
+            onSubmit={props.onSaveTwitter}
+          />
+        ) : null}
+        {props.section === 'ai' && isAdmin ? (
+          <AiSettingsSection
+            value={props.ai}
+            setValue={props.setAi}
+            busy={props.busy}
+            onSubmit={props.onSaveAi}
+            onPreviewText={props.onPreviewAiText}
+          />
+        ) : null}
+        {props.section === 'notifications' && isAdmin ? (
+          <NotificationsSection
+            value={props.notifications}
+            setValue={props.setNotifications}
+            busy={props.busy}
+            onSubmit={props.onSaveNotifications}
+            onTest={props.onTestNotifications}
+          />
+        ) : null}
         {props.section === 'ingestion' && isAdmin ? <IngestionDigestsPage sources={props.ingestion.sources} credentials={props.ingestion.credentials} digests={props.ingestion.digests} oneTimeSecret={props.ingestion.oneTimeSecret} loading={props.ingestion.loading} error={props.ingestion.error} onCreateSource={props.ingestion.createSource} onSetRouteDelivery={props.ingestion.setRouteDelivery} onCreateCredential={props.ingestion.createCredential} onRevokeCredential={props.ingestion.revokeCredential} onPreviewDigest={props.ingestion.previewDigest} onPublishDigest={props.ingestion.publishDigest} onRetryDigest={props.ingestion.retryDigest} onCancelDigest={props.ingestion.cancelDigest} /> : null}
         {props.section === 'data' && isAdmin ? <DataManagementSection busy={props.busy} onExport={props.onExport} onImport={props.onImport} onBackup={props.onBackup} onRestore={props.onRestore} /> : null}
       </div>

@@ -15,6 +15,8 @@ interface DestinationCardProps {
   onDelete(): void;
   onBackfill(): void;
   onCancelBackfill(): void;
+  onApplyProfileSync?(): void;
+  onQueuePinSync?(): void;
 }
 
 export function DestinationCard({
@@ -27,8 +29,14 @@ export function DestinationCard({
   onDelete,
   onBackfill,
   onCancelBackfill,
+  onApplyProfileSync,
+  onQueuePinSync,
 }: DestinationCardProps) {
   const group = getMappingGroupMeta(mapping);
+  const canProfileSync =
+    mapping.profileManagement?.allowProfileMutation && mapping.profileManagement.profileSync.mode !== 'off';
+  const canPinSync =
+    mapping.profileManagement?.allowProfileMutation && mapping.profileManagement.pinSync.mode !== 'off';
   return (
     <Card className="cv-auto">
       <CardContent className="space-y-3 p-4">
@@ -66,6 +74,12 @@ export function DestinationCard({
             ) : (
               <Button size="sm" variant="outline" onClick={onBackfill}><Play className="mr-1 h-3.5 w-3.5" />Backfill</Button>
             )}
+            {canProfileSync && onApplyProfileSync ? (
+              <Button size="sm" variant="outline" onClick={onApplyProfileSync}>Sync profile</Button>
+            ) : null}
+            {canPinSync && onQueuePinSync ? (
+              <Button size="sm" variant="outline" onClick={onQueuePinSync}>Sync pins</Button>
+            ) : null}
             <Button size="sm" variant="destructive" onClick={onDelete}><Trash2 className="mr-1 h-3.5 w-3.5" />Delete</Button>
           </div>
         ) : null}

@@ -195,7 +195,9 @@ Operational endpoints:
 
 Generic webhook notifications can be configured under Settings or with `bun run cli -- notifications`.
 Webhooks support event filters, HMAC signatures, retry/backoff, HTTPS enforcement, and private-network
-blocking. The URL and signing secret are never returned by the settings API.
+blocking. The URL and signing secret are never returned by the settings API. Selectable events:
+`twitter-auth-failure`, `bsky-auth-failure`, `queue-parked`, `queue-age` (off by default; threshold
+`QUEUE_AGE_ALERT_MS`), and `update-failure`.
 
 Tuning (optional `.env` values, sensible defaults built in):
 

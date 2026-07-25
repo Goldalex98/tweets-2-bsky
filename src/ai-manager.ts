@@ -520,22 +520,41 @@ export async function testAIProvider(options: {
   }
 }
 
-export async function previewTextCapability(input: {
+const TEXT_CAPABILITY_INSTRUCTIONS: Record<AITextCapability, string> = {
+  translation: 'Translate the post while preserving meaning. Return only the translated text.',
+  summarization: 'Summarize the post faithfully. Return only the summary.',
+  cleanup: 'Clean up grammar and readability without changing meaning. Return only the rewritten text.',
+  hashtags: 'Suggest relevant hashtags. Return only a short space-separated hashtag list.',
+};
+
+/** Fixed delivery order for opt-in text transforms. */
+export const AI_TEXT_CAPABILITY_ORDER: readonly AITextCapability[] = [
+  'cleanup',
+  'translation',
+  'summarization',
+  'hashtags',
+];
+
+function normalizeHashtagList(raw: string): string[] {
+  return raw
+    .split(/\s+/)
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+    .map((tag) => (tag.startsWith('#') ? tag : `#${tag.replace(/^#+/, '')}`))
+    .filter((tag) => /^#[\p{L}\p{N}_]+$/u.test(tag));
+}
+
+async function runTextCapability(input: {
   capability: AITextCapability;
   text: string;
   overrides?: DestinationAIOverrides;
   client?: AIProviderClient;
+  config?: AIConfig;
 }): Promise<{ enabled: boolean; purpose: AITextCapability; output?: string }> {
-  const config = getConfig();
-  const resolved = resolveAiProvider(config.ai, input.overrides, input.capability);
+  const aiConfig = input.config ?? getConfig().ai;
+  const resolved = resolveAiProvider(aiConfig, input.overrides, input.capability);
   if (!resolved) return { enabled: false, purpose: input.capability };
   const client = input.client ?? createAIProviderClient(resolved);
-  const instruction: Record<AITextCapability, string> = {
-    translation: 'Translate the post while preserving meaning. Return only the translated text.',
-    summarization: 'Summarize the post faithfully. Return only the summary.',
-    cleanup: 'Clean up grammar and readability without changing meaning. Return only the rewritten text.',
-    hashtags: 'Suggest relevant hashtags. Return only a short space-separated hashtag list.',
-  };
   const started = Date.now();
   aiProviderUsageService.record({
     purpose: input.capability,
@@ -547,7 +566,7 @@ export async function previewTextCapability(input: {
   try {
     const output = await client.complete({
       purpose: input.capability,
-      prompt: `${instruction[input.capability]}\n\nPost:\n${input.text.slice(0, 5000)}`,
+      prompt: `${TEXT_CAPABILITY_INSTRUCTIONS[input.capability]}\n\nPost:\n${input.text.slice(0, 5000)}`,
       maxOutputChars: 2000,
     });
     aiProviderUsageService.record({
@@ -569,4 +588,70 @@ export async function previewTextCapability(input: {
     });
     throw new Error(sanitizeProviderError(error));
   }
+}
+
+export async function previewTextCapability(input: {
+  capability: AITextCapability;
+  text: string;
+  overrides?: DestinationAIOverrides;
+  client?: AIProviderClient;
+}): Promise<{ enabled: boolean; purpose: AITextCapability; output?: string }> {
+  return runTextCapability(input);
+}
+
+export interface ApplyTextCapabilitiesResult {
+  text: string;
+  applied: AITextCapability[];
+  failed: AITextCapability[];
+}
+
+/**
+ * Apply enabled text capabilities in fixed order. Failures are logged by the
+ * caller path via returned `failed` and never abort delivery.
+ */
+export async function applyTextCapabilities(
+  text: string,
+  options: {
+    overrides?: DestinationAIOverrides;
+    client?: AIProviderClient;
+    config?: AIConfig;
+  } = {},
+): Promise<ApplyTextCapabilitiesResult> {
+  let current = text;
+  const applied: AITextCapability[] = [];
+  const failed: AITextCapability[] = [];
+
+  for (const capability of AI_TEXT_CAPABILITY_ORDER) {
+    const resolved = resolveAiProvider(options.config ?? getConfig().ai, options.overrides, capability);
+    if (!resolved) continue;
+    try {
+      const result = await runTextCapability({
+        capability,
+        text: current,
+        overrides: options.overrides,
+        client: options.client,
+        config: options.config,
+      });
+      if (!result.enabled || !result.output) continue;
+      if (capability === 'hashtags') {
+        const tags = normalizeHashtagList(result.output);
+        const missing = tags.filter((tag) => !current.toLowerCase().includes(tag.toLowerCase()));
+        if (missing.length > 0) {
+          current = `${current.trim()}\n\n${missing.join(' ')}`.trim();
+          applied.push(capability);
+        }
+      } else {
+        current = result.output;
+        applied.push(capability);
+      }
+    } catch (error) {
+      failed.push(capability);
+      console.warn(
+        `[ai] Text capability ${capability} failed; continuing with prior text:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  return { text: current, applied, failed };
 }

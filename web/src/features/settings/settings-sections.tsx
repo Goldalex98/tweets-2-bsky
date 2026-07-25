@@ -17,7 +17,9 @@ import type {
   AccountSecurityPasswordState,
   AIConfig,
   AuthUser,
+  CookieHealthStatus,
   ManagedUser,
+  NotificationEvent,
   NotificationSettings,
   RuntimeVersionInfo,
   TwitterConfig,
@@ -26,6 +28,23 @@ import type {
   UserPermissions,
 } from './types';
 import { PERMISSION_OPTIONS } from './utils';
+
+const NOTIFICATION_EVENT_OPTIONS: Array<{ key: NotificationEvent; label: string; hint: string }> = [
+  { key: 'twitter-auth-failure', label: 'X / Twitter auth failure', hint: 'Cookie or scraper authentication failed.' },
+  { key: 'bsky-auth-failure', label: 'Bluesky auth failure', hint: 'Destination login or app password rejected.' },
+  { key: 'queue-parked', label: 'Queue item parked', hint: 'A post exhausted retries and was parked as failed.' },
+  { key: 'queue-age', label: 'Queue age alert', hint: 'Oldest pending item exceeded QUEUE_AGE_ALERT_MS (default 1 hour). Off by default.' },
+  { key: 'update-failure', label: 'Update failure', hint: 'In-app update process failed to start or exit cleanly.' },
+];
+
+function formatCookieTimestamp(value?: number): string {
+  if (!value) return 'Never';
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return 'Unknown';
+  }
+}
 
 export function AccountSecuritySection({
   user,
@@ -180,16 +199,348 @@ export function SchedulerSection({
   );
 }
 
-export function TwitterSettingsSection({ value, setValue, busy, onSubmit }: { value: TwitterConfig; setValue: Dispatch<SetStateAction<TwitterConfig>>; busy: boolean; onSubmit(event: FormEvent<HTMLFormElement>): void }) {
-  return <Card><CardHeader><CardTitle>Twitter Credentials</CardTitle><CardDescription>Secrets are write-only; saved values are never returned.</CardDescription></CardHeader><CardContent className="border-t pt-4"><form className="grid gap-4 sm:grid-cols-2" onSubmit={onSubmit}><div><Label htmlFor="twitter-auth-token">Auth token</Label><Input id="twitter-auth-token" type="password" value={value.authToken} placeholder={value.hasAuthToken ? 'Saved — enter to replace' : ''} onChange={(event) => setValue((current) => ({ ...current, authToken: event.target.value }))} /></div><div><Label htmlFor="twitter-ct0">ct0</Label><Input id="twitter-ct0" type="password" value={value.ct0} placeholder={value.hasCt0 ? 'Saved — enter to replace' : ''} onChange={(event) => setValue((current) => ({ ...current, ct0: event.target.value }))} /></div><Button type="submit" disabled={busy}><Save className="mr-2 h-4 w-4" />Save Twitter credentials</Button></form></CardContent></Card>;
+export function TwitterSettingsSection({
+  value,
+  setValue,
+  cookieHealth,
+  busy,
+  onSubmit,
+}: {
+  value: TwitterConfig;
+  setValue: Dispatch<SetStateAction<TwitterConfig>>;
+  cookieHealth: CookieHealthStatus | null;
+  busy: boolean;
+  onSubmit(event: FormEvent<HTMLFormElement>): void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Twitter Credentials</CardTitle>
+        <CardDescription>Secrets are write-only; saved values are never returned. Backup cookies are used when the primary slot fails authentication.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4 border-t pt-4">
+        {cookieHealth ? (
+          <div className="rounded-md border p-3 text-sm" data-testid="twitter-cookie-health">
+            <p className="font-semibold">Cookie health</p>
+            <dl className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+              <div>Primary: {cookieHealth.primaryConfigured ? 'Configured' : 'Missing'}</div>
+              <div>Backup: {cookieHealth.backupConfigured ? 'Configured' : 'Missing'}</div>
+              <div>Active slot: {cookieHealth.active || 'Unknown'}</div>
+              <div>Last success: {formatCookieTimestamp(cookieHealth.lastSuccessAt)}</div>
+              <div>Last auth failure: {formatCookieTimestamp(cookieHealth.lastAuthenticationFailureAt)}</div>
+              <div>Failure category: {cookieHealth.lastAuthenticationFailureCategory || 'None'}</div>
+            </dl>
+          </div>
+        ) : null}
+        <form className="grid gap-4 sm:grid-cols-2" onSubmit={onSubmit}>
+          <div>
+            <Label htmlFor="twitter-auth-token">Auth token</Label>
+            <Input
+              id="twitter-auth-token"
+              type="password"
+              value={value.authToken}
+              placeholder={value.hasAuthToken ? 'Saved — enter to replace' : ''}
+              onChange={(event) => setValue((current) => ({ ...current, authToken: event.target.value }))}
+            />
+          </div>
+          <div>
+            <Label htmlFor="twitter-ct0">ct0</Label>
+            <Input
+              id="twitter-ct0"
+              type="password"
+              value={value.ct0}
+              placeholder={value.hasCt0 ? 'Saved — enter to replace' : ''}
+              onChange={(event) => setValue((current) => ({ ...current, ct0: event.target.value }))}
+            />
+          </div>
+          <div>
+            <Label htmlFor="twitter-backup-auth-token">Backup auth token</Label>
+            <Input
+              id="twitter-backup-auth-token"
+              type="password"
+              value={value.backupAuthToken || ''}
+              placeholder={value.hasBackupAuthToken ? 'Saved — enter to replace' : ''}
+              onChange={(event) => setValue((current) => ({ ...current, backupAuthToken: event.target.value }))}
+            />
+          </div>
+          <div>
+            <Label htmlFor="twitter-backup-ct0">Backup ct0</Label>
+            <Input
+              id="twitter-backup-ct0"
+              type="password"
+              value={value.backupCt0 || ''}
+              placeholder={value.hasBackupCt0 ? 'Saved — enter to replace' : ''}
+              onChange={(event) => setValue((current) => ({ ...current, backupCt0: event.target.value }))}
+            />
+          </div>
+          <div className="sm:col-span-2">
+            <Button type="submit" disabled={busy}>
+              <Save className="mr-2 h-4 w-4" />
+              Save Twitter credentials
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
 }
 
-export function AiSettingsSection({ value, setValue, busy, onSubmit }: { value: AIConfig; setValue: Dispatch<SetStateAction<AIConfig>>; busy: boolean; onSubmit(event: FormEvent<HTMLFormElement>): void }) {
-  return <Card><CardHeader><CardTitle>Image Alt Text</CardTitle><CardDescription>Provider access is scoped to configured capabilities.</CardDescription></CardHeader><CardContent className="border-t pt-4"><form className="space-y-4" onSubmit={onSubmit}><label className="flex items-center gap-2"><input type="checkbox" checked={value.enabled} onChange={(event) => setValue((current) => ({ ...current, enabled: event.target.checked }))} />Enable AI image alt text</label><div className="grid gap-4 sm:grid-cols-2"><div><Label htmlFor="ai-provider">Provider</Label><select id="ai-provider" className="h-10 w-full rounded-md border bg-background px-3" value={value.provider} onChange={(event) => setValue((current) => ({ ...current, provider: event.target.value as AIConfig['provider'] }))}><option value="gemini">Gemini</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="custom">Custom</option></select></div><div><Label htmlFor="ai-api-key">API key</Label><Input id="ai-api-key" type="password" value={value.apiKey || ''} placeholder={value.hasApiKey ? 'Saved — enter to replace' : ''} onChange={(event) => setValue((current) => ({ ...current, apiKey: event.target.value }))} /></div><div><Label htmlFor="ai-model">Model</Label><Input id="ai-model" value={value.model || ''} onChange={(event) => setValue((current) => ({ ...current, model: event.target.value }))} /></div><div><Label htmlFor="ai-max-alt">Maximum alt text characters</Label><Input id="ai-max-alt" type="number" value={value.maxAltTextChars} onChange={(event) => setValue((current) => ({ ...current, maxAltTextChars: Number(event.target.value) }))} /></div></div><Button type="submit" disabled={busy}><Save className="mr-2 h-4 w-4" />Save image alt text</Button></form></CardContent></Card>;
+const AI_TEXT_CAPABILITY_OPTIONS = [
+  { key: 'cleanup' as const, label: 'Cleanup / rewrite' },
+  { key: 'translation' as const, label: 'Translation' },
+  { key: 'summarization' as const, label: 'Summarization' },
+  { key: 'hashtags' as const, label: 'Hashtag suggestions' },
+];
+
+export function AiSettingsSection({
+  value,
+  setValue,
+  busy,
+  onSubmit,
+  onPreviewText,
+}: {
+  value: AIConfig;
+  setValue: Dispatch<SetStateAction<AIConfig>>;
+  busy: boolean;
+  onSubmit(event: FormEvent<HTMLFormElement>): void;
+  onPreviewText(capability: 'translation' | 'summarization' | 'cleanup' | 'hashtags', text: string): Promise<{ enabled: boolean; output?: string }>;
+}) {
+  const [previewCapability, setPreviewCapability] = useState<(typeof AI_TEXT_CAPABILITY_OPTIONS)[number]['key']>('cleanup');
+  const [previewText, setPreviewText] = useState('Example post that could use a light cleanup.');
+  const [previewOutput, setPreviewOutput] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const anyTextEnabled = AI_TEXT_CAPABILITY_OPTIONS.some((option) => value.textCapabilities[option.key].enabled);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>AI</CardTitle>
+        <CardDescription>
+          Image alt text and optional text transforms. Text capabilities are off by default and apply in order: cleanup, translation, summarization, hashtags.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4 border-t pt-4">
+        <form className="space-y-4" onSubmit={onSubmit}>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={value.enabled}
+              onChange={(event) => setValue((current) => ({ ...current, enabled: event.target.checked }))}
+            />
+            Enable AI image alt text
+          </label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <Label htmlFor="ai-provider">Provider</Label>
+              <select
+                id="ai-provider"
+                className="h-10 w-full rounded-md border bg-background px-3"
+                value={value.provider}
+                onChange={(event) => setValue((current) => ({ ...current, provider: event.target.value as AIConfig['provider'] }))}
+              >
+                <option value="gemini">Gemini</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+            <div>
+              <Label htmlFor="ai-api-key">API key</Label>
+              <Input
+                id="ai-api-key"
+                type="password"
+                value={value.apiKey || ''}
+                placeholder={value.hasApiKey ? 'Saved — enter to replace' : ''}
+                onChange={(event) => setValue((current) => ({ ...current, apiKey: event.target.value }))}
+              />
+            </div>
+            <div>
+              <Label htmlFor="ai-model">Model</Label>
+              <Input id="ai-model" value={value.model || ''} onChange={(event) => setValue((current) => ({ ...current, model: event.target.value }))} />
+            </div>
+            <div>
+              <Label htmlFor="ai-max-alt">Maximum alt text characters</Label>
+              <Input
+                id="ai-max-alt"
+                type="number"
+                value={value.maxAltTextChars}
+                onChange={(event) => setValue((current) => ({ ...current, maxAltTextChars: Number(event.target.value) }))}
+              />
+            </div>
+          </div>
+          <fieldset className="space-y-2 rounded-md border p-3">
+            <legend className="px-1 text-sm font-semibold">Text capabilities</legend>
+            <p className="text-xs text-muted-foreground">
+              Post text is sent to the provider only for enabled capabilities. Failures skip that step and continue posting.
+            </p>
+            {AI_TEXT_CAPABILITY_OPTIONS.map((option) => (
+              <label key={option.key} className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={value.textCapabilities[option.key].enabled}
+                  onChange={(event) =>
+                    setValue((current) => ({
+                      ...current,
+                      textCapabilities: {
+                        ...current.textCapabilities,
+                        [option.key]: {
+                          ...current.textCapabilities[option.key],
+                          enabled: event.target.checked,
+                        },
+                      },
+                    }))
+                  }
+                />
+                <span>
+                  <span className="font-medium">{option.label}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    {value.textCapabilities[option.key].privacyDescription}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <Button type="submit" disabled={busy}>
+            <Save className="mr-2 h-4 w-4" />
+            Save AI settings
+          </Button>
+        </form>
+        <div className="space-y-2 rounded-md border border-dashed p-3">
+          <p className="text-sm font-semibold">Preview text capability</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <Label htmlFor="ai-preview-capability">Capability</Label>
+              <select
+                id="ai-preview-capability"
+                className="h-10 w-full rounded-md border bg-background px-3"
+                value={previewCapability}
+                onChange={(event) => setPreviewCapability(event.target.value as typeof previewCapability)}
+              >
+                {AI_TEXT_CAPABILITY_OPTIONS.map((option) => (
+                  <option key={option.key} value={option.key}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <Label htmlFor="ai-preview-text">Sample text</Label>
+              <Input id="ai-preview-text" value={previewText} onChange={(event) => setPreviewText(event.target.value)} />
+            </div>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy || previewBusy || !anyTextEnabled}
+            onClick={() => {
+              setPreviewBusy(true);
+              void onPreviewText(previewCapability, previewText)
+                .then((result) => setPreviewOutput(result.enabled ? result.output || '(empty response)' : 'Capability disabled'))
+                .catch((error: unknown) => setPreviewOutput(error instanceof Error ? error.message : 'Preview failed'))
+                .finally(() => setPreviewBusy(false));
+            }}
+          >
+            {previewBusy ? 'Previewing…' : 'Run preview'}
+          </Button>
+          {previewOutput ? <p className="whitespace-pre-wrap text-sm" data-testid="ai-text-preview-output">{previewOutput}</p> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
-export function NotificationsSection({ value, setValue, busy, onSubmit }: { value: NotificationSettings; setValue: Dispatch<SetStateAction<NotificationSettings>>; busy: boolean; onSubmit(event: FormEvent<HTMLFormElement>): void }) {
-  return <Card><CardHeader><CardTitle>Webhook Notifications</CardTitle><CardDescription>Send selected operational events to an HTTPS endpoint.</CardDescription></CardHeader><CardContent className="border-t pt-4"><form className="space-y-4" onSubmit={onSubmit}><label className="flex items-center gap-2"><input type="checkbox" checked={value.enabled} onChange={(event) => setValue((current) => ({ ...current, enabled: event.target.checked }))} />Enable notifications</label><Label htmlFor="notification-url">Webhook URL</Label><Input id="notification-url" type="url" value={value.webhookUrl} placeholder={value.webhookConfigured ? 'Saved — enter to replace' : 'https://'} onChange={(event) => setValue((current) => ({ ...current, webhookUrl: event.target.value }))} /><Label htmlFor="notification-secret">Webhook secret</Label><Input id="notification-secret" type="password" value={value.webhookSecret} placeholder={value.secretConfigured ? 'Saved — enter to replace' : ''} onChange={(event) => setValue((current) => ({ ...current, webhookSecret: event.target.value }))} /><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={value.allowPrivate} onChange={(event) => setValue((current) => ({ ...current, allowPrivate: event.target.checked }))} />Allow private-network targets</label><Button type="submit" disabled={busy}><Save className="mr-2 h-4 w-4" />Save notifications</Button></form></CardContent></Card>;
+export function NotificationsSection({
+  value,
+  setValue,
+  busy,
+  onSubmit,
+  onTest,
+}: {
+  value: NotificationSettings;
+  setValue: Dispatch<SetStateAction<NotificationSettings>>;
+  busy: boolean;
+  onSubmit(event: FormEvent<HTMLFormElement>): void;
+  onTest(): void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Webhook Notifications</CardTitle>
+        <CardDescription>Send selected operational events to an HTTPS endpoint. The URL and signing secret are never returned by the API.</CardDescription>
+      </CardHeader>
+      <CardContent className="border-t pt-4">
+        <form className="space-y-4" onSubmit={onSubmit}>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={value.enabled}
+              onChange={(event) => setValue((current) => ({ ...current, enabled: event.target.checked }))}
+            />
+            Enable notifications
+          </label>
+          <div>
+            <Label htmlFor="notification-url">Webhook URL</Label>
+            <Input
+              id="notification-url"
+              type="url"
+              value={value.webhookUrl}
+              placeholder={value.webhookConfigured ? 'Saved — enter to replace' : 'https://'}
+              onChange={(event) => setValue((current) => ({ ...current, webhookUrl: event.target.value }))}
+            />
+          </div>
+          <div>
+            <Label htmlFor="notification-secret">Webhook secret</Label>
+            <Input
+              id="notification-secret"
+              type="password"
+              value={value.webhookSecret}
+              placeholder={value.secretConfigured ? 'Saved — enter to replace' : ''}
+              onChange={(event) => setValue((current) => ({ ...current, webhookSecret: event.target.value }))}
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={value.allowPrivate}
+              onChange={(event) => setValue((current) => ({ ...current, allowPrivate: event.target.checked }))}
+            />
+            Allow private-network targets
+          </label>
+          <fieldset className="space-y-2 rounded-md border p-3">
+            <legend className="px-1 text-sm font-semibold">Events</legend>
+            {NOTIFICATION_EVENT_OPTIONS.map((option) => (
+              <label key={option.key} className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={value.events[option.key]}
+                  onChange={(event) =>
+                    setValue((current) => ({
+                      ...current,
+                      events: { ...current.events, [option.key]: event.target.checked },
+                    }))
+                  }
+                />
+                <span>
+                  <span className="font-medium">{option.label}</span>
+                  <span className="block text-xs text-muted-foreground">{option.hint}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit" disabled={busy}>
+              <Save className="mr-2 h-4 w-4" />
+              Save notifications
+            </Button>
+            <Button type="button" variant="outline" disabled={busy || !value.enabled} onClick={onTest}>
+              Send test notification
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
 }
 
 export function UsersSection({ users, form, setForm, editingId, busy, onCreate, onEdit, onDelete }: { users: ManagedUser[]; form: UserFormState; setForm: Dispatch<SetStateAction<UserFormState>>; editingId: string | null; busy: boolean; onCreate(event: FormEvent<HTMLFormElement>): void; onEdit(user: ManagedUser): void; onDelete(user: ManagedUser): void }) {

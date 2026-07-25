@@ -36,6 +36,8 @@ interface DestinationsPageProps {
   onDelete(mapping: AccountMapping): void;
   onBackfill(mapping: AccountMapping): void;
   onCancelBackfill(mapping: AccountMapping): void;
+  onApplyProfileSync?(mapping: AccountMapping): void;
+  onQueuePinSync?(mapping: AccountMapping): void;
 }
 
 export function DestinationsPage(props: DestinationsPageProps) {
@@ -84,6 +86,10 @@ export function DestinationsPage(props: DestinationsPageProps) {
                   onDelete={() => setConfirmation({ action: 'delete', mapping })}
                   onBackfill={() => props.onBackfill(mapping)}
                   onCancelBackfill={() => setConfirmation({ action: 'cancel-backfill', mapping })}
+                  onApplyProfileSync={
+                    props.onApplyProfileSync ? () => props.onApplyProfileSync?.(mapping) : undefined
+                  }
+                  onQueuePinSync={props.onQueuePinSync ? () => props.onQueuePinSync?.(mapping) : undefined}
                 />
               ))}
             </div>

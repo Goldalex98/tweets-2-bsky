@@ -5,8 +5,15 @@ import { Dialog } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { validateAttributionTemplate } from '../../lib/dashboard-utils';
-import { AttributionPolicyFields, ProfileMutationField } from './policy-controls';
-import type { AccountMapping, MappingFormState, SourceParseSummary } from './types';
+import {
+  AttributionPolicyFields,
+  DestinationAiOverridesFields,
+  PostingPolicyPreview,
+  ProfileMutationField,
+  ProfileSyncActions,
+} from './policy-controls';
+import { SourceFiltersPanel } from './source-filters-panel';
+import type { AccountMapping, MappingFormState, SourceFilterPolicy, SourceParseSummary } from './types';
 
 interface EditDestinationDialogProps {
   mapping: AccountMapping | null;
@@ -23,6 +30,20 @@ interface EditDestinationDialogProps {
   onRemoveSource(username: string): void;
   onTestCredentials(): void;
   onSaveCredentials(): void;
+  onSaveSourceFilters(username: string, filters: SourceFilterPolicy): Promise<void>;
+  onPreviewSourceFilter(
+    username: string,
+    filters: SourceFilterPolicy,
+    metadata: Record<string, unknown>,
+  ): Promise<{ allowed: boolean; reason: string }>;
+  onPreviewPosting(input: {
+    text: string;
+    twitterUsername?: string;
+    postingPolicy: MappingFormState['postingPolicy'];
+  }): Promise<{ text: string; attributionApplied: boolean; originalLinkApplied: boolean }>;
+  onPreviewProfileSync(): void;
+  onApplyProfileSync(): void;
+  onQueuePinSync(): void;
 }
 
 export function EditDestinationDialog(props: EditDestinationDialogProps) {
@@ -61,13 +82,45 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
             </div>
             {props.parseSummary.invalid.map((entry, index) => <p key={`${entry.input}-${index}`} role="alert" className="text-xs text-red-600">{entry.input}: {entry.reason}</p>)}
           </div>
+          {props.mapping ? (
+            <SourceFiltersPanel
+              mapping={props.mapping}
+              busy={props.busy}
+              onSaveFilters={props.onSaveSourceFilters}
+              onPreviewFilter={props.onPreviewSourceFilter}
+            />
+          ) : null}
           <AttributionPolicyFields
             idPrefix="edit-destination"
             form={props.form}
             sourceCount={props.sources.length}
             onFormChange={props.onFormChange}
           />
-          <ProfileMutationField idPrefix="edit-destination" form={props.form} onFormChange={props.onFormChange} />
+          <PostingPolicyPreview
+            idPrefix="edit-destination"
+            form={props.form}
+            sourceUsernames={props.sources}
+            busy={props.busy}
+            onPreview={props.onPreviewPosting}
+          />
+          <DestinationAiOverridesFields
+            idPrefix="edit-destination"
+            form={props.form}
+            onFormChange={props.onFormChange}
+          />
+          <ProfileMutationField
+            idPrefix="edit-destination"
+            form={props.form}
+            sourceUsernames={props.sources}
+            onFormChange={props.onFormChange}
+          />
+          <ProfileSyncActions
+            form={props.form}
+            busy={props.busy}
+            onPreviewProfile={props.onPreviewProfileSync}
+            onApplyProfile={props.onApplyProfileSync}
+            onQueuePinSync={props.onQueuePinSync}
+          />
           <div className="space-y-3 rounded-md border p-4">
             <div>
               <p className="font-semibold">Bluesky credentials</p>

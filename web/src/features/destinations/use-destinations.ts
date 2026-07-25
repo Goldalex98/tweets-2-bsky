@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import api, { type ConfigVersion, isConfigConflict, withConfigVersion } from '../../api/client';
 import { createLatestRequestTracker } from '../../lib/latest-request';
-import type { AccountGroup, AccountMapping, BskyProfileView } from './types';
+import type { AccountGroup, AccountMapping, BskyProfileView, SourceFilterPolicy } from './types';
 
 interface UseDestinationsOptions {
   authenticated: boolean;
@@ -148,6 +148,81 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     });
   }, []);
 
+  const patchSource = useCallback(
+    async (mapping: AccountMapping, username: string, payload: { filters?: SourceFilterPolicy; state?: 'enabled' | 'paused' }) => {
+      const response = await withConflictRefresh(() =>
+        api.patch(
+          `/api/destinations/${mapping.id}/sources/${encodeURIComponent(username)}`,
+          withConfigVersion(payload, mapping),
+        ),
+      );
+      await fetchDestinations();
+      return response.data;
+    },
+    [fetchDestinations, withConflictRefresh],
+  );
+
+  const previewSourceFilter = useCallback(
+    async (
+      mapping: AccountMapping,
+      username: string,
+      filters: SourceFilterPolicy,
+      metadata: Record<string, unknown>,
+    ) => {
+      const response = await api.post<{ allowed: boolean; reason: string }>(
+        `/api/destinations/${mapping.id}/sources/${encodeURIComponent(username)}/filter-preview`,
+        { filters, metadata },
+      );
+      return response.data;
+    },
+    [],
+  );
+
+  const previewPostingPolicy = useCallback(
+    async (
+      mapping: AccountMapping,
+      payload: {
+        text: string;
+        twitterUsername?: string;
+        postingPolicy?: AccountMapping['postingPolicy'];
+        isReply?: boolean;
+        isThreadRoot?: boolean;
+      },
+    ) => {
+      const response = await api.post<{
+        text: string;
+        attributionApplied: boolean;
+        originalLinkApplied: boolean;
+      }>(`/api/mappings/${mapping.id}/posting/preview`, payload);
+      return response.data;
+    },
+    [],
+  );
+
+  const previewProfileSync = useCallback(async (mapping: AccountMapping, sourceUsername?: string) => {
+    const response = await api.post(`/api/mappings/${mapping.id}/profile/preview`, {
+      sourceUsername: sourceUsername || undefined,
+    });
+    return response.data;
+  }, []);
+
+  const applyProfileSync = useCallback(async (mapping: AccountMapping, sourceUsername?: string) => {
+    const response = await withConflictRefresh(() =>
+      api.post(`/api/mappings/${mapping.id}/profile/apply`, {
+        sourceUsername: sourceUsername || undefined,
+      }),
+    );
+    await fetchDestinations();
+    return response.data;
+  }, [fetchDestinations, withConflictRefresh]);
+
+  const queuePinSync = useCallback(async (mapping: AccountMapping, sourceUsername?: string) => {
+    const response = await api.post(`/api/pin-sync/${mapping.id}`, {
+      sourceUsername: sourceUsername || undefined,
+    });
+    return response.data;
+  }, []);
+
   const saveCredentials = useCallback(
     async (mapping: AccountMapping, password: string) => {
       await withConflictRefresh(() =>
@@ -209,6 +284,12 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     syncSources,
     testCredentials,
     saveCredentials,
+    patchSource,
+    previewSourceFilter,
+    previewPostingPolicy,
+    previewProfileSync,
+    applyProfileSync,
+    queuePinSync,
     deleteDestination,
     createGroup,
     assignGroup,

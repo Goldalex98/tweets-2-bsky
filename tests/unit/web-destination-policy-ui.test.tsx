@@ -108,12 +108,15 @@ describe('profile mutation control', () => {
           ...current,
           profileManagement: { ...current.profileManagement, allowProfileMutation: true },
         }))}
+        sourceUsernames={['alpha']}
         onFormChange={() => undefined}
       />,
     );
 
     expect(markup).toContain('checked=""');
     expect(markup).toContain('once a sync mode is also enabled');
+    expect(markup).toContain('Profile sync mode');
+    expect(markup).toContain('Pin sync mode');
   });
 });
 
@@ -135,11 +138,19 @@ describe('edit destination dialog', () => {
         onRemoveSource={() => undefined}
         onTestCredentials={() => undefined}
         onSaveCredentials={() => undefined}
+        onSaveSourceFilters={async () => undefined}
+        onPreviewSourceFilter={async () => ({ allowed: true, reason: 'allowed' })}
+        onPreviewPosting={async () => ({ text: 'preview', attributionApplied: false, originalLinkApplied: false })}
+        onPreviewProfileSync={() => undefined}
+        onApplyProfileSync={() => undefined}
+        onQueuePinSync={() => undefined}
       />,
     );
 
     expect(markup).toContain('id="edit-destination-attribution-mode"');
     expect(markup).toContain('id="edit-destination-allow-profile-mutation"');
+    expect(markup).toContain('Source filters');
+    expect(markup).toContain('Preview sample post');
     expect(markup).toContain('aria-modal="true"');
     expect(markup).not.toContain('disabled="">Save Destination</button>');
   });
@@ -167,6 +178,12 @@ describe('edit destination dialog', () => {
         onRemoveSource={() => undefined}
         onTestCredentials={() => undefined}
         onSaveCredentials={() => undefined}
+        onSaveSourceFilters={async () => undefined}
+        onPreviewSourceFilter={async () => ({ allowed: true, reason: 'allowed' })}
+        onPreviewPosting={async () => ({ text: 'preview', attributionApplied: false, originalLinkApplied: false })}
+        onPreviewProfileSync={() => undefined}
+        onApplyProfileSync={() => undefined}
+        onQueuePinSync={() => undefined}
       />,
     );
 

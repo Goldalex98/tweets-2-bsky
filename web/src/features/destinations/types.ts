@@ -46,10 +46,7 @@ export interface SourceRuntimeState {
 
 export interface DestinationAIOverrides {
   imageAltText: AIOverrideMode;
-  translation: AIOverrideMode;
-  summarization: AIOverrideMode;
-  cleanup: AIOverrideMode;
-  hashtags: AIOverrideMode;
+  textCapabilities: Record<'translation' | 'summarization' | 'cleanup' | 'hashtags', AIOverrideMode>;
 }
 
 export interface RoutingPolicy {
@@ -289,4 +286,5 @@ export interface MappingFormState {
   profileSyncSourceUsername: string;
   postingPolicy: PostingPolicy;
   profileManagement: ProfileManagementPolicy;
+  aiOverrides: DestinationAIOverrides;
 }

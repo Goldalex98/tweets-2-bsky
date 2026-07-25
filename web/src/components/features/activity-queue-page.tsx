@@ -17,6 +17,7 @@ export interface ActivityQueueItem {
   policy_version: number;
   policy_snapshot?: string;
   policyDifference?: { changed: boolean; fields: string[] };
+  delivery_diagnostics?: string;
 }
 
 export interface ActivityEntry {
@@ -33,6 +34,24 @@ export interface ActivityEntry {
   destination_id?: string;
   retained_until?: number;
   override_requeued_at?: number;
+  delivery_diagnostics?: string;
+}
+
+function parseDiagnostics(raw?: string): Array<{ kind: string; reason: string }> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry): entry is { kind: string; reason: string } =>
+        Boolean(entry) &&
+        typeof entry === 'object' &&
+        typeof (entry as { kind?: unknown }).kind === 'string' &&
+        typeof (entry as { reason?: unknown }).reason === 'string',
+    );
+  } catch {
+    return [];
+  }
 }
 
 interface ActivityQueuePageProps {
@@ -87,6 +106,15 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                       {item.policyDifference?.changed ? ` · differs now (${item.policyDifference.fields.join(', ')})` : ' · matches current policy'}
                     </p>
                     {item.error_message ? <p className="max-w-3xl text-xs text-red-600 dark:text-red-400">{item.error_message}</p> : null}
+                    {parseDiagnostics(item.delivery_diagnostics).length > 0 ? (
+                      <div className="flex flex-wrap gap-1 pt-1" data-testid="queue-delivery-fallbacks">
+                        {parseDiagnostics(item.delivery_diagnostics).map((event) => (
+                          <Badge key={`${event.kind}-${event.reason}`} variant="outline" title={event.reason}>
+                            {event.kind}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {sourceUrl ? <a className={buttonVariants({ size: 'sm', variant: 'outline' })} href={sourceUrl} target="_blank" rel="noreferrer">Source</a> : null}
@@ -144,6 +172,15 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                         {activity.skip_reason ? <div>Reason: {activity.skip_reason}</div> : null}
                         {activity.error_category ? <div>Category: {activity.error_category}</div> : null}
                         <div>Policy v{activity.policy_version ?? 1} · {activity.policy_snapshot ? 'snapshotted behavior' : 'current behavior'}</div>
+                        {parseDiagnostics(activity.delivery_diagnostics).length > 0 ? (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {parseDiagnostics(activity.delivery_diagnostics).map((event) => (
+                              <Badge key={`${activity.twitter_id}-${event.kind}`} variant="outline" title={event.reason}>
+                                {event.kind}
+                              </Badge>
+                            ))}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-2 py-3 align-top text-right">
                         <div className="flex flex-col items-end gap-1">

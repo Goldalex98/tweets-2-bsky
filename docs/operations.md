@@ -14,6 +14,8 @@ Bulk X input accepts commas, whitespace, and newlines, normalizes `@name`, and r
 
 Posting attribution is `never`, `multiple-sources`, or `always`. Preview uses the same transformer as delivery. Existing queue entries retain their policy snapshot; changing a policy does not silently rewrite queued work.
 
+X polls are not Bluesky polls: the mirror appends a text note with choices and the original X link, and attaches an external URL card when the post has no other embed. Quote and video link fallbacks are recorded in `delivery_diagnostics` on queue/history rows and shown in the Activity dashboard.
+
 Profile mutations require both `allowProfileMutation` and the specific profile, label, suffix, or pin policy. Preview and credential validation are read-only. Aggregate destinations do not infer a profile source.
 
 Routing filters run before moderation and duplicate suppression. Destination and route moderation support keywords, domains, source blocks, sensitive-content behavior, and dry-run traces. AI image alt text and each text capability are independent opt-ins; previews disclose what is sent.
@@ -49,6 +51,14 @@ Discovery writes durable SQLite queue entries before Bluesky delivery. Thread ch
 ## Notifications
 
 Operations webhooks support selected events, timeout, retry, exponential backoff, optional HMAC signing, and private-address blocking. The settings API returns only configured/not-configured flags. A test notification is queued asynchronously.
+
+Selectable events (dashboard toggles or CLI):
+
+- `twitter-auth-failure` — X cookie/scraper authentication failed
+- `bsky-auth-failure` — Bluesky destination login failed
+- `queue-parked` — a queue item exhausted retries and was parked
+- `queue-age` — oldest pending item exceeded `QUEUE_AGE_ALERT_MS` (default off)
+- `update-failure` — in-app update process failed
 
 ## Security and encryption status
 

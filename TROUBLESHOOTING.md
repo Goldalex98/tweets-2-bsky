@@ -207,6 +207,20 @@ system Edge both hang the same way).
 a `node.exe` (Cursor ships one under
 `%LOCALAPPDATA%\Programs\cursor\resources\app\resources\helpers\node.exe`).
 
+### Polls look different on Bluesky
+
+Bluesky has no poll embed. Mirrored poll posts become a text note (choices + link
+to vote or see results on X) and, when there is no other media/quote embed, an
+external URL card for the original post. Check Activity → delivery fallback
+badges (`poll-note`, `poll-card`) to confirm that path was used.
+
+### Quote or video became a link
+
+External quote screenshots and Bluesky video uploads can fall back to `QT:` /
+`Video:` links (no Chromium, no image slots, long/large video, or upload errors).
+Those fallbacks are recorded as `delivery_diagnostics` and shown as badges on
+queue/history items in the Activity page.
+
 ### Docker: updating image
 In Docker mode, update by pulling a newer image and recreating the container with the same volume.
 `/api/update` / `update.sh` are source-install workflows.

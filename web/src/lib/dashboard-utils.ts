@@ -142,6 +142,15 @@ export function defaultMappingForm(): MappingFormState {
       },
       pinSync: { mode: 'off', intervalHours: 24 },
     },
+    aiOverrides: {
+      imageAltText: 'inherit',
+      textCapabilities: {
+        translation: 'inherit',
+        summarization: 'inherit',
+        cleanup: 'inherit',
+        hashtags: 'inherit',
+      },
+    },
   };
 }
 

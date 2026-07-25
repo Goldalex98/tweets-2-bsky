@@ -6,6 +6,7 @@ import { createLatestRequestTracker } from '../../lib/latest-request';
 import type { SchedulerSettings } from '../status/types';
 import type {
   AIConfig,
+  CookieHealthStatus,
   ManagedUser,
   NotificationSettings,
   RuntimeVersionInfo,
@@ -76,6 +77,7 @@ export function useSettingsSecurity({ enabled, onError }: UseSettingsSecurityOpt
   const [twitterConfig, setTwitterConfig] = useState<TwitterConfig>(initialTwitterConfig);
   const [aiConfig, setAiConfig] = useState<AIConfig>(initialAiConfig);
   const [notifications, setNotifications] = useState<NotificationSettings>(initialNotifications);
+  const [cookieHealth, setCookieHealth] = useState<CookieHealthStatus | null>(null);
   const [scheduler, setScheduler] = useState<SchedulerSettings | null>(null);
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [runtimeVersion, setRuntimeVersion] = useState<RuntimeVersionInfo | null>(null);
@@ -90,6 +92,7 @@ export function useSettingsSecurity({ enabled, onError }: UseSettingsSecurityOpt
     setTwitterConfig(initialTwitterConfig);
     setAiConfig(initialAiConfig);
     setNotifications(initialNotifications);
+    setCookieHealth(null);
     setScheduler(null);
     setUsers([]);
     setUpdateStatus(null);
@@ -101,20 +104,36 @@ export function useSettingsSecurity({ enabled, onError }: UseSettingsSecurityOpt
     const token = refreshTracker.begin();
     setLoading(true);
     try {
-      const [twitter, ai, notificationResponse, schedulerResponse, usersResponse, versionResponse, updateResponse] =
-        await Promise.all([
-          api.get<TwitterConfig>('/api/twitter-config'),
-          api.get<AIConfig>('/api/ai-config'),
-          api.get<NotificationSettings>('/api/settings/notifications'),
-          api.get<SchedulerSettings>('/api/settings/scheduler'),
-          api.get<ManagedUser[]>('/api/admin/users'),
-          api.get<RuntimeVersionInfo>('/api/version'),
-          api.get<UpdateStatusInfo>('/api/update-status'),
-        ]);
+      const [
+        twitter,
+        ai,
+        notificationResponse,
+        schedulerResponse,
+        usersResponse,
+        versionResponse,
+        updateResponse,
+        healthResponse,
+      ] = await Promise.all([
+        api.get<TwitterConfig>('/api/twitter-config'),
+        api.get<AIConfig>('/api/ai-config'),
+        api.get<NotificationSettings>('/api/settings/notifications'),
+        api.get<SchedulerSettings>('/api/settings/scheduler'),
+        api.get<ManagedUser[]>('/api/admin/users'),
+        api.get<RuntimeVersionInfo>('/api/version'),
+        api.get<UpdateStatusInfo>('/api/update-status'),
+        api.get<{ cookies: CookieHealthStatus }>('/api/health/details'),
+      ]);
       if (!refreshTracker.isCurrent(token)) return;
       setTwitterConfig({ ...initialTwitterConfig, ...twitter.data, authToken: '', ct0: '', backupAuthToken: '', backupCt0: '' });
       setAiConfig({ ...initialAiConfig, ...ai.data, apiKey: '' });
-      setNotifications({ ...initialNotifications, ...notificationResponse.data, webhookUrl: '', webhookSecret: '' });
+      setNotifications({
+        ...initialNotifications,
+        ...notificationResponse.data,
+        events: { ...initialNotifications.events, ...(notificationResponse.data.events ?? {}) },
+        webhookUrl: '',
+        webhookSecret: '',
+      });
+      setCookieHealth(healthResponse.data.cookies ?? null);
       setScheduler(schedulerResponse.data);
       setUsers(Array.isArray(usersResponse.data) ? usersResponse.data : []);
       setRuntimeVersion(versionResponse.data);
@@ -201,6 +220,21 @@ export function useSettingsSecurity({ enabled, onError }: UseSettingsSecurityOpt
     return saved;
   }, [notifications]);
 
+  const testNotifications = useCallback(async () => {
+    await api.post('/api/settings/notifications/test');
+  }, []);
+
+  const previewAiText = useCallback(
+    async (capability: 'translation' | 'summarization' | 'cleanup' | 'hashtags', text: string) => {
+      const response = await api.post<{ enabled: boolean; output?: string }>('/api/ai/preview-text', {
+        capability,
+        text,
+      });
+      return response.data;
+    },
+    [],
+  );
+
   const createUser = useCallback(
     async (payload: { username?: string; email?: string; password: string; isAdmin: boolean; permissions: object }) => {
       await api.post('/api/admin/users', payload);
@@ -230,6 +264,7 @@ export function useSettingsSecurity({ enabled, onError }: UseSettingsSecurityOpt
     setTwitterConfig(initialTwitterConfig);
     setAiConfig(initialAiConfig);
     setNotifications(initialNotifications);
+    setCookieHealth(null);
     setScheduler(null);
     setUsers([]);
     setRuntimeVersion(null);
@@ -244,6 +279,7 @@ export function useSettingsSecurity({ enabled, onError }: UseSettingsSecurityOpt
     setAiConfig,
     notifications,
     setNotifications,
+    cookieHealth,
     scheduler,
     setScheduler,
     users,
@@ -259,6 +295,8 @@ export function useSettingsSecurity({ enabled, onError }: UseSettingsSecurityOpt
     saveTwitter,
     saveAi,
     saveNotifications,
+    testNotifications,
+    previewAiText,
     createUser,
     deleteUser,
     changeEmail,
