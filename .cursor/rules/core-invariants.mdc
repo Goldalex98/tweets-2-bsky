@@ -1,0 +1,16 @@
+---
+description: Always-on stack, secrets, Bun/Windows, and data-dir invariants for tweets-2-bsky
+alwaysApply: true
+---
+
+# Core invariants
+
+- **Runtime**: Bun only. Never add `package-lock.json`. Prefer `bun x` over `bunx` on Windows.
+- **Imports**: Keep `.js` suffixes on relative TypeScript imports (NodeNext).
+- **Data dir**: Set `TWEETS2BSKY_DATA_DIR` or `APP_DATA_DIR` to a temp path before importing `src/db.ts` / config modules. Paths resolve at module load.
+- **Secrets**: Never log, commit, or return X cookies, Bluesky `appPassword` / legacy `bskyPassword`, AI keys, JWTs, auth headers, webhook secrets. Fixtures use obvious redacted placeholders.
+- **Do not commit**: `.env`, `config.json*`, `data/`, `*.sqlite*`, `dist/`, `web/dist/`.
+- **Windows PATH**: If `bun` missing in agent shell, prepend `%USERPROFILE%\.bun\bin` to `Path`. Do not switch to npm/Node because of a stale PATH.
+- **E2E**: Use `bun run test:e2e` (Node/Playwright). Do not run Playwright under Bun on Windows.
+- **Live smoke**: `test:pipeline`, `test:twitter-*`, `test:ad-tweet` are manual/live only — never in offline CI.
+- **Docs**: Deep architecture lives in `docs/`. Prefer scoped `.cursor/rules/` over pasting whole docs. Cursor project skills under `.cursor/skills/` for multi-step workflows.

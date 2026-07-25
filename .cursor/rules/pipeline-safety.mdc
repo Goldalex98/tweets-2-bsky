@@ -1,0 +1,18 @@
+---
+description: Fetch/queue split, destination locks, Bluesky auth cache, mutation gates
+globs: src/pipeline/**/*.ts,src/services/**/*.ts,src/bsky.ts,src/adapters/**/*.ts,src/index.ts,src/normalized-post.ts,src/profile-mirror.ts,scripts/test-pipeline.ts
+alwaysApply: false
+---
+
+# Pipeline safety
+
+- **Fetch/queue split**: X discovery enqueues only; never wait on Bluesky media upload/post inside the sweep.
+- **Destination locks**: Serialize all writes per destination; different destinations may run concurrently.
+- **Queue identity**: Destination-scoped keys prevent duplicate posts to one destination; allow intentional multi-destination posts.
+- **Validation is read-only**: login + session metadata only — never profile/label/pin/follow/post in validate paths.
+- **Mutations need intent**: profile, bot-label, display-suffix, pin, follow, post require explicit gates — not hidden in preview/validate.
+- **Auth cache**: Evict agents on auth failure and password rotate; prefer credential-aware cache keys so stale passwords are not reused.
+- **Runtime health**: Record account/destination login success/failure without logging secrets.
+- Queue rows keep immutable policy snapshots; re-evaluate only via explicit operator action.
+
+Use skill `run-quality-gate` after pipeline changes. Subagent `pipeline-regression` for focused review.

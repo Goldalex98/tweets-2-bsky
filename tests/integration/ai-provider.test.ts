@@ -61,7 +61,14 @@ test('AI provider tests are injectable, bounded, and purpose isolated', async ()
     );
     const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()]);
     expect(exitCode, stderr).toBe(0);
-    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as any;
+    interface AiProviderTestResult {
+      tested: { success: boolean; testPayload: string };
+      requests: Array<{ purpose: string; hasImage: boolean; imageBytes: number }>;
+      alt: string;
+      translationResolved: unknown;
+      usage: Array<{ status: string }>;
+    }
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as AiProviderTestResult;
     expect(result.tested).toMatchObject({
       success: true,
       testPayload: 'generated-1x1-transparent-png',
@@ -69,7 +76,7 @@ test('AI provider tests are injectable, bounded, and purpose isolated', async ()
     expect(result.requests[0]).toMatchObject({ purpose: 'provider-test', hasImage: true, imageBytes: 68 });
     expect(result.alt.length).toBeLessThanOrEqual(12);
     expect(result.translationResolved).toBeNull();
-    expect(result.usage.map((entry: any) => entry.status)).toEqual(['request', 'success']);
+    expect(result.usage.map((entry) => entry.status)).toEqual(['request', 'success']);
   } finally {
     temporary.cleanup();
   }

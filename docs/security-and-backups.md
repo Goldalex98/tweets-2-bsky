@@ -40,7 +40,8 @@ missing.
 
 ## Encrypting configuration secrets
 
-`CONFIG_ENCRYPTION_KEY` optionally encrypts X cookies, Bluesky app passwords, AI keys, notification
+`CONFIG_ENCRYPTION_KEY` optionally encrypts X cookies, managed Bluesky account passwords at
+`blueskyAccounts[].appPassword`, legacy destination passwords if present, AI keys, notification
 URLs/secrets, and future token-shaped fields before `config.json` is written. Values use
 AES-256-GCM with a unique 96-bit nonce and field-path authenticated data.
 

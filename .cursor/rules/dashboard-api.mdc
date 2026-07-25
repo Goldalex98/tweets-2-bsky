@@ -1,0 +1,15 @@
+---
+description: Dashboard CSRF/revision OCC, API sanitization, incremental React extraction
+globs: web/src/**/*.{ts,tsx},src/routes/**/*.ts,src/server.ts,src/services/*-service.ts
+alwaysApply: false
+---
+
+# Dashboard and API
+
+- Cookie sessions + CSRF for browser; bearer OK for CLI. Use `web/src/api/client.ts` for conflict/error handling.
+- Mutations send `revision` / `updatedAt` last read. Stale writes → `409 CONFIG_REVISION_CONFLICT` + refresh guidance. Never merge stale forms.
+- Sanitize all mapping/account/settings responses — strip `appPassword`, cookies, keys, webhook secrets.
+- Bluesky accounts API: list/create `/api/bluesky-accounts`; validate/rotate/delete under `/:id/*`. Delete linked account → `409`.
+- Bulk destination actions: max 50; same OCC as single edits; destructive backfill needs typed confirm.
+- UI: extend existing panels/hooks; **incremental** extraction from `DashboardApp.tsx` — no behavior-changing rewrite.
+- Prefer existing `web/src/components/ui/` primitives (focus-trapped dialogs, a11y).

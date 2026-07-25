@@ -24,15 +24,15 @@ import {
 import type { NormalizedPost } from './normalized-post.js';
 
 interface DbStatement {
-  get: (...params: any[]) => unknown;
-  all: (...params: any[]) => unknown[];
-  run: (...params: any[]) => unknown;
+  get: (...params: unknown[]) => unknown;
+  all: (...params: unknown[]) => unknown[];
+  run: (...params: unknown[]) => unknown;
 }
 
 interface DbLike {
   prepare: (sql: string) => DbStatement;
   exec: (sql: string) => unknown;
-  transaction: <T extends (...args: any[]) => any>(fn: T) => T;
+  transaction: <T>(fn: () => T) => () => T;
   pragma?: (sql: string) => unknown;
 }
 
@@ -168,6 +168,26 @@ export interface ProcessedTweet {
 
 export interface ProcessedTweetSearchResult extends ProcessedTweet {
   score: number;
+}
+
+export interface ProcessedTweetLookupEntry {
+  uri?: string;
+  cid?: string;
+  root?: { uri: string; cid?: string | null };
+  tail?: { uri: string; cid: string };
+  migrated?: boolean;
+  skipped?: boolean;
+}
+
+function processedTweetRowToLookupEntry(row: ProcessedTweetRow): ProcessedTweetLookupEntry {
+  return {
+    uri: row.bsky_uri ?? undefined,
+    cid: row.bsky_cid ?? undefined,
+    root: row.bsky_root_uri ? { uri: row.bsky_root_uri, cid: row.bsky_root_cid } : undefined,
+    tail: row.bsky_tail_uri && row.bsky_tail_cid ? { uri: row.bsky_tail_uri, cid: row.bsky_tail_cid } : undefined,
+    migrated: row.status === 'migrated',
+    skipped: row.status === 'skipped',
+  };
 }
 
 interface ProcessedTweetRow {
@@ -445,19 +465,12 @@ export const dbService = {
     );
   },
 
-  getTweetsByBskyIdentifier(bskyIdentifier: string): Record<string, any> {
+  getTweetsByBskyIdentifier(bskyIdentifier: string): Record<string, ProcessedTweetLookupEntry> {
     const stmt = db.prepare('SELECT * FROM processed_tweets WHERE bsky_identifier = ?');
-    const rows = stmt.all(bskyIdentifier.toLowerCase()) as any[];
-    const map: Record<string, any> = {};
+    const rows = stmt.all(bskyIdentifier.toLowerCase()) as ProcessedTweetRow[];
+    const map: Record<string, ProcessedTweetLookupEntry> = {};
     for (const row of rows) {
-      map[row.twitter_id] = {
-        uri: row.bsky_uri,
-        cid: row.bsky_cid,
-        root: row.bsky_root_uri ? { uri: row.bsky_root_uri, cid: row.bsky_root_cid } : undefined,
-        tail: row.bsky_tail_uri && row.bsky_tail_cid ? { uri: row.bsky_tail_uri, cid: row.bsky_tail_cid } : undefined,
-        migrated: row.status === 'migrated',
-        skipped: row.status === 'skipped',
-      };
+      map[row.twitter_id] = processedTweetRowToLookupEntry(row);
     }
     return map;
   },
@@ -472,19 +485,12 @@ export const dbService = {
     ).map(rowToProcessedTweet);
   },
 
-  getTweetsByUsername(username: string): Record<string, any> {
+  getTweetsByUsername(username: string): Record<string, ProcessedTweetLookupEntry> {
     const stmt = db.prepare('SELECT * FROM processed_tweets WHERE twitter_username = ?');
-    const rows = stmt.all(username.toLowerCase()) as any[];
-    const map: Record<string, any> = {};
+    const rows = stmt.all(username.toLowerCase()) as ProcessedTweetRow[];
+    const map: Record<string, ProcessedTweetLookupEntry> = {};
     for (const row of rows) {
-      map[row.twitter_id] = {
-        uri: row.bsky_uri,
-        cid: row.bsky_cid,
-        root: row.bsky_root_uri ? { uri: row.bsky_root_uri, cid: row.bsky_root_cid } : undefined,
-        tail: row.bsky_tail_uri && row.bsky_tail_cid ? { uri: row.bsky_tail_uri, cid: row.bsky_tail_cid } : undefined,
-        migrated: row.status === 'migrated',
-        skipped: row.status === 'skipped',
-      };
+      map[row.twitter_id] = processedTweetRowToLookupEntry(row);
     }
     return map;
   },
@@ -959,7 +965,46 @@ export const databaseHealthService = {
   },
 };
 
-const rowToQueueItem = (row: any): QueueItem => ({
+interface PostQueueRow {
+  queue_id?: string;
+  twitter_id: string;
+  bsky_identifier: string;
+  mapping_id: string;
+  twitter_username: string;
+  source_type: string;
+  external_post_id: string;
+  destination_id: string;
+  route_id?: string | null;
+  source_id?: string | null;
+  source_created_at?: number | null;
+  posted_at?: number | null;
+  skip_reason?: string | null;
+  error_category?: string | null;
+  error_message?: string | null;
+  policy_version: number;
+  policy_snapshot?: string | null;
+  decision_version?: number;
+  decision_trace?: string | null;
+  snapshot_updated_at?: number | null;
+  snapshot_updated_by?: string | null;
+  snapshot_update_reason?: string | null;
+  previous_policy_hash?: string | null;
+  kind: QueueItemKind;
+  request_id?: string | null;
+  tweet_json?: string;
+  tweet_text?: string | null;
+  status: QueueItemStatus;
+  attempts: number;
+  not_before: number;
+  last_error?: string | null;
+  first_failure_at?: number | null;
+  last_failure_at?: number | null;
+  enqueued_at: number;
+  updated_at: number;
+  delivery_diagnostics?: string | null;
+}
+
+const rowToQueueItem = (row: PostQueueRow): QueueItem => ({
   queue_id: row.queue_id ?? '',
   twitter_id: row.twitter_id,
   bsky_identifier: row.bsky_identifier,
@@ -985,7 +1030,7 @@ const rowToQueueItem = (row: any): QueueItem => ({
   previous_policy_hash: row.previous_policy_hash ?? undefined,
   kind: row.kind,
   request_id: row.request_id ?? undefined,
-  tweet_json: row.tweet_json,
+  tweet_json: row.tweet_json ?? '',
   tweet_text: row.tweet_text ?? undefined,
   status: row.status,
   attempts: row.attempts,
@@ -1090,7 +1135,7 @@ export const postQueueService = {
   getItem(scope: QueueScope): QueueItem | null {
     const clause = queueScopeClause(scope);
     const row = db.prepare(`SELECT * FROM post_queue WHERE ${clause.sql} LIMIT 1`).get(...clause.params) as
-      | Record<string, unknown>
+      | PostQueueRow
       | undefined;
     return row ? rowToQueueItem(row) : null;
   },
@@ -1201,7 +1246,7 @@ export const postQueueService = {
           group.route_id ?? null,
           group.policy_snapshot ?? null,
           maxItems,
-        ) as any[];
+        ) as PostQueueRow[];
       items = rows.map(rowToQueueItem);
       const mark = db.prepare(
         "UPDATE post_queue SET status = 'processing', updated_at = ? WHERE queue_id = ?",
@@ -1316,7 +1361,7 @@ export const postQueueService = {
         ORDER BY CASE status WHEN 'processing' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, enqueued_at ASC, ${TWEET_ID_ORDER}
         LIMIT ?
       `)
-      .all(limit * 4) as any[];
+      .all(limit * 4) as PostQueueRow[];
     const filtered = options.mappingIds ? rows.filter((row) => options.mappingIds?.has(row.mapping_id)) : rows;
     return filtered.slice(0, limit).map((row) => {
       const item = rowToQueueItem({ ...row, tweet_json: '' });
@@ -1392,7 +1437,7 @@ export const postQueueService = {
     const clause = queueScopeClause(scope);
     const rows = db
       .prepare(`SELECT * FROM post_queue WHERE ${clause.sql} ORDER BY enqueued_at ASC`)
-      .all(...clause.params) as any[];
+      .all(...clause.params) as PostQueueRow[];
     const now = Date.now();
     return rows.map((row) => {
       const item = rowToQueueItem(row);
@@ -1448,7 +1493,7 @@ export const postQueueService = {
     const clause = queueScopeClause(scope);
     const rows = db
       .prepare(`SELECT * FROM post_queue WHERE status != 'processing' AND ${clause.sql}`)
-      .all(...clause.params) as any[];
+      .all(...clause.params) as PostQueueRow[];
     const now = Date.now();
     let affected = 0;
     db.transaction(() => {
@@ -1815,7 +1860,11 @@ export const backfillJobService = {
       (Number(sequenceRow?.value) || 0) + 1,
       now,
     );
-    return this.get(input.id)!;
+    const job = this.get(input.id);
+    if (!job) {
+      throw new Error(`Backfill job not found after upsert: ${input.id}`);
+    }
+    return job;
   },
 
   get(id: string): BackfillJob | null {
@@ -2149,6 +2198,103 @@ export interface AuthRuntimeDiagnostic {
   lastFailureAt?: number;
   lastErrorCategory?: string;
 }
+
+export interface BlueskyAccountRuntimeState {
+  accountId: string;
+  lastValidatedAt?: number;
+  lastSuccessAt?: number;
+  lastFailureAt?: number;
+  lastErrorCategory?: string;
+  lastErrorMessage?: string;
+  consecutiveFailures: number;
+}
+
+export const blueskyAccountRuntimeService = {
+  get(accountId: string): BlueskyAccountRuntimeState | null {
+    const row = db
+      .prepare('SELECT * FROM bluesky_account_runtime_state WHERE account_id = ?')
+      .get(accountId) as Record<string, unknown> | undefined;
+    return row
+      ? {
+          accountId: String(row.account_id),
+          lastValidatedAt: optionalNumber(row.last_validated_at),
+          lastSuccessAt: optionalNumber(row.last_success_at),
+          lastFailureAt: optionalNumber(row.last_failure_at),
+          lastErrorCategory: optionalText(row.last_error_category),
+          lastErrorMessage: optionalText(row.last_error_message),
+          consecutiveFailures: Number(row.consecutive_failures) || 0,
+        }
+      : null;
+  },
+
+  list(): BlueskyAccountRuntimeState[] {
+    const rows = db
+      .prepare('SELECT account_id FROM bluesky_account_runtime_state ORDER BY account_id')
+      .all() as Array<{ account_id: string }>;
+    return rows
+      .map((row) => this.get(row.account_id))
+      .filter((state): state is BlueskyAccountRuntimeState => state !== null);
+  },
+
+  recordSuccess(accountId: string, _kind: 'validate' | 'login' = 'validate'): BlueskyAccountRuntimeState {
+    const now = Date.now();
+    const state: BlueskyAccountRuntimeState = {
+      accountId,
+      lastValidatedAt: now,
+      lastSuccessAt: now,
+      lastFailureAt: this.get(accountId)?.lastFailureAt,
+      consecutiveFailures: 0,
+    };
+    db.prepare(`
+      INSERT INTO bluesky_account_runtime_state (
+        account_id, last_validated_at, last_success_at, last_failure_at,
+        last_error_category, last_error_message, consecutive_failures
+      ) VALUES (?, ?, ?, ?, NULL, NULL, 0)
+      ON CONFLICT(account_id) DO UPDATE SET
+        last_validated_at = excluded.last_validated_at,
+        last_success_at = excluded.last_success_at,
+        last_error_category = NULL,
+        last_error_message = NULL,
+        consecutive_failures = 0
+    `).run(accountId, now, now, state.lastFailureAt ?? null);
+    return state;
+  },
+
+  recordFailure(accountId: string, category: string, message: string): BlueskyAccountRuntimeState {
+    const previous = this.get(accountId);
+    const now = Date.now();
+    const state: BlueskyAccountRuntimeState = {
+      accountId,
+      lastValidatedAt: now,
+      lastSuccessAt: previous?.lastSuccessAt,
+      lastFailureAt: now,
+      lastErrorCategory: category,
+      lastErrorMessage: sanitizedErrorMessage(message).slice(0, 500),
+      consecutiveFailures: (previous?.consecutiveFailures ?? 0) + 1,
+    };
+    db.prepare(`
+      INSERT INTO bluesky_account_runtime_state (
+        account_id, last_validated_at, last_success_at, last_failure_at,
+        last_error_category, last_error_message, consecutive_failures
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        last_validated_at = excluded.last_validated_at,
+        last_failure_at = excluded.last_failure_at,
+        last_error_category = excluded.last_error_category,
+        last_error_message = excluded.last_error_message,
+        consecutive_failures = excluded.consecutive_failures
+    `).run(
+      accountId,
+      now,
+      state.lastSuccessAt ?? null,
+      now,
+      state.lastErrorCategory ?? null,
+      state.lastErrorMessage ?? null,
+      state.consecutiveFailures,
+    );
+    return state;
+  },
+};
 
 export const authRuntimeStateService = {
   get(provider: string): AuthRuntimeDiagnostic | null {
@@ -2612,7 +2758,11 @@ export const digestJobService = {
         status = CASE WHEN digest_jobs.status = 'processing' THEN digest_jobs.status ELSE 'scheduled' END,
         updated_at = excluded.updated_at
     `).run(id, destinationId, routeId, nextRunAt, now, now);
-    return this.get(id)!;
+    const job = this.get(id);
+    if (!job) {
+      throw new Error(`Digest job not found after arm: ${id}`);
+    }
+    return job;
   },
 
   get(id: string): DigestJob | null {

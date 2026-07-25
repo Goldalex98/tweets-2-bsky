@@ -120,6 +120,7 @@ test('upgrades a representative legacy database twice idempotently', async () =>
       { version: 7, name: 'normalized-ingestion-digests', applied_at: expect.any(Number) },
       { version: 8, name: 'canonical-queue-identity', applied_at: expect.any(Number) },
       { version: 9, name: 'delivery-diagnostics', applied_at: expect.any(Number) },
+      { version: 10, name: 'bluesky-account-runtime-state', applied_at: expect.any(Number) },
     ]);
     expect(secondMigrations).toEqual(migrations);
     expect(first.history).toMatchObject({
@@ -239,7 +240,7 @@ test('migration 008 rekeys a populated legacy queue without orphaning rows', asy
     const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()]);
     expect(exitCode, stderr).toBe(0);
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as {
-      queued: Array<Record<string, any>>;
+      queued: Array<Record<string, unknown>>;
       historyCount: number;
       orphanedQueue: number;
       orphanedHistory: number;

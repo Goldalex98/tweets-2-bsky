@@ -42,6 +42,7 @@ import {
   type AttributionMode,
   CURRENT_CONFIG_SCHEMA_VERSION,
   type ConfigMigrationMetadata,
+  type BlueskyAccount,
   type Destination,
   type DestinationMetadata,
   type DestinationAIOverrides,
@@ -801,11 +802,14 @@ const normalizeDestination = (
   }
   const sourceCount = sourceCountByDestination.get(id) ?? 0;
   const profileManagement = normalizeProfileManagementPolicy(value.profileManagement, [], undefined);
+  const bskyAccountId = normalizeString(value.bskyAccountId);
+  const bskyPassword = normalizeSecret(value.bskyPassword);
   return {
     id,
     enabled: normalizeBoolean(value.enabled, true),
+    ...(bskyAccountId ? { bskyAccountId } : {}),
     bskyIdentifier: bskyIdentifier.toLowerCase(),
-    bskyPassword: normalizeSecret(value.bskyPassword) ?? '',
+    ...(bskyPassword ? { bskyPassword } : {}),
     bskyServiceUrl: normalizeStoredServiceUrl(value.bskyServiceUrl),
     bskyDid: normalizeString(value.bskyDid),
     bskyCanonicalHandle: normalizeTwitterUsername(value.bskyCanonicalHandle),
@@ -824,6 +828,49 @@ const normalizeDestination = (
     profileManagement,
     migrationReview: normalizeMigrationReview(value.migrationReview),
     metadata: normalizeDestinationMetadata(value.metadata, id),
+  };
+};
+
+const normalizeBlueskyAccount = (value: unknown): BlueskyAccount | null => {
+  if (!isConfigRecord(value)) {
+    return null;
+  }
+  const id = normalizeString(value.id);
+  const loginIdentifier = normalizeString(value.loginIdentifier)?.toLowerCase();
+  if (!id || !loginIdentifier) {
+    return null;
+  }
+  const appPassword = normalizeSecret(value.appPassword) ?? '';
+  const createdAt =
+    typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))
+      ? value.createdAt
+      : new Date(0).toISOString();
+  const updatedAt =
+    typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt))
+      ? value.updatedAt
+      : createdAt;
+  const legacyDestinationIds = Array.isArray(value.metadata)
+    ? undefined
+    : isConfigRecord(value.metadata) && Array.isArray(value.metadata.legacyDestinationIds)
+      ? value.metadata.legacyDestinationIds.filter((entry): entry is string => typeof entry === 'string')
+      : undefined;
+  return {
+    id,
+    ...(normalizeString(value.label) ? { label: normalizeString(value.label) } : {}),
+    serviceUrl: normalizeStoredServiceUrl(value.serviceUrl),
+    loginIdentifier,
+    appPassword,
+    ...(normalizeString(value.did) ? { did: normalizeString(value.did) } : {}),
+    ...(normalizeTwitterUsername(value.canonicalHandle) || normalizeString(value.canonicalHandle)
+      ? {
+          canonicalHandle:
+            normalizeTwitterUsername(value.canonicalHandle) ??
+            normalizeString(value.canonicalHandle)?.toLowerCase(),
+        }
+      : {}),
+    createdAt,
+    updatedAt,
+    ...(legacyDestinationIds?.length ? { metadata: { legacyDestinationIds } } : {}),
   };
 };
 
@@ -872,13 +919,15 @@ const normalizeMigrationMetadata = (value: unknown): ConfigMigrationMetadata | u
     migratedAt: normalizeIsoDateString(value.migratedAt) ?? new Date(0).toISOString(),
     rollback: {
       backupSuffix:
-        rollback.backupSuffix === '.pre-v6-backup'
-          ? '.pre-v6-backup'
-          : rollback.backupSuffix === '.pre-v5-backup'
-          ? '.pre-v5-backup'
-          : rollback.backupSuffix === '.pre-v4-backup'
-            ? '.pre-v4-backup'
-            : '.pre-v3-backup',
+        rollback.backupSuffix === '.pre-v7-backup'
+          ? '.pre-v7-backup'
+          : rollback.backupSuffix === '.pre-v6-backup'
+            ? '.pre-v6-backup'
+            : rollback.backupSuffix === '.pre-v5-backup'
+              ? '.pre-v5-backup'
+              : rollback.backupSuffix === '.pre-v4-backup'
+                ? '.pre-v4-backup'
+                : '.pre-v3-backup',
       instructions:
         instructions.length > 0
           ? instructions
@@ -922,6 +971,11 @@ export function normalizeConfigV3(rawConfig: unknown): AppConfig {
         .map((destination) => normalizeDestination(destination, sourceCountByDestination))
         .filter((destination): destination is Destination => destination !== null)
     : [];
+  const blueskyAccounts = Array.isArray(rawConfig.blueskyAccounts)
+    ? rawConfig.blueskyAccounts
+        .map((account) => normalizeBlueskyAccount(account))
+        .filter((account): account is BlueskyAccount => account !== null)
+    : [];
   const geminiApiKey = normalizeSecret(rawConfig.geminiApiKey);
   const ai = normalizeAiConfig(rawConfig.ai, geminiApiKey);
   const canonical = {
@@ -947,6 +1001,7 @@ export function normalizeConfigV3(rawConfig: unknown): AppConfig {
     sources,
     destinations,
     routes,
+    blueskyAccounts,
     groups: dedupedGroups,
     users,
     scheduler: normalizeSchedulerConfig(rawConfig.scheduler, rawConfig.checkIntervalMinutes),
@@ -1057,9 +1112,48 @@ export function assertValidAppConfig(config: AppConfig): void {
 
   const destinationIds = new Set<string>();
   const destinationIdentities = new Set<string>();
+  const linkedAccountIds = new Set<string>();
+  const accountIds = new Set<string>();
+  const accountIdentities = new Set<string>();
+
+  for (const account of config.blueskyAccounts) {
+    if (!account.id || !account.loginIdentifier) {
+      throw new Error('A Bluesky account is missing required identity fields.');
+    }
+    if (accountIds.has(account.id)) {
+      throw new Error(`Duplicate Bluesky account id: ${account.id}.`);
+    }
+    accountIds.add(account.id);
+    const identity = account.did
+      ? account.did.trim().toLowerCase()
+      : `account:${account.serviceUrl.toLowerCase()}|${account.loginIdentifier.toLowerCase()}`;
+    if (accountIdentities.has(identity)) {
+      throw new Error(`Duplicate Bluesky account identity: ${identity}.`);
+    }
+    accountIdentities.add(identity);
+  }
+
   for (const destination of config.destinations) {
-    if (!destination.id || !destination.bskyIdentifier || typeof destination.bskyPassword !== 'string') {
-      throw new Error('A destination is missing required identity or credential fields.');
+    if (!destination.id || !destination.bskyIdentifier) {
+      throw new Error('A destination is missing required identity fields.');
+    }
+    if (!destination.bskyAccountId && typeof destination.bskyPassword !== 'string') {
+      throw new Error(
+        `Destination ${destination.id} has neither a linked Bluesky account nor legacy credentials.`,
+      );
+    }
+    if (destination.bskyAccountId) {
+      if (!accountIds.has(destination.bskyAccountId)) {
+        throw new Error(
+          `Destination ${destination.id} references unknown Bluesky account ${destination.bskyAccountId}.`,
+        );
+      }
+      if (linkedAccountIds.has(destination.bskyAccountId)) {
+        throw new Error(
+          `Bluesky account ${destination.bskyAccountId} is linked to more than one destination.`,
+        );
+      }
+      linkedAccountIds.add(destination.bskyAccountId);
     }
     if (destinationIds.has(destination.id)) {
       throw new Error(`Duplicate destination id: ${destination.id}.`);

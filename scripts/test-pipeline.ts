@@ -132,21 +132,22 @@ const toInput = (tweet: { id: string; text: string }) => ({
   twitter_id: tweet.id,
   bsky_identifier: bsky,
   mapping_id: mappingId,
-  twitter_username: primary!.username,
+  twitter_username: primary.username,
   kind: 'scheduled' as const,
   tweet_json: JSON.stringify(tweet),
   tweet_text: tweet.text.slice(0, 300),
 });
 
-const originals = primary!.tweets.filter((tweet) => !tweet.isRetweet);
+const originals = primary.tweets.filter((tweet) => !tweet.isRetweet);
 const inserted = postQueueService.enqueue(originals.map(toInput));
-check(inserted === originals.length, `enqueued ${inserted} real tweet(s) from @${primary!.username}`);
+check(inserted === originals.length, `enqueued ${inserted} real tweet(s) from @${primary.username}`);
 check(postQueueService.enqueue(originals.map(toInput)) === 0, 'second enqueue fully deduped');
 
 const allowed = new Set([mappingId]);
 const batch = postQueueService.claimNextBatch(new Set(), allowed);
 check(batch !== null && batch.items.length === inserted, `claimed all ${inserted} as one batch`);
-const ids = batch!.items.map((item) => item.twitter_id);
+if (!batch) throw new Error('expected claimed batch');
+const ids = batch.items.map((item) => item.twitter_id);
 check(
   ids.every((id, i) => i === 0 || BigInt(id) > BigInt(ids[i - 1] ?? '0')),
   'batch ordered oldest → newest (thread-safe ordering)',
@@ -154,14 +155,17 @@ check(
 check(postQueueService.claimNextBatch(new Set(), allowed) === null, 'mapping locked while batch in flight');
 
 // Simulate: first tweet posts, second fails once, rest crash mid-flight.
-postQueueService.markDone(ids[0]!, bsky);
-if (batch!.items[1]) postQueueService.releaseForRetry(batch!.items[1]!, 'simulated post failure', 8);
+const firstId = ids[0];
+if (!firstId) throw new Error('expected first queue id');
+postQueueService.markDone(firstId, bsky);
+const secondItem = batch.items[1];
+if (secondItem) postQueueService.releaseForRetry(secondItem, 'simulated post failure', 8);
 let counts = postQueueService.getCounts();
 check(counts.pending === 1 && counts.processing === inserted - 2, 'done row removed, failed row pending with backoff');
 check(postQueueService.resetProcessing() === inserted - 2, 'crash recovery re-armed in-flight rows');
 counts = postQueueService.getCounts();
 check(counts.pending === inserted - 1 && counts.failed === 0, 'queue consistent after recovery');
-for (const item of batch!.items.slice(1)) postQueueService.releaseForRetry(item, 'park it', 1);
+for (const item of batch.items.slice(1)) postQueueService.releaseForRetry(item, 'park it', 1);
 check(postQueueService.getCounts().failed === inserted - 1, 'max-attempts parks rows as failed');
 check(postQueueService.retryFailed() === inserted - 1, 'admin retry-failed requeues everything');
 check(postQueueService.deleteByMappingId(mappingId) === inserted - 1, 'mapping purge clears the queue');

@@ -1,10 +1,12 @@
 import { X } from 'lucide-react';
-import type { FormEvent } from 'react';
+import { useEffect, type FormEvent } from 'react';
 import { Button } from '../../components/ui/button';
 import { Dialog } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { validateAttributionTemplate } from '../../lib/dashboard-utils';
+import { ConnectionList } from './connection-list';
+import { ContentPolicyPanel } from './content-policy-panel';
 import {
   AttributionPolicyFields,
   DestinationAiOverridesFields,
@@ -12,6 +14,7 @@ import {
   ProfileMutationField,
   ProfileSyncActions,
 } from './policy-controls';
+import { RouteDeliveryPanel } from './route-delivery-panel';
 import { SourceFiltersPanel } from './source-filters-panel';
 import type { AccountMapping, MappingFormState, SourceFilterPolicy, SourceParseSummary } from './types';
 
@@ -44,10 +47,32 @@ interface EditDestinationDialogProps {
   onPreviewProfileSync(): void;
   onApplyProfileSync(): void;
   onQueuePinSync(): void;
+  onSaveContentPolicy: Parameters<typeof ContentPolicyPanel>[0]['onSave'];
+  onPreviewContentPolicy: Parameters<typeof ContentPolicyPanel>[0]['onPreview'];
+  onSaveRouteDelivery: Parameters<typeof RouteDeliveryPanel>[0]['onSave'];
+  initialSection?: string;
+}
+
+const SCROLL_SECTION_IDS = {
+  sources: 'destination-section-sources',
+  moderation: 'destination-section-moderation',
+  delivery: 'destination-section-delivery',
+} as const;
+
+function scrollToDestinationSection(section: string): void {
+  const id = SCROLL_SECTION_IDS[section as keyof typeof SCROLL_SECTION_IDS] ?? `destination-section-${section}`;
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 export function EditDestinationDialog(props: EditDestinationDialogProps) {
   const templateError = validateAttributionTemplate(props.form.postingPolicy.attribution.template);
+  const mappingId = props.mapping?.id;
+  const initialSection = props.initialSection;
+  useEffect(() => {
+    if (!mappingId || !initialSection) return;
+    const frame = window.requestAnimationFrame(() => scrollToDestinationSection(initialSection));
+    return () => window.cancelAnimationFrame(frame);
+  }, [mappingId, initialSection]);
   return (
     <Dialog
       open={props.mapping !== null}
@@ -83,12 +108,34 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
             {props.parseSummary.invalid.map((entry, index) => <p key={`${entry.input}-${index}`} role="alert" className="text-xs text-red-600">{entry.input}: {entry.reason}</p>)}
           </div>
           {props.mapping ? (
-            <SourceFiltersPanel
-              mapping={props.mapping}
-              busy={props.busy}
-              onSaveFilters={props.onSaveSourceFilters}
-              onPreviewFilter={props.onPreviewSourceFilter}
-            />
+            <>
+              <div id="destination-section-sources">
+                <SourceFiltersPanel
+                  mapping={props.mapping}
+                  busy={props.busy}
+                  onSaveFilters={props.onSaveSourceFilters}
+                  onPreviewFilter={props.onPreviewSourceFilter}
+                />
+              </div>
+              <ConnectionList mapping={props.mapping} onOpenSection={(section) => scrollToDestinationSection(section)} />
+              <div id="destination-section-moderation">
+                <ContentPolicyPanel
+                  key={props.mapping.id}
+                  mapping={props.mapping}
+                  busy={props.busy}
+                  onSave={props.onSaveContentPolicy}
+                  onPreview={props.onPreviewContentPolicy}
+                />
+              </div>
+              <div id="destination-section-delivery">
+                <RouteDeliveryPanel
+                  key={`${props.mapping.id}-delivery`}
+                  mapping={props.mapping}
+                  busy={props.busy}
+                  onSave={props.onSaveRouteDelivery}
+                />
+              </div>
+            </>
           ) : null}
           <AttributionPolicyFields
             idPrefix="edit-destination"

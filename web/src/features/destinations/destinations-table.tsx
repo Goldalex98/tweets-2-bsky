@@ -1,13 +1,24 @@
 import { Pencil, Trash2 } from 'lucide-react';
-import { Badge } from '../../components/ui/badge';
+import { Badge, type BadgeProps } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { getMappingGroupMeta } from '../../lib/dashboard-utils';
+import { summarizeDestinationHealth, type HealthSeverity } from './destination-health';
 import type { AccountMapping, BskyProfileView } from './types';
+
+const HEALTH_BADGE_VARIANT: Record<HealthSeverity, NonNullable<BadgeProps['variant']>> = {
+  healthy: 'success',
+  warning: 'warning',
+  danger: 'danger',
+  neutral: 'outline',
+};
 
 interface DestinationsTableProps {
   mappings: AccountMapping[];
   getProfile(actor: string): BskyProfileView | undefined;
   canManage(mapping: AccountMapping): boolean;
+  selectedIds: Set<string>;
+  onToggle(id: string): void;
+  onToggleAll(): void;
   onEdit(mapping: AccountMapping): void;
   onDelete(mapping: AccountMapping): void;
   onBackfill(mapping: AccountMapping): void;
@@ -17,26 +28,58 @@ export function DestinationsTable({
   mappings,
   getProfile,
   canManage,
+  selectedIds,
+  onToggle,
+  onToggleAll,
   onEdit,
   onDelete,
   onBackfill,
 }: DestinationsTableProps) {
+  const allSelected = mappings.length > 0 && mappings.every((mapping) => selectedIds.has(mapping.id));
   return (
     <div className="hidden overflow-x-auto rounded-lg border md:block">
       <table className="min-w-full text-left text-sm">
         <thead className="border-b bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
-          <tr><th className="px-3 py-3">Destination</th><th className="px-3 py-3">Sources</th><th className="px-3 py-3">Folder</th><th className="px-3 py-3">Queue</th><th className="px-3 py-3 text-right">Actions</th></tr>
+          <tr>
+            <th className="px-3 py-3">
+              <input
+                type="checkbox"
+                aria-label="Select all destinations"
+                checked={allSelected}
+                onChange={onToggleAll}
+              />
+            </th>
+            <th className="px-3 py-3">Destination</th>
+            <th className="px-3 py-3">Sources</th>
+            <th className="px-3 py-3">Folder</th>
+            <th className="px-3 py-3">Queue</th>
+            <th className="px-3 py-3 text-right">Actions</th>
+          </tr>
         </thead>
         <tbody>
           {mappings.map((mapping) => {
             const profile = getProfile(mapping.bskyIdentifier);
             const group = getMappingGroupMeta(mapping);
+            const health = summarizeDestinationHealth(mapping);
             return (
               <tr key={mapping.id} className="interactive-row border-b last:border-0">
+                <td className="px-3 py-3 align-top">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select @${mapping.bskyIdentifier}`}
+                    checked={selectedIds.has(mapping.id)}
+                    onChange={() => onToggle(mapping.id)}
+                  />
+                </td>
                 <td className="px-3 py-3">
                   <div className="flex items-center gap-2">
                     {profile?.avatar ? <img className="h-8 w-8 rounded-full border object-cover" src={profile.avatar} alt="" loading="lazy" /> : null}
-                    <div><p className="font-medium">@{profile?.handle || mapping.bskyIdentifier}</p><Badge variant={mapping.enabled ? 'success' : 'warning'}>{mapping.enabled ? 'Active' : 'Paused'}</Badge></div>
+                    <div>
+                      <p className="font-medium">@{profile?.handle || mapping.bskyIdentifier}</p>
+                      <Badge variant={HEALTH_BADGE_VARIANT[health.severity]} title={health.detail}>
+                        {health.label}
+                      </Badge>
+                    </div>
                   </div>
                 </td>
                 <td className="px-3 py-3">{mapping.twitterUsernames.map((source) => `@${source}`).join(', ')}</td>

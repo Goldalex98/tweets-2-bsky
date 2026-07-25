@@ -1,17 +1,41 @@
+import { createHash } from 'node:crypto';
 import { BskyAgent } from '@atproto/api';
 import { getConfig } from './config-manager.js';
-import { getCanonicalDestinationKey } from './mapping-helpers.js';
-import { runtimeStateService } from './db.js';
+import { blueskyAccountRuntimeService, runtimeStateService } from './db.js';
+import { getCanonicalDestinationKey, normalizeBlueskyServiceUrl } from './mapping-helpers.js';
 
 const activeAgents = new Map<string, BskyAgent>();
 
-export function clearCachedAgent(mapping: {
+type AgentMappingIdentity = {
+  bskyAccountId?: string;
   bskyIdentifier: string;
+  bskyPassword?: string;
   bskyServiceUrl?: string;
   bskyDid?: string;
   bskyCanonicalHandle?: string;
-}): void {
-  activeAgents.delete(getCanonicalDestinationKey(mapping));
+};
+
+function agentCacheKey(mapping: AgentMappingIdentity): string {
+  const canonical = getCanonicalDestinationKey(mapping);
+  const credentialFingerprint = createHash('sha256')
+    .update(`${normalizeBlueskyServiceUrl(mapping.bskyServiceUrl)}\0${mapping.bskyPassword ?? ''}`)
+    .digest('hex')
+    .slice(0, 16);
+  return `${canonical}#${credentialFingerprint}`;
+}
+
+function clearCachedAgentsForIdentity(mapping: AgentMappingIdentity): void {
+  const prefix = `${getCanonicalDestinationKey(mapping)}#`;
+  for (const key of activeAgents.keys()) {
+    if (key.startsWith(prefix) || key === getCanonicalDestinationKey(mapping)) {
+      activeAgents.delete(key);
+    }
+  }
+}
+
+export function clearCachedAgent(mapping: AgentMappingIdentity): void {
+  clearCachedAgentsForIdentity(mapping);
+  activeAgents.delete(agentCacheKey(mapping));
 }
 
 /**
@@ -21,16 +45,18 @@ export function clearCachedAgent(mapping: {
  * `getAgent` keeps handing back the dead agent.
  */
 export function invalidateCachedAgentOnAuthFailure(
-  mapping: { bskyIdentifier: string; bskyServiceUrl?: string; bskyDid?: string; bskyCanonicalHandle?: string },
+  mapping: AgentMappingIdentity,
   errorCategory: string,
 ): boolean {
   if (errorCategory !== 'bsky-auth') return false;
-  const cacheKey = getCanonicalDestinationKey(mapping);
-  return activeAgents.delete(cacheKey);
+  const before = activeAgents.size;
+  clearCachedAgentsForIdentity(mapping);
+  return activeAgents.size < before || activeAgents.delete(agentCacheKey(mapping));
 }
 
 export async function getAgent(mapping: {
   id?: string;
+  bskyAccountId?: string;
   bskyIdentifier: string;
   bskyPassword: string;
   bskyServiceUrl?: string;
@@ -38,7 +64,7 @@ export async function getAgent(mapping: {
   bskyCanonicalHandle?: string;
 }): Promise<BskyAgent | null> {
   const serviceUrl = mapping.bskyServiceUrl || 'https://bsky.social';
-  const cacheKey = getCanonicalDestinationKey(mapping);
+  const cacheKey = agentCacheKey(mapping);
   const existing = activeAgents.get(cacheKey);
   if (existing) return existing;
 
@@ -47,14 +73,15 @@ export async function getAgent(mapping: {
     await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
     activeAgents.set(cacheKey, agent);
     if (mapping.id) runtimeStateService.recordDestinationEvent(mapping.id, 'login');
+    if (mapping.bskyAccountId) blueskyAccountRuntimeService.recordSuccess(mapping.bskyAccountId, 'login');
     return agent;
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     if (mapping.id) {
-      runtimeStateService.recordDestinationFailure(
-        mapping.id,
-        'login',
-        err instanceof Error ? err.message : String(err),
-      );
+      runtimeStateService.recordDestinationFailure(mapping.id, 'login', message);
+    }
+    if (mapping.bskyAccountId) {
+      blueskyAccountRuntimeService.recordFailure(mapping.bskyAccountId, 'bsky-auth', message);
     }
     console.error(`Failed to login to Bluesky for ${mapping.bskyIdentifier} on ${serviceUrl}:`, err);
     return null;
@@ -68,51 +95,61 @@ export async function deleteAllPosts(mappingId: string): Promise<number> {
 
   const agent = await getAgent(mapping);
   if (!agent) throw new Error('Failed to authenticate with Bluesky');
+  const repoDid = agent.session?.did;
+  if (!repoDid) throw new Error('Bluesky session did is missing');
 
   let cursor: string | undefined;
   let deletedCount = 0;
 
   console.log(`[${mapping.bskyIdentifier}] 🗑️ Starting deletion of all posts...`);
 
-  // Safety loop limit to prevent infinite loops
+  // Safety break to prevent infinite loops
   let loops = 0;
   while (loops < 1000) {
     loops++;
     try {
       const { data } = await agent.com.atproto.repo.listRecords({
-        repo: agent.session!.did,
+        repo: repoDid,
         collection: 'app.bsky.feed.post',
         limit: 50, // Keep batch size reasonable
         cursor,
       });
 
-      if (data.records.length === 0) break;
-
-      console.log(`[${mapping.bskyIdentifier}] 🗑️ Deleting batch of ${data.records.length} posts...`);
+      if (!data.records || data.records.length === 0) {
+        break;
+      }
 
       // Use p-limit like approach or just Promise.all since 50 is manageable
-      await Promise.all(
-        data.records.map((r) =>
-          agent.com.atproto.repo
-            .deleteRecord({
-              repo: agent.session!.did,
+      const results = await Promise.all(
+        data.records.map(async (r) => {
+          const rkey = r.uri.split('/').pop();
+          if (!rkey) {
+            console.warn(`Failed to delete record ${r.uri}: missing rkey`);
+            return false;
+          }
+          try {
+            await agent.com.atproto.repo.deleteRecord({
+              repo: repoDid,
               collection: 'app.bsky.feed.post',
-              rkey: r.uri.split('/').pop()!,
-            })
-            .catch((e) => console.warn(`Failed to delete record ${r.uri}:`, e)),
-        ),
+              rkey,
+            });
+            return true;
+          } catch (e) {
+            console.warn(`Failed to delete record ${r.uri}:`, e);
+            return false;
+          }
+        }),
       );
 
-      deletedCount += data.records.length;
+      deletedCount += results.filter(Boolean).length;
       cursor = data.cursor;
-
       if (!cursor) break;
 
-      // Small delay to be nice to the server
-      await new Promise((r) => setTimeout(r, 500));
-    } catch (err) {
-      console.error(`[${mapping.bskyIdentifier}] ❌ Error during deletion loop:`, err);
-      throw err;
+      // Small delay to be nice to the API
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } catch (e) {
+      console.error(`[${mapping.bskyIdentifier}] Error listing records:`, e);
+      throw e;
     }
   }
 

@@ -22,8 +22,9 @@ test('policy snapshots are deterministic, non-secret, and diffable', () => {
     routes: [{ id: 'route', sourceId: 'source', destinationId: 'destination' }],
     ai: { provider: 'gemini', apiKey: 'secret-ai-key', enabled: true },
   });
-  const destination = config.destinations[0]!;
-  const route = config.routes[0]!;
+  const destination = config.destinations[0];
+  const route = config.routes[0];
+  if (!destination || !route) throw new Error('expected destination and route');
   const first = createPolicySnapshot({ destination, route, ai: config.ai, capturedAt: new Date(0) });
   const second = createPolicySnapshot({ destination, route, ai: config.ai, capturedAt: new Date(1) });
   expect(first.hash).toBe(second.hash);

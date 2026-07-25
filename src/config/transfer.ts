@@ -172,7 +172,35 @@ export function mergeImportedConfig(currentConfig: AppConfig, importData: unknow
     );
   }
 
-  const importedConfig = migrateConfig(importData);
+  // Redacted exports omit credentials. Seed matching current secrets so migration
+  // and validation can run, then re-apply current secrets after the merge.
+  const importPrepared = JSON.parse(JSON.stringify(importData)) as Record<string, unknown>;
+  if (Array.isArray(importPrepared.destinations)) {
+    importPrepared.destinations = importPrepared.destinations.map((entry) => {
+      if (!isConfigRecord(entry)) return entry;
+      const hasInlinePassword = typeof entry.bskyPassword === 'string' && entry.bskyPassword.length > 0;
+      const hasAccountLink = typeof entry.bskyAccountId === 'string' && entry.bskyAccountId.length > 0;
+      if (hasInlinePassword || hasAccountLink) return entry;
+      const probe = {
+        id: typeof entry.id === 'string' ? entry.id : '',
+        bskyIdentifier: typeof entry.bskyIdentifier === 'string' ? entry.bskyIdentifier.toLowerCase() : '',
+        bskyServiceUrl: typeof entry.bskyServiceUrl === 'string' ? entry.bskyServiceUrl : 'https://bsky.social',
+        bskyDid: typeof entry.bskyDid === 'string' ? entry.bskyDid : undefined,
+      } as Destination;
+      const existing = findExistingDestination(currentConfig, probe);
+      if (!existing) return entry;
+      return {
+        ...entry,
+        ...(existing.bskyAccountId ? { bskyAccountId: existing.bskyAccountId } : {}),
+        ...(existing.bskyPassword ? { bskyPassword: existing.bskyPassword } : {}),
+      };
+    });
+  }
+  if (!Array.isArray(importPrepared.blueskyAccounts) || importPrepared.blueskyAccounts.length === 0) {
+    importPrepared.blueskyAccounts = currentConfig.blueskyAccounts;
+  }
+
+  const importedConfig = migrateConfig(importPrepared);
   const rawDestinationValues = Array.isArray(importData.destinations)
     ? importData.destinations
     : Array.isArray(importData.mappings)
@@ -189,13 +217,18 @@ export function mergeImportedConfig(currentConfig: AppConfig, importData: unknow
       destination.bskyPassword,
       existing?.bskyPassword,
     );
-    if (bskyPassword === undefined) {
+    const bskyAccountId = destination.bskyAccountId ?? existing?.bskyAccountId;
+    if (!bskyAccountId && bskyPassword === undefined) {
       throw new Error(
         `Imported destination ${destination.bskyIdentifier} has no Bluesky password and does not match an existing destination.`,
       );
     }
     if (!existing) {
-      return { ...destination, bskyPassword };
+      return {
+        ...destination,
+        ...(bskyAccountId ? { bskyAccountId } : {}),
+        ...(!bskyAccountId && bskyPassword ? { bskyPassword } : {}),
+      };
     }
     if (claimedDestinationIds.has(existing.id)) {
       throw new Error(
@@ -210,7 +243,8 @@ export function mergeImportedConfig(currentConfig: AppConfig, importData: unknow
       ...destination,
       id: existing.id,
       storageKey: existing.storageKey,
-      bskyPassword,
+      ...(bskyAccountId ? { bskyAccountId } : {}),
+      ...(!bskyAccountId && bskyPassword ? { bskyPassword } : {}),
       metadata: {
         ...destination.metadata,
         legacyMappingIds: mergeIdentifiers(
@@ -221,6 +255,23 @@ export function mergeImportedConfig(currentConfig: AppConfig, importData: unknow
       },
     };
   });
+
+  const currentAccountById = new Map(currentConfig.blueskyAccounts.map((account) => [account.id, account]));
+  const blueskyAccounts = importedConfig.blueskyAccounts.map((account) => {
+    const currentAccount = currentAccountById.get(account.id);
+    if (!account.appPassword && currentAccount?.appPassword) {
+      return { ...account, appPassword: currentAccount.appPassword };
+    }
+    return account;
+  });
+  // Keep any current accounts that destinations still reference but the import omitted.
+  for (const destination of destinations) {
+    if (!destination.bskyAccountId) continue;
+    if (blueskyAccounts.some((account) => account.id === destination.bskyAccountId)) continue;
+    const currentAccount = currentAccountById.get(destination.bskyAccountId);
+    if (currentAccount) blueskyAccounts.push(currentAccount);
+  }
+
   const sourceIdByImportedId = alignImportedSourceIds(currentConfig, importedConfig.sources);
   const sources = importedConfig.sources.map((source) => {
     const alignedId = sourceIdByImportedId.get(source.id);
@@ -290,6 +341,7 @@ export function mergeImportedConfig(currentConfig: AppConfig, importData: unknow
     sources,
     destinations,
     routes,
+    blueskyAccounts,
     groups: Array.isArray(importData.groups) ? importedConfig.groups : currentConfig.groups,
     users: currentConfig.users,
     twitter,

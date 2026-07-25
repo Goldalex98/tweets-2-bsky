@@ -100,7 +100,7 @@ test('mixed normalized fanout keeps immediate and digest queues distinct and des
       new Response(subprocess.stderr).text(),
     ]);
     expect(exitCode, stderr).toBe(0);
-    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, any>;
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>;
     expect(result.first.accepted).toBe(2);
     expect(result.second.accepted).toBe(1);
     expect(result.queue.pending).toBe(2);
@@ -190,7 +190,7 @@ test('accepted content is fingerprinted so identical content is not reprocessed'
       new Response(subprocess.stderr).text(),
     ]);
     expect(exitCode, stderr).toBe(0);
-    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, any>;
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>;
     expect(result.first.accepted).toBe(1);
     expect(result.second).toMatchObject({ accepted: 0, duplicates: 1 });
     expect(result.second.routes[0].reason).toBe('content-duplicate');

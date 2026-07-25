@@ -1,9 +1,11 @@
-import { Bot, Download, Link2, Repeat2, Settings2, SunMoon, UserRound, Users } from 'lucide-react';
+import { Bot, Download, KeyRound, Link2, Repeat2, Settings2, SunMoon, UserRound, Users } from 'lucide-react';
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
 import type { SettingsSection } from '../../api/types';
 import { Badge } from '../../components/ui/badge';
 import { Card, CardContent } from '../../components/ui/card';
 import { NavList } from '../../components/ui/nav-list';
+import { BlueskyAccountsSection } from '../bluesky-accounts/bluesky-accounts-section';
+import type { BlueskyAccountFormState, BlueskyAccountView } from '../bluesky-accounts/types';
 import { IngestionDigestsPage } from '../ingestion/ingestion-digests-page';
 import type { DigestAdminView, IngestionCredentialView, IngestionSourceView } from '../ingestion/types';
 import type { SchedulerSettings } from '../status/types';
@@ -61,6 +63,18 @@ interface SettingsPageProps {
   updateBusy: boolean;
   editingUserId: string | null;
   canCreateMappings: boolean;
+  canManageMappings: boolean;
+  blueskyAccounts: {
+    accounts: BlueskyAccountView[];
+    loading: boolean;
+    error: string | null;
+    busy: boolean;
+    onCreate(form: BlueskyAccountFormState): Promise<unknown>;
+    onValidate(account: BlueskyAccountView): Promise<unknown>;
+    onRotate(account: BlueskyAccountView, password: string): Promise<unknown>;
+    onDelete(account: BlueskyAccountView): Promise<unknown>;
+    onManageDestination(destinationId: string): void;
+  };
   ingestion: {
     sources: IngestionSourceView[];
     credentials: IngestionCredentialView[];
@@ -108,6 +122,7 @@ export function SettingsPage(props: SettingsPageProps) {
   const twitterBadgeLabel = !props.twitter.hasAuthToken ? 'Off' : recentAuthFailure ? 'Auth issue' : 'On';
   const nav = [
     { id: 'account' as const, label: 'Account', icon: UserRound },
+    ...(props.canManageMappings ? [{ id: 'bluesky' as const, label: 'Bluesky accounts', icon: KeyRound }] : []),
     ...(isAdmin
       ? [
           { id: 'system' as const, label: 'System', icon: Settings2 },
@@ -156,6 +171,19 @@ export function SettingsPage(props: SettingsPageProps) {
             <AccountSecuritySection user={props.user} email={props.email} setEmail={props.setEmail} password={props.password} setPassword={props.setPassword} busy={props.busy} onSaveEmail={props.onSaveEmail} onSavePassword={props.onSavePassword} />
             {!isAdmin ? <AccessScopeSection permissions={props.permissions} /> : null}
           </>
+        ) : null}
+        {props.section === 'bluesky' && props.canManageMappings ? (
+          <BlueskyAccountsSection
+            accounts={props.blueskyAccounts.accounts}
+            loading={props.blueskyAccounts.loading}
+            error={props.blueskyAccounts.error}
+            busy={props.blueskyAccounts.busy}
+            onCreate={props.blueskyAccounts.onCreate}
+            onValidate={props.blueskyAccounts.onValidate}
+            onRotate={props.blueskyAccounts.onRotate}
+            onDelete={props.blueskyAccounts.onDelete}
+            onManageDestination={props.blueskyAccounts.onManageDestination}
+          />
         ) : null}
         {props.section === 'system' && isAdmin ? <SystemSection runtime={props.runtime} update={props.update} updating={props.updateBusy} canCreate={props.canCreateMappings} onUpdate={props.onRunUpdate} onAdd={props.onAddDestination} /> : null}
         {props.section === 'scheduler' && isAdmin && props.scheduler ? <SchedulerSection value={props.scheduler} setValue={props.setScheduler} saving={props.schedulerSaving} onSubmit={props.onSaveScheduler} /> : null}

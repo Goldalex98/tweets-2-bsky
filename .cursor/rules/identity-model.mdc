@@ -1,0 +1,29 @@
+---
+description: Schema v7 Source/Route/Destination/BlueskyAccount identity and credential ownership
+globs: src/config/**/*.ts,src/**/bluesky*.ts,src/mapping-helpers.ts,src/secret-storage.ts,web/src/features/bluesky-accounts/**/*,web/src/features/destinations/**/*,web/src/api/types.ts
+alwaysApply: false
+---
+
+# Identity model (schema v7)
+
+Canonical persisted model:
+
+```text
+Source -> Route -> Destination -> BlueskyAccount
+```
+
+- **Source**: X/webhook/API identity + fetch policy.
+- **Route**: source→destination delivery/content policy.
+- **Destination**: identity (`bskyIdentifier`, `bskyDid`, `bskyCanonicalHandle`), `storageKey` (queue/history), posting/profile policy, `bskyAccountId` link.
+- **BlueskyAccount**: `loginIdentifier`, `appPassword`, `serviceUrl`, optional `did` / `canonicalHandle`.
+
+## Hard rules
+
+- At most **one** destination per `bskyAccountId`.
+- Credentials live on the account. Do not reintroduce required inline `destination.bskyPassword` for new code paths (legacy optional only during migration).
+- `AccountMapping` is a **runtime/API projection** via `projectAccountMappings` — omit from persisted canonical JSON (`toCanonicalConfig`).
+- Resolve posting credentials through the account when `bskyAccountId` is set; projection may fill mapping `bskyPassword` from `account.appPassword`.
+- Queue/processed-history keys stay **destination-scoped** (`storageKey`); changing account link must not silently remap history identity.
+- Stale dashboard edits: `409 CONFIG_REVISION_CONFLICT` — never silent-merge stale forms.
+
+See skill `feature-destination-or-account` when adding fields across layers.

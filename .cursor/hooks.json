@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "bun .cursor/hooks/block-sensitive-git.mjs",
+        "matcher": "git\\s+add\\b",
+        "failClosed": false
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "bun .cursor/hooks/remind-migration-tests.mjs",
+        "matcher": "Write"
+      }
+    ]
+  }
+}

@@ -207,15 +207,16 @@ const normalizeBskyServiceUrl = (value?: string): string => {
   return url.toString().replace(/\/$/, '');
 };
 
+type GraphemeSegmenter = {
+  segment(input: string): Iterable<{ segment: string }>;
+};
+type GraphemeSegmenterConstructor = new (
+  locale: string,
+  options: { granularity: 'grapheme' },
+) => GraphemeSegmenter;
+
 const getGraphemeSegments = (value: string): string[] => {
-  const SegmenterCtor = (globalThis.Intl as any).Segmenter as
-    | (new (
-        locale: string,
-        options: { granularity: 'grapheme' },
-      ) => {
-        segment: (input: string) => Iterable<{ segment: string }>;
-      })
-    | undefined;
+  const SegmenterCtor = (Intl as typeof Intl & { Segmenter?: GraphemeSegmenterConstructor }).Segmenter;
   if (SegmenterCtor) {
     const segmenter = new SegmenterCtor('en', { granularity: 'grapheme' });
     return [...segmenter.segment(value)].map((segment) => segment.segment);

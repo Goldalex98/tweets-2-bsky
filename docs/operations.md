@@ -1,14 +1,26 @@
 # Operations and dashboard guide
 
-This document describes implemented behavior in schema v6. Items under **Future ideas** are not available in the current release.
+This document describes implemented behavior in schema v7. Items under **Future ideas** are not available in the current release.
 
 ## Destinations, aggregate sources, and routes
 
-A destination is one Bluesky identity. A route connects one canonical X, webhook, or API source to that destination. One-to-one destinations default to no attribution; aggregate destinations default to source attribution when multiple sources are present. Adding a source never backfills automatically, and credential validation never changes a profile.
+A destination is one Bluesky identity linked to a managed Bluesky account for posting credentials. A route connects one canonical X, webhook, or API source to that destination. One-to-one destinations default to no attribution; aggregate destinations default to source attribution when multiple sources are present. Adding a source never backfills automatically, and credential validation never changes a profile.
 
-Dashboard destination, source, route, and settings edits carry the `revision` and `updatedAt` last read from the API. A stale edit returns `409 CONFIG_REVISION_CONFLICT`; refresh, review the newer values, and reapply the change. The server never merges a stale form over newer configuration.
+Dashboard destination, source, route, account, and settings edits carry the `revision` and `updatedAt` last read from the API. A stale edit returns `409 CONFIG_REVISION_CONFLICT`; refresh, review the newer values, and reapply the change. The server never merges a stale form over newer configuration.
 
 Bulk X input accepts commas, whitespace, and newlines, normalizes `@name`, and reports invalid or duplicate entries. Source removal preserves history and pending work unless the operator explicitly selects a destructive option.
+
+## Managed Bluesky accounts
+
+Settings → Bluesky accounts owns posting identities (`loginIdentifier`, `appPassword`, DID/handle). Create, validate, rotate, and delete through the dashboard or `/api/bluesky-accounts`. Validation authenticates read-only against Bluesky and never updates a profile, label, pin, follow, or post.
+
+Rotating an app password updates the encrypted account secret, evicts the cached Bluesky agent for that credential, and lets in-flight posts retry with the new password on the next attempt. After rotation, re-validate from Settings if posting fails with an auth error.
+
+Deleting an account that is still linked to a destination returns `409` — unlink or reassign the destination first.
+
+## Bulk destination actions
+
+From the destinations list, select up to 50 destinations and apply pause/resume (`/api/destinations/bulk/state`), folder moves (`/api/destinations/bulk/folder`), or backfill (`/api/destinations/bulk/backfill`). Backfill requires typing `BACKFILL <n>` where `<n>` is the selected count. Bulk mutations use the same config revision OCC as single edits.
 
 ## Posting, profile, and content policy
 
@@ -62,7 +74,7 @@ Selectable events (dashboard toggles or CLI):
 
 ## Security and encryption status
 
-Browser sessions use `HttpOnly` cookies and CSRF tokens. CLI automation may use bearer authentication. Stored X cookies, Bluesky app passwords, provider keys, webhook secrets, ingestion secrets, and JWT material are never returned by normal settings APIs.
+Browser sessions use `HttpOnly` cookies and CSRF tokens. CLI automation may use bearer authentication. Stored X cookies, managed Bluesky `appPassword` values, provider keys, webhook secrets, ingestion secrets, and JWT material are never returned by normal settings APIs.
 
 `CONFIG_ENCRYPTION_KEY` enables AES-256-GCM protected configuration fields. Keep the same key across restarts and copied-volume validation. See [security and backups](security-and-backups.md).
 

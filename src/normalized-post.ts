@@ -251,7 +251,25 @@ export function validateNormalizedPost(
   };
 }
 
-function xMediaDescriptor(value: Record<string, any>): NormalizedMediaDescriptor | undefined {
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function entityUrl(entry: unknown): string | undefined {
+  if (typeof entry === 'string') return entry;
+  const record = readRecord(entry);
+  if (!record) return undefined;
+  const expanded = record.expanded_url ?? record.url;
+  return typeof expanded === 'string' ? expanded : undefined;
+}
+
+function xMediaDescriptor(value: Record<string, unknown>): NormalizedMediaDescriptor | undefined {
   const rawType = String(value.type ?? '').toLowerCase();
   const type: NormalizedMediaType | undefined =
     rawType === 'photo' || rawType === 'image'
@@ -267,15 +285,17 @@ function xMediaDescriptor(value: Record<string, any>): NormalizedMediaDescriptor
     value.mimeType ??
     value.mime_type ??
     (type === 'image' ? 'image/jpeg' : type === 'gif' ? 'image/gif' : 'video/mp4');
+  const sizeBytes = value.sizeBytes;
   return {
     type,
     url: normalizePublicHttpUrl(url),
-    mimeType,
+    mimeType: typeof mimeType === 'string' ? mimeType : String(mimeType),
     // X's scraper often omits content length. Boundary normalization uses a
     // conservative non-zero unknown marker; inbound API validation never does.
-    sizeBytes: Number.isSafeInteger(value.sizeBytes) && value.sizeBytes > 0 ? value.sizeBytes : 1,
-    width: Number.isInteger(value.width) ? value.width : undefined,
-    height: Number.isInteger(value.height) ? value.height : undefined,
+    sizeBytes:
+      typeof sizeBytes === 'number' && Number.isSafeInteger(sizeBytes) && sizeBytes > 0 ? sizeBytes : 1,
+    width: Number.isInteger(value.width) ? (value.width as number) : undefined,
+    height: Number.isInteger(value.height) ? (value.height as number) : undefined,
     alt: typeof value.ext_alt_text === 'string' ? value.ext_alt_text : undefined,
     suppliedAlt: typeof value.ext_alt_text === 'string' ? value.ext_alt_text : undefined,
   };
@@ -293,37 +313,39 @@ const actorOrUndefined = (username: unknown, id: unknown): NormalizedActor | und
 };
 
 /** Adapts an X scraper tweet exactly once at the ingestion boundary. */
-export function normalizeXPost(tweet: Record<string, any>, sourceId: string, username: string): NormalizedPost {
+export function normalizeXPost(tweet: Record<string, unknown>, sourceId: string, username: string): NormalizedPost {
   const externalId = String(tweet.id_str ?? tweet.id ?? '').trim();
   const entities = [
-    ...(Array.isArray(tweet.entities?.urls) ? tweet.entities.urls : []),
-    ...(Array.isArray(tweet.urls) ? tweet.urls : []),
+    ...readArray(readRecord(tweet.entities)?.urls),
+    ...readArray(tweet.urls),
   ];
-  const urls = entities
-    .map((entry: any) => (typeof entry === 'string' ? entry : entry.expanded_url ?? entry.url))
-    .filter((entry: unknown): entry is string => typeof entry === 'string');
+  const urls = entities.map(entityUrl).filter((entry): entry is string => typeof entry === 'string');
   const mediaValues = [
-    ...(Array.isArray(tweet.extended_entities?.media) ? tweet.extended_entities.media : []),
-    ...(Array.isArray(tweet.media) ? tweet.media : []),
+    ...readArray(readRecord(tweet.extended_entities)?.media),
+    ...readArray(tweet.media),
   ];
   const created = tweet.created_at ?? tweet.createdAt ?? Date.now();
+  const user = readRecord(tweet.user);
   const post: NormalizedPost = {
     sourceType: 'x',
     sourceId,
     externalId,
     text: String(tweet.full_text ?? tweet.text ?? '').trim(),
-    createdAt: new Date(typeof created === 'number' ? created : Date.parse(created)).toISOString(),
+    createdAt: new Date(typeof created === 'number' ? created : Date.parse(String(created))).toISOString(),
     urls: [...new Set(urls.map((url) => normalizePublicHttpUrl(url)))],
     language: optionalLanguage(tweet.lang ?? tweet.language),
     sensitive: tweet.possibly_sensitive === true || tweet.sensitive === true,
     // Carried through so downstream filtering can tell a self-reply from a
     // reply to somebody else, and can reject stray timeline injections.
     author: actorOrUndefined(
-      tweet.user?.screen_name ?? tweet.username ?? username,
-      tweet.user?.id_str ?? tweet.user?.id ?? tweet.userId,
+      user?.screen_name ?? tweet.username ?? username,
+      user?.id_str ?? user?.id ?? tweet.userId,
     ),
     media: mediaValues
-      .map((entry: Record<string, any>) => xMediaDescriptor(entry))
+      .map((entry) => {
+        const record = readRecord(entry);
+        return record ? xMediaDescriptor(record) : undefined;
+      })
       .filter((entry: NormalizedMediaDescriptor | undefined): entry is NormalizedMediaDescriptor => Boolean(entry)),
   };
   const replyId = tweet.in_reply_to_status_id_str ?? tweet.in_reply_to_status_id ?? tweet.inReplyToStatusId;

@@ -2,10 +2,10 @@
 
 Cross-post from Twitter/X to Bluesky with thread support, media handling, account mapping, and a web dashboard.
 
-Current release: app `3.1.0`, schema v6 with canonical sources, destinations, routes, durable
-queue/checkpoints, content routing/moderation/dedup, webhook/API ingestion, digests, encrypted
-configuration, and WAL-consistent backup/restore. Bun is the canonical runtime and package manager;
-`bun.lock` is the only lockfile (never add `package-lock.json`).
+Current release: app `3.1.0`, schema v7 with canonical sources, destinations, routes, managed
+Bluesky accounts, durable queue/checkpoints, content routing/moderation/dedup, webhook/API
+ingestion, digests, encrypted configuration, and WAL-consistent backup/restore. Bun is the
+canonical runtime and package manager; `bun.lock` is the only lockfile (never add `package-lock.json`).
 
 This repo is also mirrored on Tangled: [j4ck.xyz/tweets2bsky](https://tangled.org/j4ck.xyz/tweets2bsky)
 
@@ -154,7 +154,8 @@ kill "$(cat data/runtime/tweets-2-bsky.pid)"
 
 The dashboard uses `HttpOnly` session cookies with CSRF protection; bearer tokens remain supported
 for CLI/automation. Optional `CONFIG_ENCRYPTION_KEY` encryption protects persisted provider
-credentials with AES-256-GCM. Settings → Data Management can create redacted or full
+credentials (including managed Bluesky account `appPassword` values and legacy destination
+passwords) with AES-256-GCM. Settings → Data Management can create redacted or full
 WAL-consistent backup bundles and validate/restore them; full browser backups and restore apply
 require current-admin reauthentication and typed confirmation.
 
@@ -192,6 +193,8 @@ Operational endpoints:
 - `GET /healthz` and `GET /readyz` are minimal unauthenticated probes with no account identifiers.
 - `GET /api/health/details` and `GET /api/metrics` require dashboard authentication.
 - `GET /api/metrics/prometheus` is admin-only and available when `ENABLE_PROMETHEUS_METRICS=true`.
+- `GET/POST /api/bluesky-accounts` manages posting identities (list/create); validate, rotate, and delete use `/api/bluesky-accounts/:id/*`.
+- `POST /api/destinations/bulk/state`, `/api/destinations/bulk/folder`, and `/api/destinations/bulk/backfill` apply multi-destination actions (max 50).
 
 Generic webhook notifications can be configured under Settings or with `bun run cli -- notifications`.
 Webhooks support event filters, HMAC signatures, retry/backoff, HTTPS enforcement, and private-network

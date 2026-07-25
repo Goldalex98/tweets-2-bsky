@@ -237,6 +237,7 @@ export function getDefaultConfig(): AppConfig {
     sources: [],
     destinations: [],
     routes: [],
+    blueskyAccounts: [],
     groups: [],
     users: [],
     scheduler: { ...DEFAULT_SCHEDULER_CONFIG },

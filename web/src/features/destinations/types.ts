@@ -75,6 +75,29 @@ export interface DuplicateSuppressionPolicy {
   perceptualImageHash: boolean;
 }
 
+export type RouteDeliveryMode = 'immediate' | 'digest';
+export type DigestCadence = 'hourly' | 'daily' | 'weekly';
+export type DigestGrouping = 'none' | 'source' | 'day';
+
+export interface DigestPolicy {
+  enabled: boolean;
+  cadence: DigestCadence;
+  timezone: string;
+  hour: number;
+  minute: number;
+  dayOfWeek?: number;
+  grouping: DigestGrouping;
+  template: string;
+  maxEntries: number;
+  maxGraphemes: number;
+  includeSourceAttribution: boolean;
+}
+
+export interface RouteDeliveryPolicy {
+  mode: RouteDeliveryMode;
+  digest: DigestPolicy;
+}
+
 export interface PostingPolicy {
   attribution: {
     mode: AttributionMode;
@@ -116,6 +139,9 @@ export interface QueueMappingCounts {
   oldest_enqueued_at: number | null;
 }
 
+/** Canonical destination dashboard view (compatibility projection during AccountMapping retirement). */
+export type DestinationView = AccountMapping;
+
 export interface AccountMapping extends ConfigVersion {
   id: string;
   twitterUsernames: string[];
@@ -131,8 +157,13 @@ export interface AccountMapping extends ConfigVersion {
   activeSourceCount?: number;
   sources?: Array<{
     username: string;
+    routeId?: string;
     state: 'enabled' | 'paused';
     filters?: SourceFilterPolicy;
+    routingPolicy?: RoutingPolicy;
+    moderationPolicy?: ModerationPolicy;
+    duplicateSuppression?: DuplicateSuppressionPolicy;
+    delivery?: RouteDeliveryPolicy;
     schedule?: SourceSchedulePolicy;
     runtime?: SourceRuntimeState | null;
   }>;

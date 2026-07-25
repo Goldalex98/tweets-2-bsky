@@ -165,7 +165,7 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
       new Response(subprocess.stderr).text(),
     ]);
     expect(exitCode, stderr).toBe(0);
-    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as any;
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>;
     expect(result.unauthorized.status).toBe(401);
     expect(result.invalid.status).toBe(200);
     expect(result.invalid.body).toMatchObject({

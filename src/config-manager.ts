@@ -81,6 +81,7 @@ export const CONFIG_PRE_V3_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v3-backup`;
 export const CONFIG_PRE_V4_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v4-backup`;
 export const CONFIG_PRE_V5_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v5-backup`;
 export const CONFIG_PRE_V6_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v6-backup`;
+export const CONFIG_PRE_V7_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v7-backup`;
 
 let configPathInitialized = false;
 let configWriteBlockedReason: string | undefined;
@@ -183,6 +184,10 @@ function ensurePreV6Backup(rawText: string): void {
   writeMigrationBackup(CONFIG_PRE_V6_BACKUP_FILE, rawText, 'pre-v6');
 }
 
+function ensurePreV7Backup(rawText: string): void {
+  writeMigrationBackup(CONFIG_PRE_V7_BACKUP_FILE, rawText, 'pre-v7');
+}
+
 function loadConfigText(rawText: string): ReturnType<typeof migrateConfigWithMetadata> {
   const parsed = decryptConfigDocument(JSON.parse(rawText));
   return migrateConfigWithMetadata(parsed);
@@ -197,6 +202,7 @@ function recoverConfigFromBackup(): AppConfig | undefined {
     const backupText = fs.readFileSync(CONFIG_BACKUP_FILE, 'utf8');
     const result = loadConfigText(backupText);
     if (result.migrated) {
+      if (result.fromVersion < 7) ensurePreV7Backup(backupText);
       if (result.fromVersion < 6) ensurePreV6Backup(backupText);
       if (result.fromVersion < 5) ensurePreV5Backup(backupText);
       if (result.fromVersion < 4) ensurePreV4Backup(backupText);
@@ -277,6 +283,7 @@ export function getConfig(): AppConfig {
   if (JSON.stringify(parsed) !== JSON.stringify(toCanonicalConfig(result.config))) {
     try {
       if (result.migrated) {
+        if (result.fromVersion < 7) ensurePreV7Backup(rawText);
         if (result.fromVersion < 6) ensurePreV6Backup(rawText);
         if (result.fromVersion < 5) ensurePreV5Backup(rawText);
         if (result.fromVersion < 4) ensurePreV4Backup(rawText);

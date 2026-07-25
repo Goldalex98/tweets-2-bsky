@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { ConfirmDialog } from '../../components/ui/confirm-dialog';
 import { Input } from '../../components/ui/input';
 import { cn } from '../../lib/utils';
+import { BulkActionBar } from './bulk-action-bar';
 import { DestinationCard } from './destination-card';
 import { DestinationsTable } from './destinations-table';
 import type { AccountMapping, BskyProfileView } from './types';
@@ -38,6 +39,19 @@ interface DestinationsPageProps {
   onCancelBackfill(mapping: AccountMapping): void;
   onApplyProfileSync?(mapping: AccountMapping): void;
   onQueuePinSync?(mapping: AccountMapping): void;
+  selectedIds: Set<string>;
+  onToggleSelected(id: string): void;
+  onToggleSelectAll(ids: string[]): void;
+  bulkBusy: boolean;
+  bulkFolderName: string;
+  onBulkFolderNameChange(value: string): void;
+  bulkBackfillConfirmation: string;
+  onBulkBackfillConfirmationChange(value: string): void;
+  onBulkPause(): void;
+  onBulkResume(): void;
+  onBulkMoveFolder(): void;
+  onBulkBackfill(): void;
+  onBulkClearSelection(): void;
 }
 
 export function DestinationsPage(props: DestinationsPageProps) {
@@ -72,7 +86,30 @@ export function DestinationsPage(props: DestinationsPageProps) {
             {props.error ? <p role="alert" className="text-sm text-red-600 dark:text-red-400">{props.error}</p> : null}
             <p className="text-xs text-muted-foreground">{props.matchCount} destination{props.matchCount === 1 ? '' : 's'}</p>
             {flatMappings.length === 0 ? <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">{props.loading ? 'Loading destinations…' : 'No destinations match this view.'}</div> : null}
-            <DestinationsTable mappings={flatMappings} getProfile={props.getProfile} canManage={props.canManage} onEdit={props.onEdit} onDelete={(mapping) => setConfirmation({ action: 'delete', mapping })} onBackfill={props.onBackfill} />
+            <DestinationsTable
+              mappings={flatMappings}
+              getProfile={props.getProfile}
+              canManage={props.canManage}
+              selectedIds={props.selectedIds}
+              onToggle={props.onToggleSelected}
+              onToggleAll={() => props.onToggleSelectAll(flatMappings.map((mapping) => mapping.id))}
+              onEdit={props.onEdit}
+              onDelete={(mapping) => setConfirmation({ action: 'delete', mapping })}
+              onBackfill={props.onBackfill}
+            />
+            <BulkActionBar
+              selectedCount={props.selectedIds.size}
+              busy={props.bulkBusy}
+              folderName={props.bulkFolderName}
+              onFolderNameChange={props.onBulkFolderNameChange}
+              confirmation={props.bulkBackfillConfirmation}
+              onConfirmationChange={props.onBulkBackfillConfirmationChange}
+              onPause={props.onBulkPause}
+              onResume={props.onBulkResume}
+              onMoveFolder={props.onBulkMoveFolder}
+              onBackfill={props.onBulkBackfill}
+              onClearSelection={props.onBulkClearSelection}
+            />
             <div className="grid gap-3 md:hidden">
               {flatMappings.map((mapping) => (
                 <DestinationCard

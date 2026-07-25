@@ -4,10 +4,19 @@ import {
   encryptConfigDocument,
   isEncryptedValue,
   parseEncryptionKey,
+  type EncryptedValue,
 } from '../../src/secret-storage.js';
 
 const KEY = '11'.repeat(32);
 const OTHER_KEY = '22'.repeat(32);
+
+interface EncryptedConfigFixture {
+  twitter: { authToken: EncryptedValue; ct0: EncryptedValue };
+  destinations: Array<{ bskyIdentifier: string; bskyPassword: EncryptedValue }>;
+  ai: { provider: string; apiKey: EncryptedValue };
+  notifications: { webhookUrl: EncryptedValue; webhookSecret: EncryptedValue };
+  scheduler: { enabled: boolean };
+}
 
 describe('configuration secret encryption', () => {
   test('round-trips every protected field with unique nonces and leaves ordinary values readable', () => {
@@ -18,7 +27,7 @@ describe('configuration secret encryption', () => {
       notifications: { webhookUrl: 'https://example.test/hook', webhookSecret: 'hook-secret' },
       scheduler: { enabled: true },
     };
-    const encrypted = encryptConfigDocument(plaintext, KEY) as any;
+    const encrypted = encryptConfigDocument(plaintext, KEY) as EncryptedConfigFixture;
     expect(isEncryptedValue(encrypted.twitter.authToken)).toBe(true);
     expect(isEncryptedValue(encrypted.destinations[0].bskyPassword)).toBe(true);
     expect(encrypted.destinations[0].bskyIdentifier).toBe('safe.example');
@@ -35,7 +44,9 @@ describe('configuration secret encryption', () => {
   });
 
   test('fails closed for missing, wrong, and tampered keys or ciphertext', () => {
-    const encrypted = encryptConfigDocument({ twitter: { authToken: 'secret' } }, KEY) as any;
+    const encrypted = encryptConfigDocument({ twitter: { authToken: 'secret' } }, KEY) as {
+      twitter: { authToken: EncryptedValue };
+    };
     expect(() => decryptConfigDocument(encrypted, '')).toThrow('requires CONFIG_ENCRYPTION_KEY');
     expect(() => decryptConfigDocument(encrypted, OTHER_KEY)).toThrow('Could not decrypt');
     encrypted.twitter.authToken.ciphertext = `${encrypted.twitter.authToken.ciphertext.slice(0, -2)}AA`;

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type BskyAgent, RichText } from '@atproto/api';
+import { type AppBskyRichtextFacet, type BskyAgent, RichText } from '@atproto/api';
 import type { BlobRef } from '@atproto/api';
 import { Scraper } from '@the-convocation/twitter-scraper';
 import type { Tweet as ScraperTweet } from '@the-convocation/twitter-scraper';
@@ -132,14 +132,104 @@ interface AspectRatio {
   height: number;
 }
 
+interface MockBlobRef {
+  ref: { toString: () => string };
+  mimeType: string;
+  size: number;
+}
+
+type EmbedBlobRef = BlobRef | MockBlobRef;
+
 interface ImageEmbed {
   alt: string;
-  image: BlobRef;
+  image: EmbedBlobRef;
   aspectRatio?: AspectRatio;
+}
+
+interface VideoJobStatus {
+  state: string;
+  progress?: number;
+  blob?: BlobRef;
+  error?: string;
+}
+
+interface VideoJobStatusResponse {
+  jobStatus: VideoJobStatus;
+}
+
+interface VideoUploadResponse {
+  jobId: string;
+  state: string;
+  blob?: BlobRef;
+}
+
+interface ExternalEmbedCard extends PostEmbed {
+  $type: 'app.bsky.embed.external';
+  external: {
+    uri: string;
+    title: string;
+    description: string;
+    thumb?: BlobRef;
+  };
+}
+
+interface PdsServiceEntry {
+  id?: string;
+  type?: string;
+  serviceEndpoint?: string;
+}
+
+interface DidDocument {
+  service?: PdsServiceEntry[];
+}
+
+interface PostEmbed {
+  $type: string;
+  [key: string]: unknown;
+}
+
+interface StrongRef {
+  uri: string;
+  cid: string;
+}
+
+interface PostRecord extends Record<string, unknown> {
+  text: string;
+  facets?: AppBskyRichtextFacet.Main[];
+  langs: string[];
+  createdAt: string;
+  embed?: PostEmbed;
+  labels?: {
+    $type: 'com.atproto.label.defs#selfLabels';
+    values: Array<{ val: string }>;
+  };
+  reply?: {
+    root: StrongRef;
+    parent: StrongRef;
+  };
+}
+
+interface PostResponse {
+  uri: string;
+  cid: string;
+}
+
+interface DryRunAgent {
+  post(_record: Record<string, unknown>): Promise<PostResponse>;
+  uploadBlob(_data: Uint8Array): Promise<{ data: { blob: MockBlobRef } }>;
+  session: { did: string };
+  com: {
+    atproto: {
+      repo: {
+        describeRepo(): Promise<{ data: Record<string, unknown> }>;
+      };
+    };
+  };
 }
 
 import {
   authRuntimeStateService,
+  blueskyAccountRuntimeService,
   dbService,
   digestEntryService,
   digestJobService,
@@ -156,7 +246,7 @@ import {
   parsePolicySnapshot,
   serializePolicySnapshot,
 } from './policy-snapshot.js';
-import type { BackfillJob, QueueBatch } from './db.js';
+import type { BackfillJob, ProcessedTweetLookupEntry, QueueBatch } from './db.js';
 import { metricsService } from './metrics.js';
 import {
   normalizeXPost,
@@ -239,7 +329,27 @@ async function migrateJsonToSqlite() {
 }
 
 function loadProcessedTweets(bskyIdentifier: string): ProcessedTweetsMap {
-  return dbService.getTweetsByBskyIdentifier(bskyIdentifier);
+  const entries = dbService.getTweetsByBskyIdentifier(bskyIdentifier);
+  return Object.fromEntries(
+    Object.entries(entries).map(([twitterId, entry]: [string, ProcessedTweetLookupEntry]) => {
+      const root =
+        entry.root?.uri && entry.root.cid
+          ? { uri: entry.root.uri, cid: entry.root.cid }
+          : undefined;
+      if (entry.root?.uri && !entry.root.cid) {
+        console.warn(
+          `[${bskyIdentifier}] Skipping incomplete thread root for ${twitterId}: root URI present without CID.`,
+        );
+      }
+      return [
+        twitterId,
+        {
+          ...entry,
+          root,
+        },
+      ];
+    }),
+  );
 }
 
 function saveProcessedTweet(
@@ -495,6 +605,25 @@ function getUserTweetsUrlTemplate(): string | null {
 
 type PinnedTweetLookup = { ok: true; pinnedTweetId?: string } | { ok: false };
 
+interface TimelineInstruction {
+  type?: string;
+  entry?: { entryId?: string };
+}
+
+interface PinnedTweetGraphqlResponse {
+  data?: {
+    user?: {
+      result?: {
+        timeline?: {
+          timeline?: {
+            instructions?: TimelineInstruction[];
+          };
+        };
+      };
+    };
+  };
+}
+
 async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<PinnedTweetLookup> {
   // Preferred path, in case the scraper exposes it again in a future version
   try {
@@ -528,8 +657,8 @@ async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<P
       },
     });
 
-    // biome-ignore lint/suspicious/noExplicitAny: raw GraphQL payload
-    const instructions: any[] = res.data?.data?.user?.result?.timeline?.timeline?.instructions ?? [];
+    const responseData = res.data as PinnedTweetGraphqlResponse;
+    const instructions = responseData.data?.user?.result?.timeline?.timeline?.instructions ?? [];
     for (const instruction of instructions) {
       if (instruction?.type === 'TimelinePinEntry') {
         const match = String(instruction.entry?.entryId ?? '').match(/tweet-(\d+)/);
@@ -538,13 +667,20 @@ async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<P
     }
 
     // Fallback: the author's user object inside any tweet still carries the field
-    // biome-ignore lint/suspicious/noExplicitAny: raw GraphQL payload
-    const findAuthorPin = (node: any): string | undefined | null => {
+    const findAuthorPin = (node: unknown): string | undefined | null => {
       if (!node || typeof node !== 'object') return undefined;
-      if (node.rest_id === userId && node.legacy && Array.isArray(node.legacy.pinned_tweet_ids_str)) {
-        return node.legacy.pinned_tweet_ids_str[0] ?? null; // null = author found, no pin
+      const record = node as Record<string, unknown>;
+      const legacy =
+        record.legacy && typeof record.legacy === 'object'
+          ? (record.legacy as Record<string, unknown>)
+          : undefined;
+      if (record.rest_id === userId && legacy && Array.isArray(legacy.pinned_tweet_ids_str)) {
+        const pinnedId = legacy.pinned_tweet_ids_str[0];
+        if (typeof pinnedId === 'string') return pinnedId;
+        if (typeof pinnedId === 'number') return String(pinnedId);
+        return null; // null = author found, no pin
       }
-      for (const value of Object.values(node)) {
+      for (const value of Object.values(record)) {
         const found = findAuthorPin(value);
         if (found !== undefined) return found;
       }
@@ -575,7 +711,7 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
       // Construct minimal entities from parsed data
       entities: {
         urls: scraperTweet.urls.map((url: string) => ({ url, expanded_url: url })),
-        media: scraperTweet.photos.map((p: any) => ({
+        media: scraperTweet.photos.map((p) => ({
           url: p.url,
           expanded_url: p.url,
           media_url_https: p.url,
@@ -594,6 +730,13 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
     };
   }
 
+  const rawExtras = raw as typeof raw & {
+    possibly_sensitive?: unknown;
+    lang?: unknown;
+    in_reply_to_user_id_str?: string;
+    card?: TweetCard | null;
+  };
+
   return {
     id: raw.id_str,
     id_str: raw.id_str,
@@ -602,22 +745,16 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
     created_at: raw.created_at,
     isRetweet: scraperTweet.isRetweet,
     isPin: scraperTweet.isPin,
-    // biome-ignore lint/suspicious/noExplicitAny: missing in LegacyTweetRaw type
-    possibly_sensitive: Boolean((raw as any).possibly_sensitive) || scraperTweet.sensitiveContent,
-    // biome-ignore lint/suspicious/noExplicitAny: lang is present in legacy timeline payloads
-    lang: typeof (raw as any).lang === 'string' ? (raw as any).lang : undefined,
-    // biome-ignore lint/suspicious/noExplicitAny: raw types match compatible structure
-    entities: raw.entities as any,
-    // biome-ignore lint/suspicious/noExplicitAny: raw types match compatible structure
-    extended_entities: raw.extended_entities as any,
+    possibly_sensitive: Boolean(rawExtras.possibly_sensitive) || scraperTweet.sensitiveContent,
+    lang: typeof rawExtras.lang === 'string' ? rawExtras.lang : undefined,
+    entities: raw.entities as unknown as TweetEntities,
+    extended_entities: raw.extended_entities as unknown as TweetEntities,
     quoted_status_id_str: raw.quoted_status_id_str,
     retweeted_status_id_str: raw.retweeted_status_id_str,
     is_quote_status: !!raw.quoted_status_id_str,
     in_reply_to_status_id_str: raw.in_reply_to_status_id_str,
-    // biome-ignore lint/suspicious/noExplicitAny: missing in LegacyTweetRaw type
-    in_reply_to_user_id_str: (raw as any).in_reply_to_user_id_str,
-    // biome-ignore lint/suspicious/noExplicitAny: card comes from raw tweet
-    card: (raw as any).card,
+    in_reply_to_user_id_str: rawExtras.in_reply_to_user_id_str,
+    card: rawExtras.card,
     permanentUrl: scraperTweet.permanentUrl,
     user: {
       screen_name: scraperTweet.username,
@@ -724,8 +861,7 @@ async function expandUrl(shortUrl: string): Promise<string> {
       timeout: 10000,
       validateStatus: (status) => status >= 200 && status < 400,
     });
-    // biome-ignore lint/suspicious/noExplicitAny: axios internal types
-    return (response.request as any)?.res?.responseUrl || shortUrl;
+    return getAxiosResponseUrl(response.request) ?? shortUrl;
   } catch {
     try {
       const response = await axios.get(shortUrl, {
@@ -734,16 +870,28 @@ async function expandUrl(shortUrl: string): Promise<string> {
         timeout: 10000,
       });
       response.data.destroy();
-      // biome-ignore lint/suspicious/noExplicitAny: axios internal types
-      return (response.request as any)?.res?.responseUrl || shortUrl;
-    } catch (e: any) {
-      if (e.code === 'ERR_FR_TOO_MANY_REDIRECTS' || e.response?.status === 403 || e.response?.status === 401) {
+      return getAxiosResponseUrl(response.request) ?? shortUrl;
+    } catch (error: unknown) {
+      if (
+        axios.isAxiosError(error) &&
+        (error.code === 'ERR_FR_TOO_MANY_REDIRECTS' ||
+          error.response?.status === 403 ||
+          error.response?.status === 401)
+      ) {
         // Silent fallback for common expansion issues (redirect loops, login walls)
         return shortUrl;
       }
       return shortUrl;
     }
   }
+}
+
+function getAxiosResponseUrl(request: unknown): string | undefined {
+  if (!request || typeof request !== 'object') return undefined;
+  const response = (request as { res?: unknown }).res;
+  if (!response || typeof response !== 'object') return undefined;
+  const responseUrl = (response as { responseUrl?: unknown }).responseUrl;
+  return typeof responseUrl === 'string' ? responseUrl : undefined;
 }
 
 interface DownloadedMedia {
@@ -783,7 +931,6 @@ async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: strin
   const MAX_SIZE = 1900 * 1024;
 
   const isPng = mimeType === 'image/png';
-  const isJpeg = mimeType === 'image/jpeg' || mimeType === 'image/jpg';
   const isWebp = mimeType === 'image/webp';
   const isGif = mimeType === 'image/gif';
   const isAnimation = isGif || isWebp;
@@ -933,7 +1080,7 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
       await page.waitForSelector('iframe', { timeout: 10000 });
       // Small extra wait for images inside iframe
       await new Promise((r) => setTimeout(r, 2000));
-    } catch (e) {
+    } catch {
       console.warn('[SCREENSHOT] ⚠️ Timeout waiting for tweet iframe, taking screenshot anyway.');
     }
 
@@ -956,7 +1103,7 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
   return null;
 }
 
-async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<BlobRef> {
+async function pollForVideoProcessing(jobId: string): Promise<BlobRef> {
   console.log('[VIDEO] ⏳ Polling for processing completion (this can take a minute)...');
   let attempts = 0;
   let blob: BlobRef | undefined;
@@ -982,7 +1129,7 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<
       continue;
     }
 
-    const statusData = (await statusResponse.json()) as any;
+    const statusData = (await statusResponse.json()) as VideoJobStatusResponse;
     const state = statusData.jobStatus.state;
     const progress = statusData.jobStatus.progress || 0;
 
@@ -1003,10 +1150,11 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<
       throw new Error('Video processing timed out after 5 minutes.');
     }
   }
-  return blob!;
+  if (!blob) throw new Error('Video processing completed without a blob reference.');
+  return blob;
 }
 
-async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
+async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<ExternalEmbedCard | null> {
   try {
     const response = await axios.get(url, {
       headers: {
@@ -1034,14 +1182,14 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
       try {
         const { buffer, mimeType } = await downloadMedia(imageUrl);
         thumbBlob = await uploadToBluesky(agent, buffer, mimeType);
-      } catch (e) {
+      } catch {
         // SIlently fail thumbnail upload
       }
     }
 
     if (!title && !description) return null;
 
-    const external: any = {
+    const external: ExternalEmbedCard['external'] = {
       uri: url,
       title: title || url,
       description: description,
@@ -1055,12 +1203,15 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
       $type: 'app.bsky.embed.external',
       external,
     };
-  } catch (err: any) {
-    if (err.code === 'ERR_FR_TOO_MANY_REDIRECTS') {
+  } catch (error: unknown) {
+    const code = axios.isAxiosError(error)
+      ? error.code
+      : (error as { code?: string })?.code;
+    if (code === 'ERR_FR_TOO_MANY_REDIRECTS') {
       // Ignore redirect loops
       return null;
     }
-    console.warn(`Failed to fetch embed card for ${url}:`, err.message || err);
+    console.warn(`Failed to fetch embed card for ${url}:`, describeError(error));
     return null;
   }
 }
@@ -1074,12 +1225,17 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
   try {
     // 1. Get Service Auth
     // We need to resolve the actual PDS host for this DID
-    console.log(`[VIDEO] 🔍 Resolving PDS host for DID: ${agent.session!.did}...`);
-    const { data: repoDesc } = await agent.com.atproto.repo.describeRepo({ repo: agent.session!.did! });
+    const did = agent.session?.did;
+    if (!did) {
+      throw new Error('Cannot upload video: Bluesky agent session is missing a DID.');
+    }
+    console.log(`[VIDEO] 🔍 Resolving PDS host for DID: ${did}...`);
+    const { data: repoDesc } = await agent.com.atproto.repo.describeRepo({ repo: did });
 
     // didDoc might be present in repoDesc
-    const pdsService = (repoDesc as any).didDoc?.service?.find(
-      (s: any) => s.id === '#atproto_pds' || s.type === 'AtProtoPds',
+    const didDoc = repoDesc.didDoc as DidDocument;
+    const pdsService = didDoc.service?.find(
+      (service) => service.id === '#atproto_pds' || service.type === 'AtProtoPds',
     );
     const pdsUrl = pdsService?.serviceEndpoint;
     const pdsHost = pdsUrl ? new URL(pdsUrl).host : 'bsky.social';
@@ -1098,7 +1254,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
 
     // 2. Upload to Video Service
     const uploadUrl = new URL('https://video.bsky.app/xrpc/app.bsky.video.uploadVideo');
-    uploadUrl.searchParams.append('did', agent.session!.did!);
+    uploadUrl.searchParams.append('did', did);
     uploadUrl.searchParams.append('name', sanitizedFilename);
 
     console.log(`[VIDEO] 📤 Uploading to ${uploadUrl.href}...`);
@@ -1131,7 +1287,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
 
         if (errorJson.error === 'already_exists' && errorJson.jobId) {
           console.log(`[VIDEO] ♻️ Video already exists. Resuming with Job ID: ${errorJson.jobId}`);
-          return await pollForVideoProcessing(agent, errorJson.jobId);
+          return await pollForVideoProcessing(errorJson.jobId);
         }
         if (
           errorJson.error === 'unconfirmed_email' ||
@@ -1151,7 +1307,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
       throw new Error(`Video upload failed: ${uploadResponse.status} ${errorText}`);
     }
 
-    const jobStatus = (await uploadResponse.json()) as any;
+    const jobStatus = (await uploadResponse.json()) as VideoUploadResponse;
     console.log(`[VIDEO] 📦 Upload accepted. Job ID: ${jobStatus.jobId}, State: ${jobStatus.state}`);
 
     if (jobStatus.blob) {
@@ -1159,7 +1315,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
     }
 
     // 3. Poll for processing status
-    return await pollForVideoProcessing(agent, jobStatus.jobId);
+    return await pollForVideoProcessing(jobStatus.jobId);
   } catch (err) {
     console.error('[VIDEO] ❌ Error in uploadVideoToBluesky:', (err as Error).message);
     throw err;
@@ -1174,9 +1330,12 @@ function rangesOverlap(startA: number, endA: number, startB: number, endB: numbe
   return startA < endB && startB < endA;
 }
 
-function addTwitterHandleLinkFacets(text: string, facets?: any[]): any[] | undefined {
+function addTwitterHandleLinkFacets(
+  text: string,
+  facets?: AppBskyRichtextFacet.Main[],
+): AppBskyRichtextFacet.Main[] | undefined {
   const existingFacets = facets ?? [];
-  const newFacets: any[] = [];
+  const newFacets: AppBskyRichtextFacet.Main[] = [];
   const regex = /@([A-Za-z0-9_]{1,15})/g;
 
   for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
@@ -1268,47 +1427,54 @@ async function fetchUserTweets(
       });
       xRateGovernor.noteSuccess();
       return tweets;
-    } catch (e: any) {
+    } catch (error: unknown) {
       retries--;
 
       // A rate limit is not a transient error: retrying through it is what
       // escalates X throttling into a suspended scraping account. Park every X
       // request until the advertised reset, and keep using the same credentials
       // — switching just spends the backup account's budget too.
-      if (isRateLimitError(e)) {
-        const resumesAt = xRateGovernor.noteRateLimited(parseRateLimitResetMs(e, Date.now()));
+      if (isRateLimitError(error)) {
+        const resumesAt = xRateGovernor.noteRateLimited(parseRateLimitResetMs(error, Date.now()));
         console.warn(
           `⚠️ [${username}] X rate limit reached; retrying after ${formatDurationMs(resumesAt - Date.now())}.`,
         );
         if (retries > 0) continue;
-      } else if (isAuthError(e)) {
+      } else if (isAuthError(error)) {
         // Dead or challenged cookies never recover by retrying. Try the backup
         // slot once, otherwise surface the failure so the operator re-auths.
-        console.warn(`⚠️ [${username}] X rejected the current credentials (${e.message}).`);
+        console.warn(`⚠️ [${username}] X rejected the current credentials (${describeError(error)}).`);
         if (await switchCredentials()) {
           console.log('🔄 Retrying with backup credentials...');
           continue;
         }
         retries = 0;
       } else {
+        const errorMessage = describeError(error);
+        const responseStatus = axios.isAxiosError(error)
+          ? error.response?.status
+          : (error as { response?: { status?: number } })?.response?.status;
+        const responseData = axios.isAxiosError(error)
+          ? error.response?.data
+          : (error as { response?: { data?: unknown } })?.response?.data;
         const transient =
-          e.message?.includes('ServiceUnavailable') ||
-          e.message?.includes('Timeout') ||
-          (e?.response?.status === 400 &&
-            JSON.stringify(e?.response?.data || {}).includes('InternalServerError'));
+          errorMessage.includes('ServiceUnavailable') ||
+          errorMessage.includes('Timeout') ||
+          (responseStatus === 400 &&
+            JSON.stringify(responseData ?? {}).includes('InternalServerError'));
         if (transient && retries > 0) {
           const waitMs = 5000 * 2 ** (2 - retries);
           console.warn(
-            `⚠️ [${username}] Transient X error (${e.message}). Retrying in ${formatDurationMs(waitMs)}.`,
+            `⚠️ [${username}] Transient X error (${errorMessage}). Retrying in ${formatDurationMs(waitMs)}.`,
           );
           await new Promise((r) => setTimeout(r, waitMs));
           continue;
         }
       }
 
-      console.warn(`Error fetching tweets for ${username}:`, e.message || e);
+      console.warn(`Error fetching tweets for ${username}:`, describeError(error));
       const previousAuth = authRuntimeStateService.get('twitter');
-      const category = classifyQueueError(e);
+      const category = classifyQueueError(error);
       authRuntimeStateService.save({
         provider: 'twitter',
         configured: Boolean(getConfig().twitter.authToken && getConfig().twitter.ct0),
@@ -1317,7 +1483,7 @@ async function fetchUserTweets(
         lastFailureAt: Date.now(),
         lastErrorCategory: category,
       });
-      if (throwOnFailure) throw e;
+      if (throwOnFailure) throw error;
       return [];
     }
   }
@@ -1360,7 +1526,7 @@ async function postWithDeterministicRkey(
     if (!message.includes('already') && !message.includes('exists')) throw error;
     const repo = agent.session?.did ?? mapping.bskyDid;
     if (!repo) throw error;
-    const response = await (agent as any).com.atproto.repo.getRecord({
+    const response = await agent.com.atproto.repo.getRecord({
       repo,
       collection: 'app.bsky.feed.post',
       rkey,
@@ -1649,7 +1815,7 @@ async function processTweets(
 
     // 2. Media Handling
     const images: ImageEmbed[] = [];
-    let videoBlob: BlobRef | null = null;
+    let videoBlob: EmbedBlobRef | null = null;
     let videoAspectRatio: AspectRatio | undefined;
     const mediaEntities = tweet.extended_entities?.media || tweet.entities?.media || [];
     const mediaLinksToRemove: string[] = [];
@@ -1684,12 +1850,12 @@ async function processTweets(
           updateAppStatus({ message: 'Downloading high quality image...' });
           const { buffer, mimeType } = await downloadMedia(highQualityUrl);
 
-          let blob: BlobRef;
+          let blob: EmbedBlobRef;
           if (dryRun) {
             console.log(
               `[${twitterUsername}] 🧪 [DRY RUN] Would upload image (${(buffer.length / 1024).toFixed(2)} KB)`,
             );
-            blob = { ref: { toString: () => 'mock-blob' }, mimeType, size: buffer.length } as any;
+            blob = { ref: { toString: () => 'mock-blob' }, mimeType, size: buffer.length };
           } else {
             console.log(`[${twitterUsername}] 📤 Uploading image to Bluesky...`);
             updateAppStatus({ message: 'Uploading image to Bluesky...' });
@@ -1750,7 +1916,7 @@ async function processTweets(
             try {
               console.log(`[${twitterUsername}] 📥 Downloading video: ${videoUrl}`);
               updateAppStatus({ message: `Downloading video: ${path.basename(videoUrl)}` });
-              const { buffer, mimeType } = await downloadMedia(videoUrl, 30 * 60 * 1000);
+              const { buffer } = await downloadMedia(videoUrl, 30 * 60 * 1000);
 
               // Bluesky accepts videos up to 300MB; stay slightly under for safety
               // (280MiB = ~293.6M bytes, under the limit on either MB interpretation).
@@ -1764,7 +1930,7 @@ async function processTweets(
                     ref: { toString: () => 'mock-video-blob' },
                     mimeType: 'video/mp4',
                     size: buffer.length,
-                  } as any;
+                  };
                 } else {
                   updateAppStatus({ message: 'Uploading video to Bluesky...' });
                   videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
@@ -1818,7 +1984,7 @@ async function processTweets(
     // 3. Quoting Logic
     let quoteEmbed: { $type: string; record: { uri: string; cid: string } } | null = null;
     let externalQuoteUrl: string | null = null;
-    let linkCard: any = null;
+    let linkCard: ExternalEmbedCard | null = null;
 
     if (tweet.is_quote_status && tweet.quoted_status_id_str) {
       const quoteId = tweet.quoted_status_id_str;
@@ -1844,7 +2010,7 @@ async function processTweets(
             const ssResult = await captureTweetScreenshot(externalQuoteUrl);
             if (ssResult) {
               try {
-                let blob: BlobRef;
+                let blob: EmbedBlobRef;
                 if (dryRun) {
                   console.log(
                     `[${twitterUsername}] 🧪 [DRY RUN] Would upload screenshot for quote (${(ssResult.buffer.length / 1024).toFixed(2)} KB)`,
@@ -1853,7 +2019,7 @@ async function processTweets(
                     ref: { toString: () => 'mock-ss-blob' },
                     mimeType: 'image/png',
                     size: ssResult.buffer.length,
-                  } as any;
+                  };
                 } else {
                   blob = await uploadToBluesky(agent, ssResult.buffer, 'image/png');
                 }
@@ -1866,7 +2032,7 @@ async function processTweets(
                   kind: 'quote-screenshot',
                   reason: 'External quote screenshot attached',
                 });
-              } catch (e) {
+              } catch {
                 console.warn(`[${twitterUsername}] ⚠️ Failed to upload screenshot blob.`);
               }
             }
@@ -2052,8 +2218,7 @@ async function processTweets(
 
       // Preserve original timing when available, but enforce monotonic per-account
       // timestamps to avoid equal-createdAt collisions in fast self-thread replies.
-      // biome-ignore lint/suspicious/noExplicitAny: dynamic record construction
-      const postRecord: Record<string, any> = {
+      const postRecord: PostRecord = {
         text: rt.text,
         facets: rt.facets,
         langs: detectedLangs,
@@ -2066,7 +2231,11 @@ async function processTweets(
 
       if (i === 0) {
         if (videoBlob) {
-          const videoEmbed: any = {
+          const videoEmbed: PostEmbed & {
+            $type: 'app.bsky.embed.video';
+            video: EmbedBlobRef;
+            aspectRatio?: AspectRatio;
+          } = {
             $type: 'app.bsky.embed.video',
             video: videoBlob,
           };
@@ -2127,7 +2296,7 @@ async function processTweets(
 
       try {
         // Retry logic for network/socket errors
-        let response: any;
+        let response: PostResponse | undefined;
         let retries = 3;
 
         if (dryRun) {
@@ -2144,9 +2313,9 @@ async function processTweets(
                 'Post request timed out after 120s',
               );
               break;
-            } catch (err: any) {
+            } catch (error: unknown) {
               retries--;
-              if (retries === 0) throw err;
+              if (retries === 0) throw error;
               console.warn(
                 `[${twitterUsername}] ⚠️ Post failed (Socket/Network), retrying in 5s... (${retries} retries left)`,
               );
@@ -2155,6 +2324,9 @@ async function processTweets(
           }
         }
 
+        if (!response) {
+          throw new Error(`Posting chunk ${i + 1} completed without a response.`);
+        }
         const currentPostInfo = {
           uri: response.uri,
           cid: response.cid,
@@ -2349,7 +2521,7 @@ function enqueueTweetsForMapping(
   if (source && route?.delivery?.mode === 'digest' && route.delivery.digest.enabled) {
     return tweets.reduce((count, tweet) => {
       try {
-        const post = normalizeXPost(tweet as Record<string, any>, source.id, source.username);
+        const post = normalizeXPost(tweet as unknown as Record<string, unknown>, source.id, source.username);
         return (
           count +
           (digestEntryService.enqueue({
@@ -2407,31 +2579,6 @@ function enqueueTweetsForMapping(
   return postQueueService.enqueue(inputs);
 }
 
-// Fetch-only pass over one source account. Returns tweets that are neither in
-// processed_tweets nor already sitting in the queue.
-async function sweepAccountForNewTweets(
-  mapping: AccountMapping,
-  twitterUsername: string,
-  sessionKey: string,
-): Promise<Tweet[]> {
-  const destinationStorageKey = getDestinationStorageKey(mapping);
-  const seenIds = new Set(Object.keys(loadProcessedTweets(destinationStorageKey)));
-  for (const id of postQueueService.getQueuedIdSet(destinationStorageKey)) {
-    seenIds.add(id);
-  }
-
-  const tweets = await fetchUserTweets(twitterUsername, 50, seenIds, sessionKey);
-  if (tweets.length === 0) return [];
-
-  // The fetched window carries the isPin flag, so pin changes sync for free.
-  await maybeSyncPinnedTweetFromTimeline(mapping, twitterUsername, tweets, false, getMappingLogPrefix(mapping));
-
-  return tweets.filter((tweet) => {
-    const tweetId = tweet.id_str || tweet.id;
-    return Boolean(tweetId) && !seenIds.has(String(tweetId));
-  });
-}
-
 // Sweep each eligible canonical source once, then fan out to destinations.
 async function executeCanonicalXSourceSweep(
   config: AppConfig,
@@ -2487,7 +2634,7 @@ async function executeCanonicalXSourceSweep(
       }
     },
     normalize: (tweet, source) => {
-      const normalized = normalizeXPost(tweet as Record<string, any>, source.id, source.username);
+      const normalized = normalizeXPost(tweet as unknown as Record<string, unknown>, source.id, source.username);
       rawTweetByPost.set(`${source.id}\0${normalized.externalId}`, tweet);
       return normalized;
     },
@@ -2819,8 +2966,7 @@ async function applyBackfillPolicy(
   const destination = config.destinations.find((candidate) => candidate.id === mapping.id);
   const accepted: Tweet[] = [];
   const skipped: Array<{ candidate: Tweet; reason: string }> = [];
-  {
-    for (const tweet of found) {
+  for (const tweet of found) {
       const filterDecision = source
         ? filterTweetForSource(tweet, source, route?.filters ?? source.filters)
         : ({ allowed: false, reason: 'source-disabled', policyVersion: SOURCE_FILTER_POLICY_VERSION } as const);
@@ -2907,7 +3053,6 @@ async function applyBackfillPolicy(
         candidate: tweet,
         reason: effectiveDecision?.allowed ? 'duplicate-suppressed' : (effectiveDecision?.reason ?? 'skipped'),
       });
-    }
   }
   return { accepted, skipped };
 }
@@ -3202,6 +3347,9 @@ const queueWorkerService = new DestinationQueueWorkerService(
     recordDestinationFailure: (destinationId, category, message) => {
       runtimeStateService.recordDestinationFailure(destinationId, category, message);
       const mapping = getConfig().mappings.find((candidate) => candidate.id === destinationId);
+      if (mapping?.bskyAccountId && category === 'bsky-auth') {
+        blueskyAccountRuntimeService.recordFailure(mapping.bskyAccountId, category, message);
+      }
       if (mapping && invalidateCachedAgentOnAuthFailure(mapping, category)) {
         console.warn(
           `[${mapping.bskyIdentifier}] 🔑 Bluesky rejected the cached session; re-authenticating on the next attempt.`,
@@ -3316,19 +3464,26 @@ async function importHistory(
     return;
   }
 
-  let agent = await getAgent(mapping);
-  if (!agent) {
+  const authenticatedAgent = await getAgent(mapping);
+  let agent: BskyAgent;
+  if (authenticatedAgent) {
+    agent = authenticatedAgent;
+  } else {
     if (dryRun) {
       console.log('⚠️  Could not login to Bluesky, but proceeding with MOCK AGENT for Dry Run.');
-      // biome-ignore lint/suspicious/noExplicitAny: mock agent
-      agent = {
-        post: async (record: any) => ({ uri: 'at://did:plc:mock/app.bsky.feed.post/mock', cid: 'mock-cid' }),
-        uploadBlob: async (data: any) => ({ data: { blob: { ref: { toString: () => 'mock-blob' } } } }),
+      const mockAgent: DryRunAgent = {
+        post: async (_record) => ({ uri: 'at://did:plc:mock/app.bsky.feed.post/mock', cid: 'mock-cid' }),
+        uploadBlob: async (_data) => ({
+          data: {
+            blob: { ref: { toString: () => 'mock-blob' }, mimeType: 'application/octet-stream', size: 0 },
+          },
+        }),
         // Add other necessary methods if they are called outside of the already mocked dryRun blocks
         // But since we mocked the calls inside processTweets for dryRun, we just need the object to exist.
         session: { did: 'did:plc:mock' },
         com: { atproto: { repo: { describeRepo: async () => ({ data: {} }) } } },
-      } as any;
+      };
+      agent = mockAgent as unknown as BskyAgent;
     } else {
       return;
     }

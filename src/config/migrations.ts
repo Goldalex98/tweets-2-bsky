@@ -3,6 +3,7 @@ import {
   parseTwitterUsernames,
   resolveProfileSyncSourceUsername,
 } from '../mapping-helpers.js';
+import { blueskyAccountIdentity, createBlueskyAccount } from './bluesky-accounts.js';
 import { DEFAULT_ATTRIBUTION_TEMPLATE, DEFAULT_SCHEDULER_CONFIG } from './defaults.js';
 import {
   assertValidAppConfig,
@@ -14,6 +15,7 @@ import {
 import { projectAccountMappings, routeIdForPair, sourceIdForUsername, toCanonicalConfig } from './projection.js';
 import {
   type AppConfig,
+  type BlueskyAccount,
   CURRENT_CONFIG_SCHEMA_VERSION,
   type Destination,
   type KnownDisplayNameSuffix,
@@ -49,7 +51,7 @@ export interface ConfigMigrationReport {
   deduplicatedDestinations: number;
   deduplicatedRoutes: number;
   conflicts: ConfigMigrationConflict[];
-  backupSuffix: '.pre-v3-backup' | '.pre-v4-backup' | '.pre-v5-backup' | '.pre-v6-backup';
+  backupSuffix: '.pre-v3-backup' | '.pre-v4-backup' | '.pre-v5-backup' | '.pre-v6-backup' | '.pre-v7-backup';
   rollback: string[];
 }
 
@@ -224,7 +226,7 @@ export function migrateV1ToV2(
 
 // Every upgrade to the current schema writes the newest suffix, so reports name
 // it rather than an older one an operator may not have on disk.
-const ROLLBACK_BACKUP_SUFFIX = '.pre-v6-backup' as const;
+const ROLLBACK_BACKUP_SUFFIX = '.pre-v7-backup' as const;
 
 const ROLLBACK_INSTRUCTIONS = [
   'Stop the application.',
@@ -440,6 +442,70 @@ export function migrateV5ToV6(rawConfig: Record<string, unknown>): AppConfig {
   return normalizeConfigV3({ ...rawConfig, schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION });
 }
 
+/**
+ * Explicit, idempotent v6 -> v7 migration: extract inline destination Bluesky
+ * credentials into shared `blueskyAccounts` entries and link via `bskyAccountId`.
+ */
+export function migrateV6ToV7(rawConfig: Record<string, unknown>): AppConfig {
+  const config = normalizeConfigV3({ ...rawConfig, schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION });
+  const accountsByIdentity = new Map<string, BlueskyAccount>();
+  for (const account of config.blueskyAccounts) {
+    accountsByIdentity.set(blueskyAccountIdentity(account), account);
+  }
+  for (const destination of config.destinations) {
+    if (destination.bskyAccountId) continue;
+    if (!destination.bskyPassword) continue;
+    const identity = blueskyAccountIdentity({
+      did: destination.bskyDid,
+      serviceUrl: destination.bskyServiceUrl,
+      loginIdentifier: destination.bskyIdentifier,
+    });
+    let account = accountsByIdentity.get(identity);
+    if (!account) {
+      account = createBlueskyAccount({
+        loginIdentifier: destination.bskyIdentifier,
+        appPassword: destination.bskyPassword,
+        serviceUrl: destination.bskyServiceUrl,
+        did: destination.bskyDid,
+        canonicalHandle: destination.bskyCanonicalHandle,
+        legacyDestinationIds: [destination.id],
+      });
+      config.blueskyAccounts.push(account);
+      accountsByIdentity.set(identity, account);
+    } else if (!account.metadata?.legacyDestinationIds?.includes(destination.id)) {
+      account.metadata = {
+        ...account.metadata,
+        legacyDestinationIds: [...(account.metadata?.legacyDestinationIds ?? []), destination.id],
+      };
+    }
+    destination.bskyAccountId = account.id;
+    (destination as { bskyPassword?: string }).bskyPassword = undefined;
+  }
+  // Re-normalize so destination property order matches a fresh load (idempotency).
+  const normalized = normalizeConfigV3(toCanonicalConfig(config));
+  normalized.mappings = projectAccountMappings(normalized);
+  assertValidAppConfig(normalized);
+  return normalized;
+}
+
+function applyMigrationsFromV3(working: Record<string, unknown>, fromVersion: number): AppConfig {
+  let current = working;
+  let config: AppConfig;
+  if (fromVersion <= 3) {
+    config = migrateV3ToV4(current);
+    current = toCanonicalConfig(config) as unknown as Record<string, unknown>;
+  }
+  if (fromVersion <= 4) {
+    config = migrateV4ToV5(current);
+    current = toCanonicalConfig(config) as unknown as Record<string, unknown>;
+  }
+  if (fromVersion <= 5) {
+    config = migrateV5ToV6(current);
+    current = toCanonicalConfig(config) as unknown as Record<string, unknown>;
+  }
+  return migrateV6ToV7(current);
+}
+
 export function planConfigMigration(rawConfig: unknown): ConfigMigrationReport {
   if (!isConfigRecord(rawConfig)) {
     throw new Error('Configuration root must be a JSON object.');
@@ -490,17 +556,7 @@ export function planConfigMigration(rawConfig: unknown): ConfigMigrationReport {
     working = migrateV1ToV2(working, fromVersion);
   }
   if (version >= 3) {
-    const config =
-      version === 3
-        ? migrateV5ToV6(
-            migrateV4ToV5(migrateV3ToV4(working) as unknown as Record<string, unknown>) as unknown as Record<
-              string,
-              unknown
-            >,
-          )
-        : version === 4
-          ? migrateV5ToV6(migrateV4ToV5(working) as unknown as Record<string, unknown>)
-          : migrateV5ToV6(working);
+    const config = applyMigrationsFromV3(working, version);
     assertValidAppConfig(config);
     return {
       fromVersion,
@@ -620,6 +676,26 @@ export function migrateConfigWithMetadata(rawConfig: unknown): ConfigMigrationRe
       rollback: [...ROLLBACK_INSTRUCTIONS],
     };
     version = 6;
+    working = toCanonicalConfig(config) as unknown as Record<string, unknown>;
+  }
+  if (version < 7) {
+    config = migrateV6ToV7(working);
+    report ??= {
+      fromVersion,
+      toVersion: CURRENT_CONFIG_SCHEMA_VERSION,
+      dryRun: false,
+      wouldMigrate: true,
+      sourceCount: config.sources.length,
+      destinationCount: config.destinations.length,
+      routeCount: config.routes.length,
+      deduplicatedSources: 0,
+      deduplicatedDestinations: 0,
+      deduplicatedRoutes: 0,
+      conflicts: [],
+      backupSuffix: ROLLBACK_BACKUP_SUFFIX,
+      rollback: [...ROLLBACK_INSTRUCTIONS],
+    };
+    version = 7;
   } else {
     config = normalizeConfigV3(working);
     report = {

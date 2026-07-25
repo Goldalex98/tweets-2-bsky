@@ -1,0 +1,13 @@
+---
+description: Bun/NodeNext TypeScript module and Biome conventions
+globs: "**/*.ts,**/*.tsx"
+alwaysApply: false
+---
+
+# TypeScript modules
+
+- Relative imports end in `.js` (emit/NodeNext), including `./foo.js` for `foo.ts`.
+- Prefer explicit null checks over non-null assertions (`!`) in new/edited code.
+- Match existing Biome formatting; use `bun run lint:check` (non-mutating) in agents; `bun run lint`/`format` only when asked to fix style.
+- Server: `src/` Bun/Express. Web: `web/` React 19 + Vite. Do not mix package managers.
+- Avoid drive-by refactors unrelated to the task.

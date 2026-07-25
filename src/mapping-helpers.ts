@@ -131,6 +131,22 @@ export function getDestinationStorageKey(
   );
 }
 
+/**
+ * Prefer a persisted destination storage key so handle/DID updates never
+ * rewrite queue and processed-tweet identity.
+ */
+export function resolveDestinationStorageKey(
+  mapping: Pick<AccountMapping, 'bskyDid' | 'bskyCanonicalHandle' | 'bskyIdentifier'> & {
+    storageKey?: string;
+  },
+): string {
+  const persisted = typeof mapping.storageKey === 'string' ? mapping.storageKey.trim().toLowerCase() : '';
+  if (persisted) {
+    return persisted;
+  }
+  return getDestinationStorageKey(mapping);
+}
+
 export function getActiveTwitterUsernames(
   mapping: Pick<AccountMapping, 'twitterUsernames' | 'pausedTwitterUsernames'>,
 ): string[] {

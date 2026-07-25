@@ -1,4 +1,4 @@
-# Config schema v6 migration and rollback
+# Config schema migration and rollback
 
 Before upgrading, run a read-only report:
 
@@ -16,17 +16,43 @@ to applicable `config.json.pre-vN-backup` files before replacing `config.json`.
 Backups are created once and are not refreshed. Loading the migrated file again
 is byte-stable.
 
-Canonical v6 shape (sanitized and abbreviated only where arrays are empty):
+## Schema v7: managed Bluesky accounts
+
+`migrateV6ToV7` extracts inline destination credentials into shared
+`blueskyAccounts` entries:
+
+- Each destination with a `bskyPassword` and no `bskyAccountId` gets a managed
+  account (or reuses an existing account with the same DID/service/handle identity).
+- The destination is linked via `bskyAccountId` and the inline `bskyPassword` is
+  removed.
+- `bskyIdentifier`, `bskyDid`, `bskyCanonicalHandle`, and `storageKey` stay on
+  the destination (identity and queue/history keys).
+- The migration is idempotent; reloading a v7 config does not create duplicate
+  accounts. A `.pre-v7-backup` file is retained for rollback.
+
+Canonical v7 shape (sanitized and abbreviated only where arrays are empty):
 
 ```json
 {
-  "schemaVersion": 6,
+  "schemaVersion": 7,
   "revision": 14,
-  "updatedAt": "2026-07-24T20:00:00.000Z",
+  "updatedAt": "2026-07-25T14:00:00.000Z",
   "twitter": {
     "authToken": "<encrypted-or-redacted>",
     "ct0": "<encrypted-or-redacted>"
   },
+  "blueskyAccounts": [
+    {
+      "id": "00000000-0000-4000-8000-0000000000aa",
+      "serviceUrl": "https://bsky.social",
+      "loginIdentifier": "example.bsky.social",
+      "appPassword": "<encrypted-or-redacted>",
+      "did": "did:plc:example",
+      "canonicalHandle": "example.bsky.social",
+      "createdAt": "2026-07-25T14:00:00.000Z",
+      "updatedAt": "2026-07-25T14:00:00.000Z"
+    }
+  ],
   "sources": [
     {
       "id": "00000000-0000-4000-8000-000000000001",
@@ -59,8 +85,8 @@ Canonical v6 shape (sanitized and abbreviated only where arrays are empty):
     {
       "id": "00000000-0000-4000-8000-000000000002",
       "enabled": true,
+      "bskyAccountId": "00000000-0000-4000-8000-0000000000aa",
       "bskyIdentifier": "example.bsky.social",
-      "bskyPassword": "<encrypted-or-redacted>",
       "bskyServiceUrl": "https://bsky.social",
       "storageKey": "destination:00000000-0000-4000-8000-000000000002"
     }
@@ -89,7 +115,8 @@ To roll back:
 
 1. Stop the application.
 2. Preserve the current data directory as an additional backup.
-3. Copy the backup matching the previous release's maximum readable schema over `config.json`.
+3. Copy the backup matching the previous release's maximum readable schema over `config.json`
+   (for v7 upgrades, typically `config.json.pre-v7-backup`).
 4. Start the previous release.
 5. Verify destination ownership, source routes, queue depth, and recent
    delivery history.
@@ -97,3 +124,5 @@ To roll back:
 SQLite upgrades are additive and retain the legacy primary keys and columns,
 so restoring the database is normally unnecessary. Restore the pre-upgrade
 database backup only if the older release cannot tolerate the added columns.
+Migration `010-bluesky-account-runtime` adds `bluesky_account_runtime_state` for
+per-account auth health; it is safe to leave in place when rolling config back.

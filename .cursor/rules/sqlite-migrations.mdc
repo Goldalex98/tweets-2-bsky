@@ -1,0 +1,16 @@
+---
+description: Additive SQLite migrations, temp data dirs, schema_migrations discipline
+globs: src/db/**/*.ts,src/db.ts,tests/integration/database-migrations.test.ts,tests/integration/**/*durability*.ts
+alwaysApply: false
+---
+
+# SQLite migrations
+
+- Add next numbered file under `src/db/migrations/` (e.g. `011-*.ts`), export, register in `DATABASE_MIGRATIONS` in `index.ts`.
+- Prefer **additive** `CREATE TABLE IF NOT EXISTS` / `ALTER` patterns; keep migrations repeatable.
+- Versions must be strictly increasing; names unique (validated in `index.ts`).
+- Tests **must** set a temporary `TWEETS2BSKY_DATA_DIR` before importing `src/db.ts`. Never open developer/production DB.
+- Do not drop/rename primary keys used by queue/history unless a dedicated dual-read migration exists.
+- Recorded in `schema_migrations`; config rollback usually leaves DB migrations in place.
+
+Use skill `add-sqlite-migration`.

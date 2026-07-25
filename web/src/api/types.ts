@@ -19,6 +19,7 @@ export type SettingsSection =
   | 'scheduler'
   | 'users'
   | 'twitter'
+  | 'bluesky'
   | 'ai'
   | 'notifications'
   | 'ingestion'

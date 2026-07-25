@@ -1,0 +1,16 @@
+---
+description: Isolated storage tests, mocks, and which check commands to run
+globs: tests/**/*.ts,scripts/test-*.ts,scripts/run-playwright.ts
+alwaysApply: false
+---
+
+# Test discipline
+
+- Set temp `TWEETS2BSKY_DATA_DIR` **before** importing DB/config modules.
+- Unit-test pure normalize/transform helpers. Integration tests isolate storage and mock/avoid live X/Bluesky.
+- Do not run live smoke scripts in CI (`test:pipeline`, `test:twitter-*`, `test:ad-tweet`).
+- E2E via `bun run test:e2e` only.
+- After schema/pipeline/API changes, run at least: `bun run lint:check`, both typechecks, relevant unit/integration tests. Prefer `bun run check` for release-risk changes.
+- Fixtures: redacted placeholders only — never real cookies/passwords.
+
+Use skill `run-quality-gate` for the full Windows-safe command sequence.

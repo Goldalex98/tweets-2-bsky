@@ -175,6 +175,44 @@ restarts. Never log Authorization/signature headers. If production requests
 are rejected as insecure, terminate TLS at the proxy and enable `TRUST_PROXY`
 only after configuring it to overwrite `X-Forwarded-*` headers.
 
+### Startup rejects config: unknown or shared Bluesky account
+
+Symptom: the process exits or fails ready checks with
+`Destination X references unknown Bluesky account Y` or
+`Bluesky account Y is linked to more than one destination`.
+
+Cause: a hand-edited `config.json` with a dangling or duplicated
+`bskyAccountId` after the schema v7 managed-accounts migration.
+
+Fix: stop the app, restore `config.json.pre-v7-backup` (or another known-good
+backup), or relink each destination to a valid account from Settings → Bluesky
+accounts, then restart.
+
+### Could not decrypt `blueskyAccounts.*.appPassword`
+
+Symptom: startup fails with
+`Could not decrypt protected configuration field 'blueskyAccounts.N.appPassword'`
+(or a similar field path).
+
+Cause: wrong or missing `CONFIG_ENCRYPTION_KEY` relative to the encrypted
+config on disk.
+
+Fix: supply the same key used when the config was written. If the key is lost,
+restore a pre-encryption or pre-rotation backup; cryptographic recovery is not
+possible. See [security and backups](docs/security-and-backups.md).
+
+### Auth errors right after rotating a Bluesky app password
+
+Symptom: posting fails with Bluesky authentication errors immediately after a
+password rotation in Settings.
+
+Cause: the rotation stored an incorrect app password (typo or revoked password).
+
+Fix: open Settings → Bluesky accounts, enter the correct app password, rotate
+again, and use Validate (read-only) before relying on the queue. The cached
+agent for the old credential is evicted on rotate; successful validation
+confirms the new secret.
+
 ### Digest job is failed or appears stuck
 
 Use the dashboard/API or `bun run cli -- digest-list` to inspect the sanitized

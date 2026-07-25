@@ -2,6 +2,7 @@ import api, { getApiErrorMessage, withConfigVersion } from './api/client';
 import type { DashboardTab, Notice, SettingsSection, ThemeMode } from './api/types';
 import { ActivityQueuePage } from './components/features/activity-queue-page';
 import { OperationsStatus } from './components/features/operations-status';
+import { RecoveryBanners, type RecoveryNotice } from './components/recovery-banners';
 import { Button } from './components/ui/button';
 import { Card, CardContent } from './components/ui/card';
 import { ConfirmDialog } from './components/ui/confirm-dialog';
@@ -21,10 +22,21 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useActivityPolling } from './features/activity/use-activity-polling';
 import type { ActivityLog, EnrichedPost, LocalPostSearchResult, QueueItemView } from './features/activity/types';
+import { useBlueskyAccounts } from './features/bluesky-accounts/use-bluesky-accounts';
 import { AddDestinationWizard } from './features/destinations/add-destination-wizard';
+import { summarizeDestinationHealth } from './features/destinations/destination-health';
 import { DestinationsPage } from './features/destinations/destinations-page';
 import { EditDestinationDialog } from './features/destinations/edit-destination-dialog';
-import type { AccountMapping, MappingFormState, SourceParseSummary } from './features/destinations/types';
+import type {
+  AccountMapping,
+  DestinationAIOverrides,
+  DuplicateSuppressionPolicy,
+  MappingFormState,
+  ModerationPolicy,
+  RouteDeliveryPolicy,
+  RoutingPolicy,
+  SourceParseSummary,
+} from './features/destinations/types';
 import { useDestinations } from './features/destinations/use-destinations';
 import { useIngestionDigests } from './features/ingestion/use-ingestion-digests';
 import { OverviewPage } from './features/overview/overview-page';
@@ -44,17 +56,17 @@ import {
   ACCOUNT_SEARCH_MIN_SCORE,
   DEFAULT_GROUP_EMOJI,
   DEFAULT_GROUP_KEY,
-  TAB_PATHS,
+  buildDashboardUrl,
   defaultMappingForm,
   getBskyPostUrl,
   getGroupMeta,
   getMappingGroupMeta,
-  getTabFromPath,
   getTwitterPostUrl,
   nextAttributionModeForSourceChange,
   normalizePath,
   normalizeSearchValue,
   normalizeTwitterUsername,
+  parseDashboardLocation,
   parseTwitterUsernameInput,
   scoreAccountMapping,
   tokenizeSearchValue,
@@ -78,8 +90,18 @@ interface ConfirmationState {
 
 export default function DashboardApp() {
   const session = useSessionBootstrap();
-  const [activeTab, setActiveTab] = useState<DashboardTab>(() => getTabFromPath(window.location.pathname) || 'overview');
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>('account');
+  const [activeTab, setActiveTab] = useState<DashboardTab>(
+    () => parseDashboardLocation(window.location.pathname, window.location.search).tab,
+  );
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(
+    () => parseDashboardLocation(window.location.pathname, window.location.search).settingsSection ?? 'account',
+  );
+  const [pendingDestinationId, setPendingDestinationId] = useState<string | undefined>(
+    () => parseDashboardLocation(window.location.pathname, window.location.search).destinationId,
+  );
+  const [pendingEditSection, setPendingEditSection] = useState<string | undefined>(
+    () => parseDashboardLocation(window.location.pathname, window.location.search).editSection,
+  );
   const [theme, setTheme] = useState<ThemeMode>(() => {
     const saved = localStorage.getItem('theme-mode');
     return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system';
@@ -137,6 +159,15 @@ export default function DashboardApp() {
     [canManageAll, canManageOwn, session.user?.id],
   );
 
+  const blueskyAccounts = useBlueskyAccounts({
+    authenticated: Boolean(session.token) && (isAdmin || canManageOwn || canManageAll),
+    onError: handleError,
+  });
+
+  useEffect(() => {
+    if (activeTab === 'settings' && settingsSection === 'bluesky') void blueskyAccounts.refresh();
+  }, [activeTab, settingsSection, blueskyAccounts.refresh]);
+
   useEffect(() => {
     console.log(
       '%cTweets-2-Bsky %cReady to syndicate! 🚀\n%cView source & contribute: https://github.com/j4ckxyz/tweets-2-bsky',
@@ -162,18 +193,6 @@ export default function DashboardApp() {
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
   }, [theme]);
-
-  useEffect(() => {
-    const expected = TAB_PATHS[activeTab];
-    if (normalizePath(window.location.pathname) !== expected) window.history.pushState({ tab: activeTab }, '', expected);
-    localStorage.setItem('dashboard-tab', activeTab);
-  }, [activeTab]);
-
-  useEffect(() => {
-    const onPopState = () => setActiveTab(getTabFromPath(window.location.pathname) || 'overview');
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
 
   useEffect(() => {
     if (session.token) {
@@ -326,7 +345,7 @@ export default function DashboardApp() {
   const [editSourceInput, setEditSourceInput] = useState('');
   const [editSourceSummary, setEditSourceSummary] = useState<SourceParseSummary>({ duplicates: [], invalid: [] });
 
-  const startEdit = (mapping: AccountMapping) => {
+  const startEdit = useCallback((mapping: AccountMapping) => {
     setEditingMapping(mapping);
     setEditSources(mapping.twitterUsernames);
     setEditSourceInput('');
@@ -360,7 +379,7 @@ export default function DashboardApp() {
         },
       },
     });
-  };
+  }, []);
 
   // Credential saves keep the dialog open, so the pinned mapping snapshot must
   // pick up the new config revision or the next save fails the version check.
@@ -372,6 +391,121 @@ export default function DashboardApp() {
       return latest.revision === current.revision && latest.updatedAt === current.updatedAt ? current : latest;
     });
   }, [destinations.mappings]);
+
+  useEffect(() => {
+    const url = buildDashboardUrl({ tab: activeTab, settingsSection, destinationId: editingMapping?.id });
+    const [urlPath, urlQuery = ''] = url.split('?');
+    const currentSearch = window.location.search.replace(/^\?/, '');
+    if (normalizePath(window.location.pathname) !== urlPath || currentSearch !== urlQuery) {
+      window.history.pushState({ tab: activeTab }, '', url);
+    }
+    localStorage.setItem('dashboard-tab', activeTab);
+  }, [activeTab, settingsSection, editingMapping?.id]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const location = parseDashboardLocation(window.location.pathname, window.location.search);
+      setActiveTab(location.tab);
+      setSettingsSection(location.settingsSection ?? 'account');
+      if (location.destinationId) {
+        setPendingDestinationId(location.destinationId);
+        setPendingEditSection(location.editSection);
+      } else {
+        setEditingMapping(null);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  // Resolves a destination deep link (from initial load or a popstate
+  // navigation) into the edit dialog once the destinations list has loaded.
+  useEffect(() => {
+    if (activeTab !== 'accounts' || !pendingDestinationId) return;
+    const mapping = destinations.mappings.find((entry) => entry.id === pendingDestinationId);
+    if (!mapping) return;
+    startEdit(mapping);
+    setPendingDestinationId(undefined);
+    // pendingEditSection is intentionally left set here: EditDestinationDialog
+    // reads it to scroll to the right panel once it opens, and it is cleared
+    // when the dialog closes instead (see onClose below).
+  }, [activeTab, destinations.mappings, pendingDestinationId, startEdit]);
+
+  const openDestinationFromBlueskyAccount = useCallback(
+    (destinationId: string) => {
+      const mapping = destinations.mappings.find((entry) => entry.id === destinationId);
+      if (!mapping) {
+        showNotice('error', 'That destination could not be found. It may have been removed.');
+        return;
+      }
+      setActiveTab('accounts');
+      startEdit(mapping);
+    },
+    [destinations.mappings, showNotice, startEdit],
+  );
+
+  const saveContentPolicy = useCallback(
+    (payload: {
+      moderationPolicy: ModerationPolicy;
+      duplicateSuppression: DuplicateSuppressionPolicy;
+      aiOverrides: DestinationAIOverrides;
+      routeId?: string;
+      routingPolicy?: RoutingPolicy;
+      routeModerationPolicy?: ModerationPolicy;
+      routeDuplicateSuppression?: DuplicateSuppressionPolicy;
+    }) => {
+      if (!editingMapping) return Promise.resolve();
+      return run(async () => {
+        await api.patch(`/api/destinations/${editingMapping.id}/content-policies`, withConfigVersion(payload, editingMapping));
+        await destinations.fetchDestinations();
+      }, 'Content policies saved.');
+    },
+    [destinations.fetchDestinations, editingMapping, run],
+  );
+
+  const previewContentPolicy = useCallback(
+    async (payload: {
+      text: string;
+      language?: string;
+      sensitive?: boolean;
+      routeId?: string;
+      routingPolicy?: RoutingPolicy;
+      moderationPolicy?: ModerationPolicy;
+      routeModerationPolicy?: ModerationPolicy;
+    }): Promise<{ allowed: boolean; reason: string; trace: unknown[] }> => {
+      if (!editingMapping) throw new Error('No destination selected.');
+      try {
+        const response = await api.post('/api/policies/preview', {
+          destinationId: editingMapping.id,
+          routeId: payload.routeId,
+          moderationPolicy: payload.moderationPolicy,
+          routingPolicy: payload.routingPolicy,
+          routeModerationPolicy: payload.routeModerationPolicy,
+          metadata: {
+            text: payload.text,
+            language: payload.language,
+            sensitive: payload.sensitive,
+          },
+        });
+        return response.data.decision as { allowed: boolean; reason: string; trace: unknown[] };
+      } catch (error) {
+        handleError(error, 'Failed to preview content policy.');
+        throw error;
+      }
+    },
+    [editingMapping, handleError],
+  );
+
+  const saveRouteDelivery = useCallback(
+    (routeId: string, delivery: RouteDeliveryPolicy) => {
+      if (!editingMapping) return Promise.resolve();
+      return run(async () => {
+        await api.patch(`/api/routes/${routeId}/delivery`, withConfigVersion(delivery, editingMapping));
+        await destinations.fetchDestinations();
+      }, 'Route delivery settings saved.');
+    },
+    [destinations.fetchDestinations, editingMapping, run],
+  );
 
   const submitEdit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -400,6 +534,83 @@ export default function DashboardApp() {
 
   const [folderFilter, setFolderFilter] = useState('__all__');
   const [accountSearch, setAccountSearch] = useState('');
+
+  const [selectedDestinationIds, setSelectedDestinationIds] = useState<Set<string>>(new Set());
+  const [bulkFolderName, setBulkFolderName] = useState('');
+  const [bulkBackfillConfirmation, setBulkBackfillConfirmation] = useState('');
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  const toggleDestinationSelected = useCallback((id: string) => {
+    setSelectedDestinationIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleAllDestinationsSelected = useCallback((ids: string[]) => {
+    setSelectedDestinationIds((current) => {
+      const allSelected = ids.length > 0 && ids.every((id) => current.has(id));
+      return allSelected ? new Set() : new Set(ids);
+    });
+  }, []);
+
+  const clearDestinationSelection = useCallback(() => {
+    setSelectedDestinationIds(new Set());
+    setBulkFolderName('');
+    setBulkBackfillConfirmation('');
+  }, []);
+
+  const runBulkAction = useCallback(
+    async (action: () => Promise<void>, success: string) => {
+      setBulkBusy(true);
+      try {
+        await action();
+        showNotice('success', success);
+        clearDestinationSelection();
+      } catch (error) {
+        handleError(error, 'The bulk action failed.');
+      } finally {
+        setBulkBusy(false);
+      }
+    },
+    [clearDestinationSelection, handleError, showNotice],
+  );
+
+  const bulkSetState = useCallback(
+    (state: 'enabled' | 'paused') => {
+      const ids = [...selectedDestinationIds];
+      const version = destinations.mappings.find((mapping) => ids.includes(mapping.id));
+      if (ids.length === 0 || !version) return;
+      void runBulkAction(async () => {
+        await api.post('/api/destinations/bulk/state', withConfigVersion({ destinationIds: ids, state }, version));
+        await destinations.fetchDestinations();
+      }, state === 'paused' ? `Paused ${ids.length} destination(s).` : `Resumed ${ids.length} destination(s).`);
+    },
+    [destinations, runBulkAction, selectedDestinationIds],
+  );
+
+  const bulkMoveFolder = useCallback(() => {
+    const ids = [...selectedDestinationIds];
+    const groupName = bulkFolderName.trim();
+    const version = destinations.mappings.find((mapping) => ids.includes(mapping.id));
+    if (ids.length === 0 || !groupName || !version) return;
+    void runBulkAction(async () => {
+      await api.post('/api/destinations/bulk/folder', withConfigVersion({ destinationIds: ids, groupName }, version));
+      await destinations.fetchDestinations();
+    }, `Moved ${ids.length} destination(s) to ${groupName}.`);
+  }, [bulkFolderName, destinations, runBulkAction, selectedDestinationIds]);
+
+  const bulkBackfill = useCallback(() => {
+    const ids = [...selectedDestinationIds];
+    const confirmation = `BACKFILL ${ids.length}`;
+    if (ids.length === 0 || bulkBackfillConfirmation !== confirmation) return;
+    void runBulkAction(async () => {
+      await api.post('/api/destinations/bulk/backfill', { destinationIds: ids, confirmation });
+      await destinations.fetchDestinations();
+    }, `Backfill queued for ${ids.length} destination(s).`);
+  }, [bulkBackfillConfirmation, destinations, runBulkAction, selectedDestinationIds]);
   const groupOptions = useMemo(() => {
     const values = new Map<string, { key: string; name: string; emoji: string }>();
     for (const group of destinations.groups) {
@@ -568,6 +779,55 @@ export default function DashboardApp() {
   const cycleTheme = () => setTheme((current) => (current === 'system' ? 'light' : current === 'light' ? 'dark' : 'system'));
   const themeIcon = theme === 'system' ? <SunMoon className="h-4 w-4" /> : theme === 'light' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />;
 
+  const recoveryNotices: RecoveryNotice[] = destinations.mappings.reduce<RecoveryNotice[]>((notices, mapping) => {
+    const { severity, label, detail } = summarizeDestinationHealth(mapping);
+    if (severity !== 'danger' && severity !== 'warning') return notices;
+    const handle = mapping.bskyCanonicalHandle || mapping.bskyIdentifier;
+    const isFailure = label.toLowerCase().includes('failed');
+    const isAuthIssue = label === 'Auth issue';
+    notices.push({
+      id: mapping.id,
+      severity,
+      title: `@${handle}: ${label}`,
+      detail: detail || 'Review this destination for delivery issues.',
+      actionLabel: isFailure ? 'Open activity' : isAuthIssue ? 'Open Bluesky accounts' : 'Open destination',
+      onAction: () => {
+        if (isFailure) {
+          setActiveTab('activity');
+        } else if (isAuthIssue) {
+          setActiveTab('settings');
+          setSettingsSection('bluesky');
+        } else {
+          setActiveTab('accounts');
+          startEdit(mapping);
+        }
+      },
+    });
+    return notices;
+  }, []);
+
+  // Wrapped through `run` so a rejected mutation never escapes as an unhandled
+  // promise from BlueskyAccountsSection's fire-and-forget call sites.
+  const blueskyAccountActions = {
+    onCreate: (form: Parameters<typeof blueskyAccounts.createAccount>[0]) =>
+      run(async () => {
+        await blueskyAccounts.createAccount(form);
+      }, 'Bluesky account added.'),
+    onValidate: (account: Parameters<typeof blueskyAccounts.validateAccount>[0]) =>
+      run(async () => {
+        await blueskyAccounts.validateAccount(account);
+      }, 'Bluesky account validated.'),
+    onRotate: (account: Parameters<typeof blueskyAccounts.rotateCredentials>[0], password: string) =>
+      run(async () => {
+        await blueskyAccounts.rotateCredentials(account, password);
+      }, 'Bluesky app password rotated.'),
+    onDelete: (account: Parameters<typeof blueskyAccounts.deleteAccount>[0]) =>
+      run(async () => {
+        await blueskyAccounts.deleteAccount(account);
+      }, 'Bluesky account removed.'),
+    onManageDestination: openDestinationFromBlueskyAccount,
+  };
+
   return (
     <div className="min-h-screen bg-muted/20 text-foreground">
       <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
@@ -581,6 +841,11 @@ export default function DashboardApp() {
           </div>
         </div>
       </header>
+      {recoveryNotices.length > 0 ? (
+        <div className="mx-auto max-w-[1600px] px-4 pt-4">
+          <RecoveryBanners notices={recoveryNotices} />
+        </div>
+      ) : null}
       <div className="mx-auto grid max-w-[1600px] gap-6 px-4 py-6 lg:grid-cols-[220px_1fr]">
         <Card className="h-fit lg:sticky lg:top-24"><CardContent className="p-2"><NavList items={dashboardTabs} activeId={activeTab} onSelect={setActiveTab} ariaLabel="Dashboard navigation" /></CardContent></Card>
         <main className="min-w-0">
@@ -659,6 +924,19 @@ export default function DashboardApp() {
                   'Pin sync queued.',
                 )
               }
+              selectedIds={selectedDestinationIds}
+              onToggleSelected={toggleDestinationSelected}
+              onToggleSelectAll={toggleAllDestinationsSelected}
+              bulkBusy={bulkBusy}
+              bulkFolderName={bulkFolderName}
+              onBulkFolderNameChange={setBulkFolderName}
+              bulkBackfillConfirmation={bulkBackfillConfirmation}
+              onBulkBackfillConfirmationChange={setBulkBackfillConfirmation}
+              onBulkPause={() => bulkSetState('paused')}
+              onBulkResume={() => bulkSetState('enabled')}
+              onBulkMoveFolder={bulkMoveFolder}
+              onBulkBackfill={bulkBackfill}
+              onBulkClearSelection={clearDestinationSelection}
             />
           ) : null}
           {activeTab === 'posts' ? (
@@ -751,6 +1029,14 @@ export default function DashboardApp() {
               updateBusy={updateBusy}
               editingUserId={editingUserId}
               canCreateMappings={canCreateMappings}
+              canManageMappings={canManageAll || canManageOwn}
+              blueskyAccounts={{
+                accounts: blueskyAccounts.accounts,
+                loading: blueskyAccounts.loading,
+                error: blueskyAccounts.error,
+                busy: blueskyAccounts.busy,
+                ...blueskyAccountActions,
+              }}
               ingestion={{
                 sources: ingestion.sources,
                 credentials: ingestion.credentials,
@@ -853,7 +1139,10 @@ export default function DashboardApp() {
         sourceInput={editSourceInput}
         parseSummary={editSourceSummary}
         busy={busy}
-        onClose={() => setEditingMapping(null)}
+        onClose={() => {
+          setEditingMapping(null);
+          setPendingEditSection(undefined);
+        }}
         onSubmit={submitEdit}
         onFormChange={setEditForm}
         onSourceInputChange={setEditSourceInput}
@@ -917,6 +1206,10 @@ export default function DashboardApp() {
             );
           }, 'Pin sync queued.');
         }}
+        onSaveContentPolicy={saveContentPolicy}
+        onPreviewContentPolicy={previewContentPolicy}
+        onSaveRouteDelivery={saveRouteDelivery}
+        initialSection={pendingEditSection}
       />
       <ConfirmDialog
         open={confirmation !== null}

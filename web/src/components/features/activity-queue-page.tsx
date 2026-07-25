@@ -1,4 +1,5 @@
 import { ArrowUpRight, History } from 'lucide-react';
+import { describePolicyDifference } from '../../lib/policy-snapshot-labels';
 import { Badge } from '../ui/badge';
 import { Button, buttonVariants } from '../ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
@@ -102,8 +103,8 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                     </div>
                     <p className="truncate font-medium">@{item.twitter_username}: {item.tweet_text || item.twitter_id}</p>
                     <p className="text-xs text-muted-foreground">
-                      Policy v{item.policy_version} · {item.policy_snapshot ? 'snapshotted behavior' : 'current destination behavior'}
-                      {item.policyDifference?.changed ? ` · differs now (${item.policyDifference.fields.join(', ')})` : ' · matches current policy'}
+                      Policy v{item.policy_version} · {item.policy_snapshot ? 'snapshotted behavior' : 'current destination behavior'} ·{' '}
+                      {item.policyDifference?.changed ? describePolicyDifference(item.policyDifference.fields) : 'matches current policy'}
                     </p>
                     {item.error_message ? <p className="max-w-3xl text-xs text-red-600 dark:text-red-400">{item.error_message}</p> : null}
                     {parseDiagnostics(item.delivery_diagnostics).length > 0 ? (

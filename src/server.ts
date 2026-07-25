@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import axios from 'axios';
 import bcrypt from 'bcryptjs';
 import cors from 'cors';
-import express from 'express';
+import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import {
   addDestinationSources,
@@ -27,13 +27,26 @@ import { previewTextCapability, testAIProvider } from './ai-manager.js';
 import { contentSha256 } from './content-dedup.js';
 import { contentPolicyMetadataForPost, evaluateContentPolicy } from './content-policy.js';
 import {
+  createValidatedBlueskyAccount,
+  deleteBlueskyAccount,
+  listBlueskyAccountViews,
+  rotateBlueskyAccountCredentials,
+  validateExistingBlueskyAccount,
+} from './services/bluesky-account-service.js';
+import { createBlueskyAccountsRouter } from './routes/bluesky-accounts-router.js';
+import { createBulkDestinationsRouter } from './routes/bulk-destinations-router.js';
+import {
   ADMIN_USER_PERMISSIONS,
   type AccountMapping,
   type AITextCapability,
   type AppConfig,
+  type DuplicateSuppressionPolicy,
+  type ModerationPolicy,
   type PostingPolicy,
   type ProfileFieldPolicy,
   type ProfileManagementPolicy,
+  type RouteDeliveryPolicy,
+  type RoutingPolicy,
   type SourceFilterPolicy,
   type SourceSchedulePolicy,
   type UserPermissions,
@@ -310,6 +323,59 @@ interface EnrichedPost {
   media: EnrichedPostMedia[];
 }
 
+interface AppViewEmbedImage {
+  fullsize?: string;
+  thumb?: string;
+  alt?: string;
+  aspectRatio?: { width?: number; height?: number };
+}
+
+interface AppViewEmbed {
+  $type?: string;
+  images?: AppViewEmbedImage[];
+  playlist?: string;
+  thumbnail?: string;
+  alt?: string;
+  aspectRatio?: { width?: number; height?: number };
+  external?: {
+    uri?: string;
+    thumb?: string;
+    title?: string;
+    description?: string;
+  };
+  media?: AppViewEmbed;
+}
+
+interface AppViewPost {
+  uri?: string;
+  cid?: string;
+  indexedAt?: string;
+  likeCount?: number;
+  repostCount?: number;
+  replyCount?: number;
+  quoteCount?: number;
+  record?: {
+    createdAt?: string;
+    text?: string;
+    facets?: unknown[];
+  };
+  author?: BskyProfileView;
+  embed?: AppViewEmbed;
+}
+
+interface AppViewGetPostsResponse {
+  posts?: AppViewPost[];
+}
+
+interface AppViewGetProfilesResponse {
+  profiles?: Array<Record<string, unknown>>;
+}
+
+interface AppViewGetFollowsResponse {
+  follows?: Array<{ handle?: string; did?: string }>;
+  cursor?: string;
+}
+
 interface LocalPostSearchResult {
   twitterId: string;
   twitterUsername: string;
@@ -353,7 +419,7 @@ interface UpdateStatusPayload {
   logTail: string[];
 }
 
-const postViewCache = new Map<string, CacheEntry<any>>();
+const postViewCache = new Map<string, CacheEntry<AppViewPost>>();
 const profileCache = new Map<string, CacheEntry<BskyProfileView>>();
 const fediverseBridgeStatusCache = new Map<string, CacheEntry<FediverseBridgeStatusView>>();
 let fediverseBridgeActorIdsCache: CacheEntry<Set<string>> | null = null;
@@ -393,7 +459,7 @@ const authRateBuckets = new Map<string, RateLimitBucket>();
 // proxy; otherwise clients could spoof the header to bypass auth rate limiting.
 const TRUST_PROXY = ['1', 'true', 'yes'].includes((process.env.TRUST_PROXY || '').trim().toLowerCase());
 
-const getRequestIp = (req: any): string => {
+const getRequestIp = (req: Request): string => {
   if (TRUST_PROXY) {
     const forwarded = req.headers?.['x-forwarded-for'];
     if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
@@ -412,7 +478,7 @@ const getRequestIp = (req: any): string => {
   return 'unknown';
 };
 
-const authRateLimiter = (req: any, res: any, next: any) => {
+const authRateLimiter = (req: Request, res: Response, next: NextFunction): void => {
   const now = nowMs();
   if (authRateBuckets.size > 5000) {
     for (const [bucketKey, bucketValue] of authRateBuckets.entries()) {
@@ -590,15 +656,16 @@ function readLogTail(logFile?: string, maxLines = 30): string[] {
   }
 }
 
-function extractMediaFromEmbed(embed: any): EnrichedPostMedia[] {
+function extractMediaFromEmbed(embed: unknown): EnrichedPostMedia[] {
   if (!embed || typeof embed !== 'object') {
     return [];
   }
 
-  const type = embed.$type;
+  const typedEmbed = embed as AppViewEmbed;
+  const type = typedEmbed.$type;
   if (type === 'app.bsky.embed.images#view') {
-    const images = Array.isArray(embed.images) ? embed.images : [];
-    return images.map((image: any) => ({
+    const images = Array.isArray(typedEmbed.images) ? typedEmbed.images : [];
+    return images.map((image) => ({
       type: 'image' as const,
       url: typeof image.fullsize === 'string' ? image.fullsize : undefined,
       thumb: typeof image.thumb === 'string' ? image.thumb : undefined,
@@ -612,17 +679,17 @@ function extractMediaFromEmbed(embed: any): EnrichedPostMedia[] {
     return [
       {
         type: 'video',
-        url: typeof embed.playlist === 'string' ? embed.playlist : undefined,
-        thumb: typeof embed.thumbnail === 'string' ? embed.thumbnail : undefined,
-        alt: typeof embed.alt === 'string' ? embed.alt : undefined,
-        width: typeof embed.aspectRatio?.width === 'number' ? embed.aspectRatio.width : undefined,
-        height: typeof embed.aspectRatio?.height === 'number' ? embed.aspectRatio.height : undefined,
+        url: typeof typedEmbed.playlist === 'string' ? typedEmbed.playlist : undefined,
+        thumb: typeof typedEmbed.thumbnail === 'string' ? typedEmbed.thumbnail : undefined,
+        alt: typeof typedEmbed.alt === 'string' ? typedEmbed.alt : undefined,
+        width: typeof typedEmbed.aspectRatio?.width === 'number' ? typedEmbed.aspectRatio.width : undefined,
+        height: typeof typedEmbed.aspectRatio?.height === 'number' ? typedEmbed.aspectRatio.height : undefined,
       },
     ];
   }
 
   if (type === 'app.bsky.embed.external#view') {
-    const external = embed.external || {};
+    const external = typedEmbed.external ?? {};
     return [
       {
         type: 'external',
@@ -635,7 +702,7 @@ function extractMediaFromEmbed(embed: any): EnrichedPostMedia[] {
   }
 
   if (type === 'app.bsky.embed.recordWithMedia#view') {
-    return extractMediaFromEmbed(embed.media);
+    return extractMediaFromEmbed(typedEmbed.media);
   }
 
   return [];
@@ -696,11 +763,11 @@ function isRetryableAppviewError(error: unknown): boolean {
 
 const sleep = (durationMs: number) => new Promise((resolve) => setTimeout(resolve, durationMs));
 
-async function fetchAppview(pathname: string, params: URLSearchParams, context: string): Promise<any | null> {
+async function fetchAppview<T>(pathname: string, params: URLSearchParams, context: string): Promise<T | null> {
   const url = `${BSKY_APPVIEW_URL}${pathname}?${params.toString()}`;
   for (let attempt = 1; attempt <= APPVIEW_MAX_ATTEMPTS; attempt += 1) {
     try {
-      const response = await axios.get(url, { timeout: 12_000 });
+      const response = await axios.get<T>(url, { timeout: 12_000 });
       return response.data;
     } catch (error) {
       const retryable = isRetryableAppviewError(error);
@@ -717,8 +784,8 @@ async function fetchAppview(pathname: string, params: URLSearchParams, context: 
   return null;
 }
 
-async function fetchPostViewsByUri(uris: string[]): Promise<Map<string, any>> {
-  const result = new Map<string, any>();
+async function fetchPostViewsByUri(uris: string[]): Promise<Map<string, AppViewPost>> {
+  const result = new Map<string, AppViewPost>();
   const uniqueUris = [...new Set(uris.filter((uri) => typeof uri === 'string' && uri.length > 0))];
   const pendingUris: string[] = [];
 
@@ -736,7 +803,11 @@ async function fetchPostViewsByUri(uris: string[]): Promise<Map<string, any>> {
     const params = new URLSearchParams();
     for (const uri of chunk) params.append('uris', uri);
 
-    const responseData = await fetchAppview('/xrpc/app.bsky.feed.getPosts', params, `getPosts chunk=${chunk.length}`);
+    const responseData = await fetchAppview<AppViewGetPostsResponse>(
+      '/xrpc/app.bsky.feed.getPosts',
+      params,
+      `getPosts chunk=${chunk.length}`,
+    );
     if (!responseData) {
       continue;
     }
@@ -775,7 +846,7 @@ async function fetchProfilesByActor(actors: string[]): Promise<Record<string, Bs
     const params = new URLSearchParams();
     for (const actor of chunk) params.append('actors', actor);
 
-    const responseData = await fetchAppview(
+    const responseData = await fetchAppview<AppViewGetProfilesResponse>(
       '/xrpc/app.bsky.actor.getProfiles',
       params,
       `getProfiles chunk=${chunk.length}`,
@@ -867,7 +938,7 @@ async function isActorFollowingFediverseBridge(actor: string): Promise<Fediverse
       params.set('cursor', cursor);
     }
 
-    const responseData = await fetchAppview(
+    const responseData = await fetchAppview<AppViewGetFollowsResponse>(
       '/xrpc/app.bsky.graph.getFollows',
       params,
       `getFollows actor=${normalizedActor}`,
@@ -956,7 +1027,7 @@ async function fetchFediverseBridgeStatusesByActor(
   return result;
 }
 
-function buildEnrichedPost(activity: ProcessedTweet, postView: any): EnrichedPost {
+function buildEnrichedPost(activity: ProcessedTweet, postView: AppViewPost | undefined): EnrichedPost {
   const record = postView?.record || {};
   const author = postView?.author || {};
   const likes = Number(postView?.likeCount) || 0;
@@ -1135,7 +1206,7 @@ app.use(
   '/api/ingest',
   express.json({
     limit: process.env.INGESTION_BODY_LIMIT || '128kb',
-    verify: (request: any, _response, buffer) => {
+    verify: (request: IngestionRequest, _response: Response, buffer: Buffer) => {
       request.rawBody = Buffer.from(buffer);
     },
   }),
@@ -1157,13 +1228,14 @@ app.use(
   ],
   noStore,
 );
-app.use((req: any, res, next) => {
-  const supplied = req.get('x-correlation-id');
-  req.correlationId =
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const correlationReq = req as CorrelationRequest;
+  const supplied = correlationReq.get('x-correlation-id');
+  correlationReq.correlationId =
     typeof supplied === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(supplied)
       ? supplied
       : `request-${randomUUID()}`;
-  res.setHeader('x-correlation-id', req.correlationId);
+  res.setHeader('x-correlation-id', correlationReq.correlationId);
   next();
 });
 
@@ -1211,6 +1283,25 @@ interface AuthenticatedUser {
   permissions: UserPermissions;
 }
 
+type AuthedRequest = Omit<Request, 'params'> & {
+  user: AuthenticatedUser;
+  authMode?: 'bearer' | 'cookie';
+  params: Record<string, string>;
+};
+
+type CorrelationRequest = Request & {
+  correlationId: string;
+};
+
+type IngestionRequest = Request & {
+  rawBody?: Buffer;
+};
+
+type AuthedRouteHandler = (req: AuthedRequest, res: Response) => void | Promise<void>;
+
+const asAuthedHandler = (handler: AuthedRouteHandler): RequestHandler =>
+  handler as unknown as RequestHandler;
+
 interface MappingResponse extends Omit<AccountMapping, 'bskyPassword'> {
   revision: number;
   updatedAt: string;
@@ -1219,8 +1310,13 @@ interface MappingResponse extends Omit<AccountMapping, 'bskyPassword'> {
   activeSourceCount: number;
   sources: Array<{
     username: string;
+    routeId?: string;
     state: 'enabled' | 'paused';
     filters?: SourceFilterPolicy;
+    routingPolicy?: RoutingPolicy;
+    moderationPolicy?: ModerationPolicy;
+    duplicateSuppression?: DuplicateSuppressionPolicy;
+    delivery?: RouteDeliveryPolicy;
     schedule?: SourceSchedulePolicy;
     runtime?: ReturnType<typeof runtimeStateService.getSource>;
   }>;
@@ -1272,6 +1368,8 @@ const normalizeOptionalString = (value: unknown): string | undefined => {
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : undefined;
 };
+
+const routeParam = (value: string | undefined): string | undefined => normalizeOptionalString(value);
 
 const getErrorMessage = (error: unknown, fallback = 'Request failed.'): string => {
   if (axios.isAxiosError(error)) {
@@ -1356,7 +1454,7 @@ const issueTokenForUser = (user: WebUser): string =>
     { expiresIn: JWT_EXPIRES_IN },
   );
 
-const parseCookies = (request: any): Record<string, string> => {
+const parseCookies = (request: Request): Record<string, string> => {
   const header = request.headers?.cookie;
   if (typeof header !== 'string') return {};
   const cookies: Record<string, string> = {};
@@ -1373,7 +1471,7 @@ const parseCookies = (request: any): Record<string, string> => {
   return cookies;
 };
 
-const cookieSecureForRequest = (request: any): boolean => request.secure === true;
+const cookieSecureForRequest = (request: Request): boolean => request.secure === true;
 
 const serializeCookie = (
   name: string,
@@ -1387,7 +1485,7 @@ const serializeCookie = (
   return attributes.join('; ');
 };
 
-const setAuthenticationCookies = (request: any, response: any, token: string): string => {
+const setAuthenticationCookies = (request: Request, response: Response, token: string): string => {
   const csrfToken = randomBytes(32).toString('base64url');
   const secure = cookieSecureForRequest(request);
   response.setHeader('Set-Cookie', [
@@ -1397,7 +1495,7 @@ const setAuthenticationCookies = (request: any, response: any, token: string): s
   return csrfToken;
 };
 
-const clearAuthenticationCookies = (request: any, response: any): void => {
+const clearAuthenticationCookies = (request: Request, response: Response): void => {
   const secure = cookieSecureForRequest(request);
   response.setHeader('Set-Cookie', [
     serializeCookie(AUTH_COOKIE_NAME, '', { httpOnly: true, secure, maxAge: 0 }),
@@ -1405,14 +1503,14 @@ const clearAuthenticationCookies = (request: any, response: any): void => {
   ]);
 };
 
-const getBearerToken = (request: any): string | undefined => {
+const getBearerToken = (request: Request): string | undefined => {
   const header = request.headers?.authorization;
   if (typeof header !== 'string') return undefined;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1];
 };
 
-const mutationRequiresCsrf = (request: any): boolean =>
+const mutationRequiresCsrf = (request: Request): boolean =>
   !['GET', 'HEAD', 'OPTIONS'].includes(String(request.method || '').toUpperCase());
 
 const findUserByIdentifier = (config: AppConfig, identifier: string): WebUser | undefined => {
@@ -1446,8 +1544,7 @@ const recordLegacyIdentifierSession = (payload: Record<string, unknown>): void =
   legacyIdentifierSessionCount += 1;
   const identity = normalizeEmail(payload.email) ?? normalizeUsername(payload.username);
   console.warn(
-    `⚠️ legacy-session-token-accepted identity=${identity ? hashAuditValue(identity) : 'unknown'}; ` +
-      'the token predates userId claims. Users should re-authenticate to obtain a subject-bound token.',
+    `⚠️ legacy-session-token-accepted identity=${identity ? hashAuditValue(identity) : 'unknown'}; the token predates userId claims. Users should re-authenticate to obtain a subject-bound token.`,
   );
 };
 
@@ -1513,6 +1610,60 @@ const canManageMapping = (user: AuthenticatedUser, mapping: AccountMapping): boo
     return false;
   }
   return mapping.createdByUserId === user.id;
+};
+
+/** True for unknown destinations so the route can return 404 after auth. */
+const canManageDestination = (user: AuthenticatedUser, destinationId: string): boolean => {
+  const mapping = getConfig().mappings.find((entry) => entry.id === destinationId);
+  if (!mapping) return true;
+  return canManageMapping(user, mapping);
+};
+
+const requireManageMappings = (req: Request, res: Response, next: NextFunction): void => {
+  const user = (req as AuthedRequest).user;
+  if (!user || (!canManageOwnMappings(user) && !canManageAllMappings(user))) {
+    res.status(403).json({ error: 'You do not have permission to manage Bluesky accounts.' });
+    return;
+  }
+  next();
+};
+
+const enqueueBackfillForMapping = (
+  mapping: AccountMapping,
+  limit?: number,
+): { requestId: string } => {
+  const parsedLimit = Number(limit);
+  const safeLimit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 200)) : undefined;
+  const queuedAt = Date.now();
+  const sequence = backfillSequence++;
+  const requestId = randomUUID();
+  pendingBackfills = pendingBackfills.filter((entry) => entry.id !== mapping.id);
+  pendingBackfills.push({
+    id: mapping.id,
+    limit: safeLimit,
+    queuedAt,
+    sequence,
+    requestId,
+  });
+  return { requestId };
+};
+
+const queueBackfill = (destinationIds: string[]): { queued: number; skipped: number } => {
+  let queued = 0;
+  let skipped = 0;
+  const config = getConfig();
+  for (const id of destinationIds) {
+    const mapping = config.mappings.find((entry) => entry.id === id);
+    if (!mapping || !mapping.enabled || getActiveTwitterUsernames(mapping).length === 0) {
+      skipped += 1;
+      continue;
+    }
+    enqueueBackfillForMapping(mapping);
+    queued += 1;
+  }
+  pendingBackfills.sort((a, b) => a.sequence - b.sequence);
+  if (queued > 0) signalSchedulerWake('backfill', destinationIds[0]);
+  return { queued, skipped };
 };
 
 const getVisibleMappings = (config: AppConfig, user: AuthenticatedUser): AccountMapping[] => {
@@ -1584,6 +1735,7 @@ const sanitizeMapping = (
         routingPolicy: route?.routingPolicy,
         moderationPolicy: route?.moderationPolicy,
         duplicateSuppression: route?.duplicateSuppression,
+        delivery: route?.delivery,
         schedule: source?.schedule,
         runtime: source ? runtimeStateService.getSource(source.id) : null,
       };
@@ -1994,7 +2146,7 @@ const ensureUniqueIdentity = (
   return null;
 };
 
-const authenticateToken = (req: any, res: any, next: any) => {
+const authenticateToken = (req: Request, res: Response, next: NextFunction): void => {
   const bearerToken = getBearerToken(req);
   const cookieToken = parseCookies(req)[AUTH_COOKIE_NAME];
   const token = bearerToken ?? cookieToken;
@@ -2032,23 +2184,25 @@ const authenticateToken = (req: any, res: any, next: any) => {
       }
     }
 
-    req.user = toAuthenticatedUser(user);
-    req.authMode = bearerToken ? 'bearer' : 'cookie';
+    const authedReq = req as AuthedRequest;
+    authedReq.user = toAuthenticatedUser(user);
+    authedReq.authMode = bearerToken ? 'bearer' : 'cookie';
     next();
   } catch {
     res.status(401).json({ error: { code: 'INVALID_SESSION', message: 'Session is invalid or expired.' } });
   }
 };
 
-const requireAdmin = (req: any, res: any, next: any) => {
-  if (!req.user?.isAdmin) {
+const requireAdmin = (req: Request, res: Response, next: NextFunction): void => {
+  const user = (req as AuthedRequest).user;
+  if (!user?.isAdmin) {
     res.status(403).json({ error: 'Admin access required' });
     return;
   }
   next();
 };
 
-const verifyCurrentAdminPassword = async (request: any): Promise<boolean> => {
+const verifyCurrentAdminPassword = async (request: AuthedRequest): Promise<boolean> => {
   const password =
     typeof request.body?.password === 'string'
       ? request.body.password
@@ -2243,6 +2397,63 @@ app.use(
     sendSafeError,
   }),
 );
+app.use(
+  createBulkDestinationsRouter({
+    authenticateToken,
+    backfillRateLimiter: credentialRateLimiter,
+    getConfig,
+    getConfigVersion,
+    saveCanonicalConfig,
+    rejectStaleConfigMutation,
+    canManageDestination,
+    queueBackfill,
+    sendSafeError,
+  }),
+);
+app.use(
+  createBlueskyAccountsRouter({
+    authenticateToken,
+    requireManageMappings,
+    validationRateLimiter: credentialRateLimiter,
+    getConfig,
+    getConfigVersion,
+    saveCanonicalConfig,
+    rejectStaleConfigMutation,
+    listAccounts: (requester) => {
+      const user: AuthenticatedUser = {
+        id: requester.id,
+        isAdmin: requester.isAdmin,
+        permissions: requester.isAdmin
+          ? ADMIN_USER_PERMISSIONS
+          : getConfig().users.find((entry) => entry.id === requester.id)?.permissions ??
+            getDefaultUserPermissions('user'),
+      };
+      return listBlueskyAccountViews(getConfig()).filter((account) => {
+        if (!account.linkedDestinationId) {
+          return canManageAllMappings(user);
+        }
+        return canManageDestination(user, account.linkedDestinationId);
+      });
+    },
+    createAccount: (config, input) =>
+      createValidatedBlueskyAccount(
+        config,
+        {
+          loginIdentifier: input.loginIdentifier,
+          appPassword: input.appPassword,
+          serviceUrl: input.serviceUrl,
+          label: input.label,
+        },
+        saveCanonicalConfig,
+      ),
+    validateAccount: (config, accountId) =>
+      validateExistingBlueskyAccount(config, accountId, saveCanonicalConfig),
+    rotateCredentials: (config, input) =>
+      rotateBlueskyAccountCredentials(config, input, saveCanonicalConfig),
+    deleteAccount: (config, accountId) => deleteBlueskyAccount(config, accountId, saveCanonicalConfig),
+    sendSafeError,
+  }),
+);
 // --- Auth Routes ---
 
 app.get('/api/auth/bootstrap-status', (_req, res) => {
@@ -2328,11 +2539,11 @@ app.post('/api/login', authRateLimiter, async (req, res) => {
   res.json({ token, csrfToken, isAdmin: user.role === 'admin' });
 });
 
-app.get('/api/me', authenticateToken, (req: any, res) => {
+app.get('/api/me', authenticateToken, asAuthedHandler((req, res) => {
   res.json(serializeAuthenticatedUser(req.user));
-});
+}));
 
-app.post('/api/logout', authenticateToken, (req: any, res) => {
+app.post('/api/logout', authenticateToken, asAuthedHandler((req, res) => {
   // Clearing the cookie cannot retire a captured bearer token, so the token
   // version is advanced instead. That invalidates every session for this
   // account, not just the caller's browser.
@@ -2362,9 +2573,9 @@ app.post('/api/logout', authenticateToken, (req: any, res) => {
       ? 'Signed out of every active session for this account.'
       : 'Signed out of this browser. Existing API tokens could not be revoked; retry logout.',
   });
-});
+}));
 
-app.post('/api/me/change-email', authenticateToken, async (req: any, res) => {
+app.post('/api/me/change-email', authenticateToken, asAuthedHandler(async (req, res) => {
   const config = getConfig();
   const userIndex = config.users.findIndex((user) => user.id === req.user.id);
   const user = config.users[userIndex];
@@ -2418,9 +2629,9 @@ app.post('/api/me/change-email', authenticateToken, async (req: any, res) => {
     csrfToken,
     me: serializeAuthenticatedUser(toAuthenticatedUser(updatedUser)),
   });
-});
+}));
 
-app.post('/api/me/change-password', authenticateToken, async (req: any, res) => {
+app.post('/api/me/change-password', authenticateToken, asAuthedHandler(async (req, res) => {
   const config = getConfig();
   const userIndex = config.users.findIndex((user) => user.id === req.user.id);
   const user = config.users[userIndex];
@@ -2457,14 +2668,14 @@ app.post('/api/me/change-password', authenticateToken, async (req: any, res) => 
   const token = issueTokenForUser(config.users[userIndex] as WebUser);
   const csrfToken = setAuthenticationCookies(req, res, token);
   res.json({ success: true, csrfToken });
-});
+}));
 
-app.get('/api/admin/users', authenticateToken, requireAdmin, (req: any, res) => {
+app.get('/api/admin/users', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   const config = getConfig();
   res.json(buildUserSummary(config, req.user));
-});
+}));
 
-app.post('/api/admin/users', authenticateToken, requireAdmin, async (req: any, res) => {
+app.post('/api/admin/users', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
   const config = getConfig();
   const username = normalizeUsername(req.body?.username);
   const email = normalizeEmail(req.body?.email);
@@ -2507,9 +2718,9 @@ app.post('/api/admin/users', authenticateToken, requireAdmin, async (req: any, r
 
   const summary = buildUserSummary(config, req.user).find((user) => user.id === newUser.id);
   res.json(summary || null);
-});
+}));
 
-app.put('/api/admin/users/:id', authenticateToken, requireAdmin, (req: any, res) => {
+app.put('/api/admin/users/:id', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   const { id } = req.params;
   const config = getConfig();
   const userIndex = config.users.findIndex((user) => user.id === id);
@@ -2570,7 +2781,7 @@ app.put('/api/admin/users/:id', authenticateToken, requireAdmin, (req: any, res)
   saveConfig(config);
   const summary = buildUserSummary(config, req.user).find((entry) => entry.id === id);
   res.json(summary || null);
-});
+}));
 
 app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin, async (req, res) => {
   const { id } = req.params;
@@ -2599,7 +2810,7 @@ app.post('/api/admin/users/:id/reset-password', authenticateToken, requireAdmin,
   res.json({ success: true });
 });
 
-app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, (req: any, res) => {
+app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   const { id } = req.params;
   const config = getConfig();
   const userIndex = config.users.findIndex((user) => user.id === id);
@@ -2642,11 +2853,11 @@ app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, (req: any, r
     success: true,
     disabledMappings: ownedMappings.length,
   });
-});
+}));
 
 // --- Provider-neutral sources, credentials, and inbound ingestion ---
 
-app.get('/api/sources', authenticateToken, (req: any, res) => {
+app.get('/api/sources', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const configVersion = getConfigVersion(config);
   const visibleDestinationIds = new Set(getVisibleMappings(config, req.user).map((mapping) => mapping.id));
@@ -2661,9 +2872,9 @@ app.get('/api/sources', authenticateToken, (req: any, res) => {
       }))
       .filter((source) => req.user.isAdmin || source.routes.length > 0),
   );
-});
+}));
 
-app.post('/api/sources', authenticateToken, requireAdmin, (req: any, res) => {
+app.post('/api/sources', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   try {
     if (
       req.body?.token ||
@@ -2732,7 +2943,7 @@ app.post('/api/sources', authenticateToken, requireAdmin, (req: any, res) => {
   } catch (error) {
     sendSafeError(res, 400, 'INVALID_SOURCE', error);
   }
-});
+}));
 
 app.patch('/api/sources/:id', authenticateToken, requireAdmin, (req, res) => {
   try {
@@ -2852,7 +3063,7 @@ app.delete('/api/routes/:id', authenticateToken, requireAdmin, (req, res) => {
   res.json({ deleted: true, cancelledImmediate, cancelledDigest });
 });
 
-app.patch('/api/routes/:id/delivery', authenticateToken, requireAdmin, (req: any, res) => {
+app.patch('/api/routes/:id/delivery', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   try {
     const config = getConfig();
     if (rejectStaleConfigMutation(config, req.body, res)) return;
@@ -2882,9 +3093,9 @@ app.patch('/api/routes/:id/delivery', authenticateToken, requireAdmin, (req: any
   } catch (error) {
     sendSafeError(res, 400, 'INVALID_DIGEST_POLICY', error);
   }
-});
+}));
 
-app.post('/api/ingest/v1/posts', ingestionRateLimiter, async (req: any, res) => {
+app.post('/api/ingest/v1/posts', ingestionRateLimiter, async (req: IngestionRequest, res: Response) => {
   const remoteAddressHash = hashAuditValue(getRequestIp(req));
   let credential: ReturnType<typeof ingestionCredentialService.authenticate>;
   let sourceId: string | undefined;
@@ -2991,18 +3202,18 @@ app.post('/api/ingest/v1/posts', ingestionRateLimiter, async (req: any, res) => 
 
 // --- Mapping Routes ---
 
-app.get(['/api/destinations', '/api/mappings'], authenticateToken, (req: any, res) => {
+app.get(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const usersById = createUserLookupById(config);
   const visibleMappings = getVisibleMappings(config, req.user);
   res.json(visibleMappings.map((mapping) => sanitizeMapping(mapping, usersById, req.user)));
-});
+}));
 
 app.post('/api/sources/parse', authenticateToken, (req, res) => {
   res.json(parseTwitterUsernameInput(req.body?.sources ?? req.body?.twitterUsernames, req.body?.existing));
 });
 
-app.post('/api/policies/preview', authenticateToken, (req: any, res) => {
+app.post('/api/policies/preview', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const destination = config.destinations.find((candidate) => candidate.id === req.body?.destinationId);
   const route = config.routes.find((candidate) => candidate.id === req.body?.routeId);
@@ -3035,9 +3246,9 @@ app.post('/api/policies/preview', authenticateToken, (req: any, res) => {
     dryRun: true,
     decision: evaluateContentPolicy(previewDestination, previewRoute, req.body?.metadata ?? {}),
   });
-});
+}));
 
-app.patch('/api/destinations/:id/content-policies', authenticateToken, (req: any, res) => {
+app.patch('/api/destinations/:id/content-policies', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
   const destination = config.destinations.find((candidate) => candidate.id === req.params.id);
@@ -3077,9 +3288,9 @@ app.patch('/api/destinations/:id/content-policies', authenticateToken, (req: any
   }
   saveCanonicalConfig(config);
   res.json({ success: true, destination, route, ...getConfigVersion(config) });
-});
+}));
 
-app.get(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenticateToken, (req: any, res) => {
+app.get(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
   if (!mapping) {
@@ -3091,12 +3302,12 @@ app.get(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenti
     destinationState: mapping.enabled ? 'enabled' : 'paused',
     sources: mapping.twitterUsernames.map((username) => getSourceImpact(mapping, username)),
   });
-});
+}));
 
 app.get(
   ['/api/destinations/:id/sources/:username/impact', '/api/mappings/:id/sources/:username/impact'],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
   const config = getConfig();
   const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
   const username = normalizeTwitterUsername(req.params.username);
@@ -3105,10 +3316,10 @@ app.get(
     return;
   }
     res.json(getSourceImpact(mapping, username));
-  },
+  }),
 );
 
-app.post(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenticateToken, (req: any, res) => {
+app.post(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
@@ -3141,12 +3352,12 @@ app.post(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authent
         ? `Added ${result.added.length} source(s). No history was backfilled.`
         : 'No sources were added.',
   });
-});
+}));
 
 app.patch(
   ['/api/destinations/:id/sources/:username', '/api/mappings/:id/sources/:username'],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
@@ -3230,7 +3441,7 @@ app.patch(
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Could not change source state.') });
   }
-  },
+  }),
 );
 
 app.post(
@@ -3239,7 +3450,7 @@ app.post(
     '/api/mappings/:id/sources/:username/filter-preview',
   ],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
     const config = getConfig();
     const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
     const username = normalizeTwitterUsername(req.params.username);
@@ -3285,13 +3496,13 @@ app.post(
         { sourceEnabled: source.enabled },
       ),
     );
-  },
+  }),
 );
 
 app.delete(
   ['/api/destinations/:id/sources/:username', '/api/mappings/:id/sources/:username'],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
@@ -3347,13 +3558,13 @@ app.delete(
       impact,
     });
   }
-  },
+  }),
 );
 
 app.post(
   ['/api/destinations/:id/sources/:username/backfill', '/api/mappings/:id/sources/:username/backfill'],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
   if (!canQueueBackfills(req.user)) {
     res.status(403).json({ error: 'You do not have permission to queue backfills.' });
     return;
@@ -3389,10 +3600,10 @@ app.post(
   pendingBackfills.sort((a, b) => a.sequence - b.sequence);
   signalSchedulerWake('backfill', mapping.id);
   res.json({ success: true, requestId, sourceUsername: username, explicitBackfill: true });
-  },
+  }),
 );
 
-app.patch(['/api/destinations/:id/state', '/api/mappings/:id/state'], authenticateToken, (req: any, res) => {
+app.patch(['/api/destinations/:id/state', '/api/mappings/:id/state'], authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
@@ -3417,15 +3628,19 @@ app.patch(['/api/destinations/:id/state', '/api/mappings/:id/state'], authentica
     }
   }
   mapping.enabled = state === 'enabled';
-  saveConfig(config);
+  const destination = config.destinations.find((entry) => entry.id === mapping.id);
+  if (destination) {
+    destination.enabled = state === 'enabled';
+  }
+  saveCanonicalConfig(config);
   res.json({ success: true, state, queuedItemsPreserved: true, ...getConfigVersion(config) });
-});
+}));
 
 app.post(
   ['/api/destinations/:id/credentials/test', '/api/mappings/:id/credentials/test'],
   credentialRateLimiter,
   authenticateToken,
-  async (req: any, res) => {
+  asAuthedHandler(async (req, res) => {
   const config = getConfig();
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
   if (!mapping) {
@@ -3450,14 +3665,14 @@ app.post(
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Credential test failed.') });
   }
-  },
+  }),
 );
 
 app.patch(
   ['/api/destinations/:id/credentials', '/api/mappings/:id/credentials'],
   credentialRateLimiter,
   authenticateToken,
-  async (req: any, res) => {
+  asAuthedHandler(async (req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
@@ -3505,15 +3720,15 @@ app.patch(
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Credential update failed.') });
   }
-  },
+  }),
 );
 
-app.get('/api/groups', authenticateToken, (req: any, res) => {
+app.get('/api/groups', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   res.json(getAccessibleGroups(config, req.user));
-});
+}));
 
-app.post('/api/groups', authenticateToken, (req: any, res) => {
+app.post('/api/groups', authenticateToken, asAuthedHandler((req, res) => {
   if (!canManageGroups(req.user)) {
     res.status(403).json({ error: 'You do not have permission to manage groups.' });
     return;
@@ -3540,9 +3755,9 @@ app.post('/api/groups', authenticateToken, (req: any, res) => {
     (entry) => getNormalizedGroupKey(entry.name) === getNormalizedGroupKey(normalizedName),
   );
   res.json(group || { name: normalizedName, ...(normalizedEmoji ? { emoji: normalizedEmoji } : {}) });
-});
+}));
 
-app.put('/api/groups/:groupKey', authenticateToken, (req: any, res) => {
+app.put('/api/groups/:groupKey', authenticateToken, asAuthedHandler((req, res) => {
   if (!canManageGroups(req.user)) {
     res.status(403).json({ error: 'You do not have permission to manage groups.' });
     return;
@@ -3618,9 +3833,9 @@ app.put('/api/groups/:groupKey', authenticateToken, (req: any, res) => {
     name: finalName,
     ...(finalEmoji ? { emoji: finalEmoji } : {}),
   });
-});
+}));
 
-app.delete('/api/groups/:groupKey', authenticateToken, (req: any, res) => {
+app.delete('/api/groups/:groupKey', authenticateToken, asAuthedHandler((req, res) => {
   if (!canManageGroups(req.user)) {
     res.status(403).json({ error: 'You do not have permission to manage groups.' });
     return;
@@ -3659,9 +3874,9 @@ app.delete('/api/groups/:groupKey', authenticateToken, (req: any, res) => {
 
   saveConfig(config);
   res.json({ success: true, reassignedCount: reassigned });
-});
+}));
 
-app.post('/api/onboarding/twitter-profile', authenticateToken, async (req: any, res) => {
+app.post('/api/onboarding/twitter-profile', authenticateToken, asAuthedHandler(async (req, res) => {
   if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
     res.status(403).json({ error: 'You do not have permission to create mappings.' });
     return;
@@ -3679,9 +3894,9 @@ app.post('/api/onboarding/twitter-profile', authenticateToken, async (req: any, 
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Failed to fetch Twitter profile metadata.') });
   }
-});
+}));
 
-app.post('/api/onboarding/bsky-credentials', credentialRateLimiter, authenticateToken, async (req: any, res) => {
+app.post('/api/onboarding/bsky-credentials', credentialRateLimiter, authenticateToken, asAuthedHandler(async (req, res) => {
   if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
     res.status(403).json({ error: 'You do not have permission to create mappings.' });
     return;
@@ -3716,9 +3931,9 @@ app.post('/api/onboarding/bsky-credentials', credentialRateLimiter, authenticate
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Failed to validate Bluesky credentials.') });
   }
-});
+}));
 
-app.post(['/api/destinations', '/api/mappings'], authenticateToken, async (req: any, res) => {
+app.post(['/api/destinations', '/api/mappings'], authenticateToken, asAuthedHandler(async (req, res) => {
   if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
     res.status(403).json({ error: 'You do not have permission to create mappings.' });
     return;
@@ -3843,9 +4058,9 @@ app.post(['/api/destinations', '/api/mappings'], authenticateToken, async (req: 
     sourceParsing,
     automaticBackfill: false,
   });
-});
+}));
 
-app.put(['/api/destinations/:id', '/api/mappings/:id'], authenticateToken, (req: any, res) => {
+app.put(['/api/destinations/:id', '/api/mappings/:id'], authenticateToken, asAuthedHandler((req, res) => {
   const { id } = req.params;
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
@@ -3959,9 +4174,9 @@ app.put(['/api/destinations/:id', '/api/mappings/:id'], authenticateToken, (req:
   config.mappings[index] = updatedMapping;
   saveConfig(config);
   res.json(sanitizeMapping(updatedMapping, createUserLookupById(config), req.user));
-});
+}));
 
-app.post('/api/mappings/:id/profile/preview', authenticateToken, async (req: any, res) => {
+app.post('/api/mappings/:id/profile/preview', authenticateToken, asAuthedHandler(async (req, res) => {
   const config = getConfig();
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
   if (!mapping) {
@@ -4012,9 +4227,9 @@ app.post('/api/mappings/:id/profile/preview', authenticateToken, async (req: any
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Failed to build profile preview.') });
   }
-});
+}));
 
-const handleProfileApplyRequest = async (req: any, res: any) => {
+const handleProfileApplyRequest = async (req: AuthedRequest, res: Response) => {
   const { id } = req.params;
   const config = getConfig();
   const mappingIndex = config.mappings.findIndex((entry) => entry.id === id);
@@ -4092,10 +4307,10 @@ const handleProfileApplyRequest = async (req: any, res: any) => {
   }
 };
 
-app.post('/api/mappings/:id/profile/apply', authenticateToken, handleProfileApplyRequest);
-app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, handleProfileApplyRequest);
+app.post('/api/mappings/:id/profile/apply', authenticateToken, asAuthedHandler(handleProfileApplyRequest));
+app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, asAuthedHandler(handleProfileApplyRequest));
 
-app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, async (req: any, res) => {
+app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, asAuthedHandler(async (req, res) => {
   const { id } = req.params;
   const config = getConfig();
   const mappingIndex = config.mappings.findIndex((entry) => entry.id === id);
@@ -4164,9 +4379,9 @@ app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, async (req: an
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Failed to pull Twitter bio.') });
   }
-});
+}));
 
-app.post('/api/mappings/bot-label-all', authenticateToken, async (req: any, res) => {
+app.post('/api/mappings/bot-label-all', authenticateToken, asAuthedHandler(async (req, res) => {
   if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
     res.status(403).json({ error: 'You do not have permission to update mappings.' });
     return;
@@ -4247,9 +4462,9 @@ app.post('/api/mappings/bot-label-all', authenticateToken, async (req: any, res)
     failedMappings,
     mappings: targets.map((mapping) => sanitizeMapping(mapping, usersById, req.user)),
   });
-});
+}));
 
-app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any, res) => {
+app.post('/api/mappings/append-bot-name-all', authenticateToken, asAuthedHandler(async (req, res) => {
   if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
     res.status(403).json({ error: 'You do not have permission to update mappings.' });
     return;
@@ -4350,9 +4565,9 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
     failedMappings,
     mappings: targets.map((mapping) => sanitizeMapping(mapping, usersById, req.user)),
   });
-});
+}));
 
-app.post('/api/mappings/:id/bridge-to-fediverse', authenticateToken, async (req: any, res) => {
+app.post('/api/mappings/:id/bridge-to-fediverse', authenticateToken, asAuthedHandler(async (req, res) => {
   const { id } = req.params;
   const config = getConfig();
   const mapping = config.mappings.find((entry) => entry.id === id);
@@ -4390,9 +4605,9 @@ app.post('/api/mappings/:id/bridge-to-fediverse', authenticateToken, async (req:
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Failed to bridge account to the fediverse.') });
   }
-});
+}));
 
-app.post('/api/mappings/fediverse-bridge-status', authenticateToken, async (req: any, res) => {
+app.post('/api/mappings/fediverse-bridge-status', authenticateToken, asAuthedHandler(async (req, res) => {
   const config = getConfig();
   const visibleMappings = getVisibleMappings(config, req.user);
   const visibleMappingsById = new Map(visibleMappings.map((mapping) => [mapping.id, mapping] as const));
@@ -4453,10 +4668,14 @@ app.post('/api/mappings/fediverse-bridge-status', authenticateToken, async (req:
   }
 
   res.json(statuses);
-});
+}));
 
-app.delete('/api/mappings/:id', authenticateToken, (req: any, res) => {
-  const { id } = req.params;
+app.delete('/api/mappings/:id', authenticateToken, asAuthedHandler((req, res) => {
+  const id = routeParam(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: 'Missing destination id.' });
+    return;
+  }
   const config = getConfig();
   const mapping = config.mappings.find((entry) => entry.id === id);
 
@@ -4478,10 +4697,14 @@ app.delete('/api/mappings/:id', authenticateToken, (req: any, res) => {
   }
   saveConfig(config);
   res.json({ success: true });
-});
+}));
 
 app.delete('/api/mappings/:id/cache', authenticateToken, requireAdmin, (req, res) => {
-  const { id } = req.params;
+  const id = routeParam(typeof req.params.id === 'string' ? req.params.id : undefined);
+  if (!id) {
+    res.status(400).json({ error: 'Missing destination id.' });
+    return;
+  }
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === id);
   if (!mapping) {
@@ -4497,7 +4720,11 @@ app.delete('/api/mappings/:id/cache', authenticateToken, requireAdmin, (req, res
 });
 
 app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, async (req, res) => {
-  const { id } = req.params;
+  const id = routeParam(typeof req.params.id === 'string' ? req.params.id : undefined);
+  if (!id) {
+    res.status(400).json({ error: 'Missing destination id.' });
+    return;
+  }
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === id);
   if (!mapping) {
@@ -4645,7 +4872,7 @@ app.post('/api/ai/preview-text', credentialRateLimiter, authenticateToken, requi
   }
 });
 
-app.post('/api/mappings/:id/posting/preview', authenticateToken, (req: any, res) => {
+app.post('/api/mappings/:id/posting/preview', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const mapping = getVisibleMappings(config, req.user).find((entry) => entry.id === req.params.id);
   if (!mapping) {
@@ -4673,7 +4900,7 @@ app.post('/api/mappings/:id/posting/preview', authenticateToken, (req: any, res)
   } catch (error) {
     res.status(400).json({ error: getErrorMessage(error, 'Invalid posting policy preview.') });
   }
-});
+}));
 
 app.patch('/api/mappings/:id/migration-review', authenticateToken, requireAdmin, (req, res) => {
   const config = getConfig();
@@ -4698,7 +4925,7 @@ app.patch('/api/mappings/:id/migration-review', authenticateToken, requireAdmin,
 
 // --- Status & Actions Routes ---
 
-app.get('/api/health/details', authenticateToken, (req: any, res) => {
+app.get('/api/health/details', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const visibleMappings = getVisibleMappings(config, req.user);
   const queue = postQueueService.getCounts();
@@ -4760,7 +4987,7 @@ app.get('/api/health/details', authenticateToken, (req: any, res) => {
       }),
     })),
   });
-});
+}));
 
 app.get('/api/metrics', authenticateToken, requireAdmin, (_req, res) => {
   res.json(metricsService.snapshot());
@@ -4774,7 +5001,7 @@ app.get('/api/metrics/prometheus', authenticateToken, requireAdmin, (_req, res) 
   res.type('text/plain; version=0.0.4').send(metricsService.toPrometheus());
 });
 
-app.get('/api/status', authenticateToken, (req: any, res) => {
+app.get('/api/status', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const now = Date.now();
   const nextRunMs = Math.max(0, nextCheckTime - now);
@@ -4841,10 +5068,10 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
     activeJobs: scopedJobs,
     queue: queueSummary,
   });
-});
+}));
 
 // Detailed post-queue listing, scoped to the mappings the caller can see.
-app.get('/api/queue', authenticateToken, (req: any, res) => {
+app.get('/api/queue', authenticateToken, asAuthedHandler((req, res) => {
   const config = getConfig();
   const visibleMappingIds = getVisibleMappingIdSet(config, req.user);
   const limitRaw = Number(req.query.limit);
@@ -4865,7 +5092,7 @@ app.get('/api/queue', authenticateToken, (req: any, res) => {
     counts: postQueueService.getCounts().perMapping.filter((entry) => visibleMappingIds.has(entry.mapping_id)),
     items,
   });
-});
+}));
 
 const queueScopeForPath = (kind: string, id: string) => {
   if (kind === 'destination') return { destinationId: id };
@@ -4910,7 +5137,7 @@ app.use(
   }),
 );
 
-app.get('/api/queue/items/:bskyIdentifier/:tweetId', authenticateToken, (req: any, res) => {
+app.get('/api/queue/items/:bskyIdentifier/:tweetId', authenticateToken, asAuthedHandler((req, res) => {
   const scope = { bskyIdentifier: req.params.bskyIdentifier, twitterId: req.params.tweetId };
   if (!canOperateQueueScope(req.user, scope)) {
     res.status(403).json({ error: 'You do not have permission to inspect this queue item.' });
@@ -4922,9 +5149,9 @@ app.get('/api/queue/items/:bskyIdentifier/:tweetId', authenticateToken, (req: an
     return;
   }
   res.json(item);
-});
+}));
 
-app.post('/api/queue/items/:bskyIdentifier/:tweetId/retry', authenticateToken, (req: any, res) => {
+app.post('/api/queue/items/:bskyIdentifier/:tweetId/retry', authenticateToken, asAuthedHandler((req, res) => {
   const scope = { bskyIdentifier: req.params.bskyIdentifier, twitterId: req.params.tweetId };
   if (!canOperateQueueScope(req.user, scope)) {
     res.status(403).json({ error: 'You do not have permission to retry this queue item.' });
@@ -4940,9 +5167,9 @@ app.post('/api/queue/items/:bskyIdentifier/:tweetId/retry', authenticateToken, (
     return;
   }
   res.json({ success: true, affected: postQueueService.retryFailed(scope) });
-});
+}));
 
-app.post('/api/queue/items/:bskyIdentifier/:tweetId/reevaluate-policy', authenticateToken, async (req: any, res) => {
+app.post('/api/queue/items/:bskyIdentifier/:tweetId/reevaluate-policy', authenticateToken, asAuthedHandler(async (req, res) => {
   const scope = { bskyIdentifier: req.params.bskyIdentifier, twitterId: req.params.tweetId };
   if (!canOperateQueueScope(req.user, scope)) {
     res.status(403).json({ error: 'You do not have permission to update this queue item.' });
@@ -5062,9 +5289,9 @@ app.post('/api/queue/items/:bskyIdentifier/:tweetId/reevaluate-policy', authenti
   } catch (error) {
     sendSafeError(res, 409, 'POLICY_SNAPSHOT_UPDATE_FAILED', error);
   }
-});
+}));
 
-app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateToken, async (req: any, res) => {
+app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateToken, asAuthedHandler(async (req, res) => {
   const config = getConfig();
   const destination = config.destinations.find((candidate) => candidate.id === req.params.destinationId);
   const mapping = config.mappings.find((candidate) => candidate.id === req.params.destinationId);
@@ -5083,7 +5310,12 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
     res.status(400).json({ error: 'Override requeue requires x-queue-confirmation: OVERRIDE_POLICY_SKIP.' });
     return;
   }
-  const skipped = dbService.getPost(req.params.tweetId, destination.id);
+  const tweetId = routeParam(req.params.tweetId);
+  if (!tweetId) {
+    res.status(400).json({ error: 'Missing tweet id.' });
+    return;
+  }
+  const skipped = dbService.getPost(tweetId, destination.id);
   if (!skipped || skipped.status !== 'skipped') {
     res.status(404).json({ error: 'Retained skipped item not found.' });
     return;
@@ -5205,38 +5437,38 @@ app.post('/api/activity/:destinationId/:tweetId/override-requeue', authenticateT
   });
   dbService.consumeSkippedOverride(retained.normalized.externalPostId, destination.id);
   res.json({ success: true, affected, decision, policyHash: snapshot.hash, retainedDegraded: retained.degraded });
-});
+}));
 
 app.post(
   ['/api/destinations/:id/queue/retry-failed', '/api/mappings/:id/queue/retry-failed'],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
   const scope = { destinationId: req.params.id };
   if (!canOperateQueueScope(req.user, scope)) {
     res.status(403).json({ error: 'You do not have permission to operate on this destination queue.' });
     return;
   }
   res.json({ success: true, affected: postQueueService.retryFailed(scope) });
-  },
+  }),
 );
 
 app.delete(
   ['/api/destinations/:id/queue/failed', '/api/mappings/:id/queue/failed'],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
   const scope = { destinationId: req.params.id };
   if (!canOperateQueueScope(req.user, scope)) {
     res.status(403).json({ error: 'You do not have permission to operate on this destination queue.' });
     return;
   }
   res.json({ success: true, affected: postQueueService.clearFailed(scope) });
-  },
+  }),
 );
 
 app.delete(
   ['/api/destinations/:id/queue/pending', '/api/mappings/:id/queue/pending'],
   authenticateToken,
-  (req: any, res) => {
+  asAuthedHandler((req, res) => {
   const scope = { destinationId: req.params.id };
   if (!canOperateQueueScope(req.user, scope)) {
     res.status(403).json({ error: 'You do not have permission to operate on this destination queue.' });
@@ -5247,7 +5479,7 @@ app.delete(
     return;
   }
   res.json({ success: true, affected: postQueueService.cancelPending(scope) });
-  },
+  }),
 );
 
 app.get('/api/version', authenticateToken, (_req, res) => {
@@ -5258,7 +5490,7 @@ app.get('/api/update-status', authenticateToken, requireAdmin, (_req, res) => {
   res.json(getUpdateStatusPayload());
 });
 
-app.post('/api/update', authenticateToken, requireAdmin, (req: any, res) => {
+app.post('/api/update', authenticateToken, requireAdmin, asAuthedHandler((req, res) => {
   const startedBy = getActorLabel(req.user);
   const result = startUpdateJob(startedBy);
   if (!result.ok) {
@@ -5274,9 +5506,9 @@ app.post('/api/update', authenticateToken, requireAdmin, (req: any, res) => {
     status: result.state,
     version: getRuntimeVersionInfo(),
   });
-});
+}));
 
-app.post('/api/run-now', authenticateToken, (req: any, res) => {
+app.post('/api/run-now', authenticateToken, asAuthedHandler((req, res) => {
   if (!canRunNow(req.user)) {
     res.status(403).json({ error: 'You do not have permission to run checks manually.' });
     return;
@@ -5284,7 +5516,7 @@ app.post('/api/run-now', authenticateToken, (req: any, res) => {
 
   requestImmediateSchedulerPass();
   res.json({ success: true, message: 'Check triggered' });
-});
+}));
 
 app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res) => {
   pendingBackfills = [];
@@ -5299,13 +5531,17 @@ app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res)
   res.json({ success: true, message: 'All backfills cleared' });
 });
 
-app.post('/api/backfill/:id', authenticateToken, (req: any, res) => {
+app.post('/api/backfill/:id', authenticateToken, asAuthedHandler((req, res) => {
   if (!canQueueBackfills(req.user)) {
     res.status(403).json({ error: 'You do not have permission to queue backfills.' });
     return;
   }
 
-  const { id } = req.params;
+  const id = routeParam(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: 'Missing destination id.' });
+    return;
+  }
   const { limit } = req.body;
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === id);
@@ -5332,17 +5568,7 @@ app.post('/api/backfill/:id', authenticateToken, (req: any, res) => {
 
   const parsedLimit = Number(limit);
   const safeLimit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 200)) : undefined;
-  const queuedAt = Date.now();
-  const sequence = backfillSequence++;
-  const requestId = randomUUID();
-  pendingBackfills = pendingBackfills.filter((entry) => entry.id !== id);
-  pendingBackfills.push({
-    id,
-    limit: safeLimit,
-    queuedAt,
-    sequence,
-    requestId,
-  });
+  const { requestId } = enqueueBackfillForMapping(mapping, safeLimit);
   pendingBackfills.sort((a, b) => a.sequence - b.sequence);
   signalSchedulerWake('backfill', id);
 
@@ -5351,15 +5577,19 @@ app.post('/api/backfill/:id', authenticateToken, (req: any, res) => {
     message: `Backfill queued for @${activeSources.join(', ')}`,
     requestId,
   });
-});
+}));
 
-app.post('/api/pin-sync/:id', authenticateToken, (req: any, res) => {
+app.post('/api/pin-sync/:id', authenticateToken, asAuthedHandler((req, res) => {
   if (!canQueueBackfills(req.user)) {
     res.status(403).json({ error: 'You do not have permission to sync pinned tweets.' });
     return;
   }
 
-  const { id } = req.params;
+  const id = routeParam(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: 'Missing destination id.' });
+    return;
+  }
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === id);
 
@@ -5400,9 +5630,9 @@ app.post('/api/pin-sync/:id', authenticateToken, (req: any, res) => {
     success: true,
     message: `Pin sync queued for ${mapping.bskyIdentifier}`,
   });
-});
+}));
 
-app.delete('/api/backfill/:id', authenticateToken, (req: any, res) => {
+app.delete('/api/backfill/:id', authenticateToken, asAuthedHandler((req, res) => {
   const { id } = req.params;
   const config = getConfig();
   const mapping = config.mappings.find((entry) => entry.id === id);
@@ -5421,7 +5651,7 @@ app.delete('/api/backfill/:id', authenticateToken, (req: any, res) => {
   postQueueService.cancelPendingBackfills(id);
   signalSchedulerWake();
   res.json({ success: true });
-});
+}));
 
 // --- Config Management Routes ---
 
@@ -5436,7 +5666,7 @@ app.post('/api/config/migration-report', authenticateToken, requireAdmin, (req, 
   }
 });
 
-app.get('/api/config/export', authenticateToken, requireAdmin, async (req: any, res) => {
+app.get('/api/config/export', authenticateToken, requireAdmin, asAuthedHandler(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Pragma', 'no-cache');
   const requestedMode = req.query.mode ?? 'redacted';
@@ -5460,7 +5690,7 @@ app.get('/api/config/export', authenticateToken, requireAdmin, async (req: any, 
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename=tweets-2-bsky-config-${requestedMode}.json`);
   res.json(exportData);
-});
+}));
 
 app.post('/api/config/import', importRestoreRateLimiter, authenticateToken, requireAdmin, requireJsonObject, (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -5480,7 +5710,7 @@ app.post('/api/config/import', importRestoreRateLimiter, authenticateToken, requ
   }
 });
 
-app.get('/api/recent-activity', authenticateToken, (req: any, res) => {
+app.get('/api/recent-activity', authenticateToken, asAuthedHandler((req, res) => {
   const limitCandidate = req.query.limit ? Number(req.query.limit) : 50;
   const limit = Number.isFinite(limitCandidate) ? Math.max(1, Math.min(limitCandidate, 200)) : 50;
   const config = getConfig();
@@ -5497,7 +5727,7 @@ app.get('/api/recent-activity', authenticateToken, (req: any, res) => {
       );
 
   res.json(filtered.slice(0, limit));
-});
+}));
 
 app.post('/api/bsky/profiles', authenticateToken, async (req, res) => {
   const actors = Array.isArray(req.body?.actors)
@@ -5514,7 +5744,7 @@ app.post('/api/bsky/profiles', authenticateToken, async (req, res) => {
   res.json(profiles);
 });
 
-app.get('/api/posts/search', authenticateToken, (req: any, res) => {
+app.get('/api/posts/search', authenticateToken, asAuthedHandler((req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q : '';
   if (!query.trim()) {
     res.json([]);
@@ -5551,9 +5781,9 @@ app.get('/api/posts/search', authenticateToken, (req: any, res) => {
   }));
 
   res.json(results);
-});
+}));
 
-app.get('/api/posts/enriched', authenticateToken, async (req: any, res) => {
+app.get('/api/posts/enriched', authenticateToken, asAuthedHandler(async (req, res) => {
   const requestedLimit = req.query.limit ? Number(req.query.limit) : 24;
   const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 80)) : 24;
   const config = getConfig();
@@ -5581,10 +5811,12 @@ app.get('/api/posts/enriched', authenticateToken, async (req: any, res) => {
 
   const uris = deduped.map((row) => row.bsky_uri).filter((uri): uri is string => typeof uri === 'string');
   const postViewsByUri = await fetchPostViewsByUri(uris);
-  const enriched = deduped.map((row) => buildEnrichedPost(row, row.bsky_uri ? postViewsByUri.get(row.bsky_uri) : null));
+  const enriched = deduped.map((row) =>
+    buildEnrichedPost(row, row.bsky_uri ? postViewsByUri.get(row.bsky_uri) : undefined),
+  );
 
   res.json(enriched);
-});
+}));
 // Export for use by index.ts
 export function updateLastCheckTime() {
   const config = getConfig();
@@ -5634,16 +5866,28 @@ export function clearBackfill(id: string, requestId?: string) {
   pendingBackfills = pendingBackfills.filter((bid) => bid.id !== id);
 }
 
-app.use((error: any, _req: any, res: any, next: any) => {
+function isPayloadTooLarge(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const record = error as { type?: unknown; status?: unknown };
+  return record.type === 'entity.too.large' || record.status === 413;
+}
+
+function isInvalidJsonBody(error: unknown): error is SyntaxError & { body: unknown } {
+  return error instanceof SyntaxError && 'body' in error;
+}
+
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
   if (res.headersSent) {
     next(error);
     return;
   }
-  if (error?.type === 'entity.too.large' || error?.status === 413) {
+  if (isPayloadTooLarge(error)) {
     sendSafeError(res, 413, 'BODY_TOO_LARGE', 'Request body exceeds this route limit.');
     return;
   }
-  if (error instanceof SyntaxError && 'body' in error) {
+  if (isInvalidJsonBody(error)) {
     sendSafeError(res, 400, 'INVALID_JSON', 'Request body is not valid JSON.');
     return;
   }
@@ -5666,7 +5910,7 @@ app.use((_req, res) => {
 });
 
 export function startServer() {
-  app.listen(PORT, HOST as any, () => {
+  app.listen(PORT, HOST, () => {
     console.log(`🚀 Web interface running at http://localhost:${PORT}`);
     if (HOST === '127.0.0.1' || HOST === '::1' || HOST === 'localhost') {
       console.log(`🔒 Bound to ${HOST} (local-only). Use Tailscale Serve or a reverse proxy for remote access.`);

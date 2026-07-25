@@ -49,6 +49,8 @@ describe('delivery diagnostics helpers', () => {
     expect(raw).toBeTruthy();
     const parsed = parseDeliveryDiagnostics(raw);
     expect(parsed).toHaveLength(2);
-    expect(describeDeliveryFallback(parsed[0]!)).toBe('Video link fallback');
+    const first = parsed[0];
+    expect(first).toBeDefined();
+    expect(describeDeliveryFallback(first)).toBe('Video link fallback');
   });
 });

@@ -19,17 +19,17 @@ The application is a single Bun process with explicit runtime services:
 - `src/server.ts` provides the Express API, authentication, operational controls, and static web serving.
 - `web/` contains the React/Vite dashboard. A production build is served from `web/dist/`.
 
-No runtime service imports `src/server.ts`; server-owned scheduler controls are injected by `src/index.ts`, preventing a composition/server import cycle. `src/config-manager.ts` owns schema-v6 JSON configuration, compatibility projection, atomic writes, encryption, and optimistic revision metadata. `src/config/` contains schemas, normalization, migrations, projection, transfer, and domain services. `src/pipeline/` contains fetch/run orchestration. `src/storage-paths.ts` resolves the data directory at module load. `src/db.ts` assembles SQLite-backed services and applies ordered migrations from `src/db/migrations/`.
+No runtime service imports `src/server.ts`; server-owned scheduler controls are injected by `src/index.ts`, preventing a composition/server import cycle. `src/config-manager.ts` owns schema-v7 JSON configuration, compatibility projection, atomic writes, encryption, and optimistic revision metadata. `src/config/` contains schemas, normalization, migrations, projection, transfer, and domain services. `src/pipeline/` contains fetch/run orchestration. `src/storage-paths.ts` resolves the data directory at module load. `src/db.ts` assembles SQLite-backed services and applies ordered migrations from `src/db/migrations/` (through migration 010 for Bluesky account runtime health).
 
 ### Identity model
 
 The persisted canonical model is:
 
 ```text
-Source -> Route -> Destination
+Source -> Route -> Destination -> BlueskyAccount
 ```
 
-Sources own ingestion/fetch policy, routes own relationship/content/delivery policy, and destinations own Bluesky credentials and destination policy. `AccountMapping` remains a one-release runtime/API compatibility projection and is omitted from persisted v6 JSON. A one-source mapping may resolve its sole source, but aggregate profile and pin policies require explicit source selections.
+Sources own ingestion/fetch policy, routes own relationship/content/delivery policy, and destinations own destination-wide posting/profile policy plus identity fields (`bskyIdentifier`, `bskyDid`, `storageKey`). Posting credentials live on a managed `BlueskyAccount` linked by `Destination.bskyAccountId` (at most one destination per account). `AccountMapping` remains a runtime/API compatibility projection and is omitted from persisted v7 JSON. A one-source mapping may resolve its sole source, but aggregate profile and pin policies require explicit source selections.
 
 ### Daemon data flow
 
@@ -66,17 +66,17 @@ The effective data directory is selected by `TWEETS2BSKY_DATA_DIR`, then `APP_DA
 
 Path selection happens during module evaluation, and importing `src/db.ts` opens and migrates the database immediately. Tests and tools must therefore set a temporary data directory before importing database-dependent modules.
 
-Configuration saves are normalized and use a temporary file plus backup before rename. SQLite stores processed history and the durable queue. Both stores can contain operationally sensitive information and must be treated as private runtime data.
+Configuration saves are normalized and use a temporary file plus backup before rename. SQLite stores processed history, the durable queue, and per-account Bluesky auth health (`bluesky_account_runtime_state`). Both stores can contain operationally sensitive information and must be treated as private runtime data.
 
-Every successful config write increments top-level `revision` and changes `updatedAt`. Dashboard mutations send the version they read. Stale destination, source, route, and settings edits fail with `409 CONFIG_REVISION_CONFLICT` and refresh guidance.
+Every successful config write increments top-level `revision` and changes `updatedAt`. Dashboard mutations send the version they read. Stale destination, source, route, account, and settings edits fail with `409 CONFIG_REVISION_CONFLICT` and refresh guidance.
 
 ### Frontend boundaries
 
-`web/src/api/client.ts` owns cookie/CSRF behavior, conflict types, and API error normalization. `web/src/components/ui/` contains keyboard-accessible primitives including focus-trapped dialogs. `App.tsx` remains the current dashboard orchestrator; feature extraction should continue incrementally instead of risking a behavior-changing rewrite.
+`web/src/api/client.ts` owns cookie/CSRF behavior, conflict types, and API error normalization. `web/src/components/ui/` contains keyboard-accessible primitives including focus-trapped dialogs. `DashboardApp.tsx` is the dashboard orchestrator; Settings includes a Bluesky accounts section, and the destination editor exposes connection, content-policy, and route-delivery panels. Feature extraction should continue incrementally instead of risking a behavior-changing rewrite.
 
 ## Current Source/Destination/Route architecture
 
-Schema v6 separates concerns that were historically combined in `AccountMapping`:
+Schema v7 separates concerns that were historically combined in `AccountMapping`:
 
 ```text
 Source (X identity and source settings)
@@ -85,7 +85,10 @@ Source (X identity and source settings)
 Route (source -> destination delivery and transform policy)
     |
     v
-Destination (one Bluesky identity, credentials, and profile policy)
+Destination (one Bluesky identity, storage key, and profile/posting policy)
+    |
+    v
+BlueskyAccount (login identifier, app password, DID/handle)
 ```
 
 ### Source
@@ -94,7 +97,7 @@ A Source represents one normalized X, webhook, or API identity and its source-sp
 
 ### Destination
 
-A Destination represents exactly one Bluesky identity. It owns service and credential references plus destination-wide profile, posting, and operational policy. Credential validation remains read-only.
+A Destination represents exactly one Bluesky identity and queue/history key. Credentials are resolved from the linked `BlueskyAccount`. Credential validation remains read-only against Bluesky.
 
 ### Route
 

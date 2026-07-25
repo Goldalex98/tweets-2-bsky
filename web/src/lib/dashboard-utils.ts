@@ -1,4 +1,4 @@
-import type { ConfigVersion, DashboardTab } from '../api/types';
+import type { ConfigVersion, DashboardTab, SettingsSection } from '../api/types';
 import type { ActivityLog, BskyFacet } from '../features/activity/types';
 import type {
   AccountMapping,
@@ -19,6 +19,82 @@ export const TAB_PATHS: Record<DashboardTab, string> = {
   activity: '/activity',
   settings: '/settings',
 };
+export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
+  'account',
+  'system',
+  'scheduler',
+  'users',
+  'twitter',
+  'bluesky',
+  'ai',
+  'notifications',
+  'ingestion',
+  'data',
+] as const;
+
+export interface DashboardLocation {
+  tab: DashboardTab;
+  settingsSection?: SettingsSection;
+  destinationId?: string;
+  routeId?: string;
+  editSection?: string;
+}
+
+function isSettingsSection(value: string): value is SettingsSection {
+  return (SETTINGS_SECTIONS as readonly string[]).includes(value);
+}
+
+function isDashboardTab(value: string): value is DashboardTab {
+  return value in TAB_PATHS;
+}
+
+export function parseDashboardLocation(pathname: string, search: string): DashboardLocation {
+  const normalized = normalizePath(pathname);
+  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  const destinationId = params.get('destinationId') ?? undefined;
+  const routeId = params.get('routeId') ?? undefined;
+  const sectionParam = params.get('section') ?? undefined;
+
+  if (normalized === '/settings' || normalized.startsWith('/settings/')) {
+    const sectionSegment = normalized.slice('/settings'.length).replace(/^\//, '');
+    const settingsSection =
+      sectionSegment && isSettingsSection(sectionSegment) ? sectionSegment : 'account';
+    return {
+      tab: 'settings',
+      settingsSection,
+      ...(destinationId ? { destinationId } : {}),
+      ...(routeId ? { routeId } : {}),
+      ...(sectionParam ? { editSection: sectionParam } : {}),
+    };
+  }
+
+  const tab = getTabFromPath(normalized) ?? 'overview';
+  return {
+    tab,
+    ...(destinationId ? { destinationId } : {}),
+    ...(routeId ? { routeId } : {}),
+    ...(sectionParam ? { editSection: sectionParam } : {}),
+  };
+}
+
+export function buildDashboardUrl(location: DashboardLocation): string {
+  const tab = isDashboardTab(location.tab) ? location.tab : 'overview';
+  if (tab === 'settings') {
+    const section =
+      location.settingsSection && isSettingsSection(location.settingsSection)
+        ? location.settingsSection
+        : 'account';
+    return section === 'account' ? '/settings' : `/settings/${section}`;
+  }
+
+  const base = TAB_PATHS[tab];
+  const params = new URLSearchParams();
+  if (location.destinationId) params.set('destinationId', location.destinationId);
+  if (location.editSection) params.set('section', location.editSection);
+  if (location.routeId) params.set('routeId', location.routeId);
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
+}
 export const ADD_ACCOUNT_STEPS = ['Sources', 'Create', 'Bluesky', 'Verify & Create'] as const;
 export const ADD_ACCOUNT_STEP_COUNT = ADD_ACCOUNT_STEPS.length;
 export const ACCOUNT_SEARCH_MIN_SCORE = 22;

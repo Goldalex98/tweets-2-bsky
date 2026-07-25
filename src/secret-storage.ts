@@ -105,7 +105,7 @@ function isSecretProperty(path: readonly string[]): boolean {
   const property = path[path.length - 1] ?? '';
   const parent = path[path.length - 2] ?? '';
   if (
-    ['authToken', 'ct0', 'backupAuthToken', 'backupCt0', 'bskyPassword', 'geminiApiKey'].includes(property)
+    ['authToken', 'ct0', 'backupAuthToken', 'backupCt0', 'bskyPassword', 'appPassword', 'geminiApiKey'].includes(property)
   ) {
     return true;
   }

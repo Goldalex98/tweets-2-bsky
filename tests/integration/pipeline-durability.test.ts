@@ -12,7 +12,7 @@ const dbModuleUrl = new URL('../../src/db.ts', import.meta.url).href;
  */
 async function runInIsolatedDatabase(
   script: (context: { dbModule: string; resultPath: string }) => string,
-): Promise<any> {
+): Promise<unknown> {
   const temporary = createTemporaryDataDir();
   const resultPath = path.join(temporary.path, 'result.json');
   try {

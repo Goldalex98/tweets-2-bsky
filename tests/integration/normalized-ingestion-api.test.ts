@@ -120,7 +120,7 @@ test('inbound credentials, HMAC replay, idempotency, and one-time secrets work t
       new Response(subprocess.stderr).text(),
     ]);
     expect(exitCode, stderr).toBe(0);
-    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, any>;
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>;
     expect(result.created.status).toBe(201);
     expect(result.created.body.token).toStartWith('t2b_');
     expect(result.created.body.hmacSecret).toStartWith('t2b_hmac_');

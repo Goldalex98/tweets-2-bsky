@@ -29,9 +29,10 @@ export function routeIdForPair(sourceId: string, destinationId: string): string 
 }
 
 export function projectAccountMappings(
-  config: Pick<AppConfig, 'sources' | 'destinations' | 'routes'>,
+  config: Pick<AppConfig, 'sources' | 'destinations' | 'routes' | 'blueskyAccounts'>,
 ): AccountMapping[] {
   const sourceById = new Map(config.sources.map((source) => [source.id, source]));
+  const accountById = new Map(config.blueskyAccounts.map((account) => [account.id, account]));
   const routesByDestination = new Map<string, Route[]>();
   for (const route of config.routes) {
     const routes = routesByDestination.get(route.destinationId) ?? [];
@@ -56,16 +57,19 @@ export function projectAccountMappings(
     const routePausedUsernames = routeSources.filter(isRoutePaused).map(({ source }) => source.username);
     const routeIdsByUsername = Object.fromEntries(routeSources.map(({ route, source }) => [source.username, route.id]));
     const metadata = destination.metadata;
+    const account = destination.bskyAccountId ? accountById.get(destination.bskyAccountId) : undefined;
 
     const mapping: AccountMapping = {
       id: destination.id,
       twitterUsernames,
       ...(pausedTwitterUsernames.length > 0 ? { pausedTwitterUsernames } : {}),
-      bskyIdentifier: destination.bskyIdentifier,
-      bskyPassword: destination.bskyPassword,
-      bskyServiceUrl: destination.bskyServiceUrl,
-      bskyDid: destination.bskyDid,
-      bskyCanonicalHandle: destination.bskyCanonicalHandle,
+      ...(destination.bskyAccountId ? { bskyAccountId: destination.bskyAccountId } : {}),
+      bskyIdentifier: account?.loginIdentifier ?? destination.bskyIdentifier,
+      bskyPassword: account?.appPassword ?? destination.bskyPassword ?? '',
+      bskyServiceUrl: account?.serviceUrl ?? destination.bskyServiceUrl,
+      bskyDid: account?.did ?? destination.bskyDid,
+      bskyCanonicalHandle: account?.canonicalHandle ?? destination.bskyCanonicalHandle,
+      storageKey: destination.storageKey,
       enabled: destination.enabled,
       owner: destination.owner,
       groupName: destination.groupName,
@@ -104,15 +108,20 @@ export function projectAccountMappings(
 }
 
 function mappingToDestination(mapping: AccountMapping, existing?: Destination): Destination {
+  const bskyAccountId = mapping.bskyAccountId ?? existing?.bskyAccountId;
   return {
     id: existing?.id ?? mapping.id,
     enabled: mapping.enabled,
+    ...(bskyAccountId ? { bskyAccountId } : {}),
     bskyIdentifier: mapping.bskyIdentifier.toLowerCase(),
-    bskyPassword: mapping.bskyPassword,
+    // Inline password is legacy-only; linked destinations store credentials on the account.
+    ...(!bskyAccountId && (mapping.bskyPassword || existing?.bskyPassword)
+      ? { bskyPassword: mapping.bskyPassword || existing?.bskyPassword }
+      : {}),
     bskyServiceUrl: mapping.bskyServiceUrl ?? 'https://bsky.social',
     bskyDid: mapping.bskyDid,
     bskyCanonicalHandle: mapping.bskyCanonicalHandle,
-    storageKey: existing?.storageKey ?? getDestinationStorageKey(mapping),
+    storageKey: existing?.storageKey ?? mapping.storageKey ?? getDestinationStorageKey(mapping),
     owner: mapping.owner,
     groupName: mapping.groupName,
     groupEmoji: mapping.groupEmoji,

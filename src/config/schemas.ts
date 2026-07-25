@@ -1,4 +1,4 @@
-export const CURRENT_CONFIG_SCHEMA_VERSION = 6;
+export const CURRENT_CONFIG_SCHEMA_VERSION = 7;
 
 export interface TwitterConfig {
   authToken: string;
@@ -143,11 +143,18 @@ export interface AccountMapping {
   id: string;
   twitterUsernames: string[];
   pausedTwitterUsernames?: string[];
+  /** Linked managed Bluesky account projected from the destination. */
+  bskyAccountId?: string;
   bskyIdentifier: string;
   bskyPassword: string;
   bskyServiceUrl?: string;
   bskyDid?: string;
   bskyCanonicalHandle?: string;
+  /**
+   * Immutable queue/history identity projected from the destination.
+   * Prefer `resolveDestinationStorageKey` over recomputing from DID/handle.
+   */
+  storageKey?: string;
   enabled: boolean;
   owner?: string;
   groupName?: string;
@@ -307,11 +314,41 @@ export interface DestinationMetadata {
   hasBotLabel?: boolean;
 }
 
+export interface BlueskyAccountMetadata {
+  legacyDestinationIds?: string[];
+}
+
+/**
+ * Managed Bluesky posting identity. Linked from destinations via `bskyAccountId`
+ * (at most one destination per account).
+ */
+export interface BlueskyAccount {
+  id: string;
+  label?: string;
+  serviceUrl: string;
+  loginIdentifier: string;
+  appPassword: string;
+  did?: string;
+  canonicalHandle?: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: BlueskyAccountMetadata;
+}
+
 export interface Destination {
   id: string;
   enabled: boolean;
+  /**
+   * Linked managed Bluesky account. Source of truth for posting credentials
+   * after schema v7. Optional only for pre-migration legacy configs.
+   */
+  bskyAccountId?: string;
   bskyIdentifier: string;
-  bskyPassword: string;
+  /**
+   * Pre-v7 legacy inline credential. Removed by migrateV6ToV7 once the
+   * destination is linked to a Bluesky account.
+   */
+  bskyPassword?: string;
   bskyServiceUrl: string;
   bskyDid?: string;
   bskyCanonicalHandle?: string;
@@ -358,7 +395,7 @@ export interface Route {
 }
 
 export interface ConfigRollbackMetadata {
-  backupSuffix: '.pre-v3-backup' | '.pre-v4-backup' | '.pre-v5-backup' | '.pre-v6-backup';
+  backupSuffix: '.pre-v3-backup' | '.pre-v4-backup' | '.pre-v5-backup' | '.pre-v6-backup' | '.pre-v7-backup';
   instructions: string[];
 }
 
@@ -381,6 +418,8 @@ export interface AppConfig {
   sources: Source[];
   destinations: Destination[];
   routes: Route[];
+  /** Managed Bluesky accounts linked by destination `bskyAccountId`. */
+  blueskyAccounts: BlueskyAccount[];
   /**
    * One-release compatibility projection for the existing API/CLI/UI. Config
    * persistence and exports remove this field and write only canonical

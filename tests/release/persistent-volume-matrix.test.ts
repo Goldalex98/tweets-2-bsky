@@ -7,15 +7,59 @@ const configManagerUrl = new URL('../../src/config-manager.ts', import.meta.url)
 const fixtureUrl = (name: string) => new URL(`../fixtures/${name}`, import.meta.url);
 
 for (const scenario of [
-  { name: 'legacy v0 one-to-one', fixture: 'config-v0-single-source.json', expectedSources: 1, rollback: true },
-  { name: 'legacy aggregate', fixture: 'config-v1-multi-source.json', expectedSources: 2, rollback: true },
-  { name: 'current v6', fixture: 'config-v6-current.json', expectedSources: 0, rollback: false },
+  {
+    name: 'legacy v0 one-to-one',
+    fixture: 'config-v0-single-source.json',
+    expectedSources: 1,
+    expectedBackups: [
+      '.pre-v2-backup',
+      '.pre-v3-backup',
+      '.pre-v4-backup',
+      '.pre-v5-backup',
+      '.pre-v6-backup',
+      '.pre-v7-backup',
+    ],
+  },
+  {
+    name: 'legacy aggregate',
+    fixture: 'config-v1-multi-source.json',
+    expectedSources: 2,
+    expectedBackups: [
+      '.pre-v2-backup',
+      '.pre-v3-backup',
+      '.pre-v4-backup',
+      '.pre-v5-backup',
+      '.pre-v6-backup',
+      '.pre-v7-backup',
+    ],
+  },
+  {
+    name: 'legacy v6',
+    fixture: 'config-v6-current.json',
+    expectedSources: 0,
+    expectedBackups: ['.pre-v3-backup', '.pre-v7-backup'],
+  },
+  {
+    name: 'current v7',
+    fixture: 'config-v7-current.json',
+    expectedSources: 0,
+    expectedBackups: [],
+  },
 ]) {
   test(`copied persistent volume upgrades ${scenario.name} twice and retains rollback artifacts`, async () => {
     const volume = createTemporaryDataDir();
     const configPath = path.join(volume.path, 'config.json');
     fs.copyFileSync(fixtureUrl(scenario.fixture), configPath);
     try {
+      const expectedBackupsJson = JSON.stringify(scenario.expectedBackups);
+      const allBackupSuffixesJson = JSON.stringify([
+        '.pre-v2-backup',
+        '.pre-v3-backup',
+        '.pre-v4-backup',
+        '.pre-v5-backup',
+        '.pre-v6-backup',
+        '.pre-v7-backup',
+      ]);
       const subprocess = Bun.spawn(
         [
           process.execPath,
@@ -29,12 +73,13 @@ for (const scenario of [
             const secondBytes = fs.readFileSync(${JSON.stringify(configPath)}, 'utf8');
             if (firstBytes !== secondBytes) throw new Error('Second migration changed persisted bytes.');
             if (JSON.stringify(first) !== JSON.stringify(second)) throw new Error('Second migration changed config.');
-            if (first.schemaVersion !== 6) throw new Error('Expected current schema v6.');
+            if (first.schemaVersion !== 7) throw new Error('Expected current schema v7.');
             if (first.sources.length !== ${scenario.expectedSources}) throw new Error('Unexpected source count.');
-            for (const suffix of ['.pre-v2-backup', '.pre-v3-backup', '.pre-v4-backup', '.pre-v5-backup', '.pre-v6-backup']) {
+            const expected = new Set(${expectedBackupsJson});
+            for (const suffix of ${allBackupSuffixesJson}) {
               const exists = fs.existsSync(${JSON.stringify(configPath)} + suffix);
-              if (${scenario.rollback} && !exists) throw new Error('Missing rollback artifact ' + suffix);
-              if (!${scenario.rollback} && exists) throw new Error('Current schema unexpectedly created rollback artifact ' + suffix);
+              if (expected.has(suffix) && !exists) throw new Error('Missing rollback artifact ' + suffix);
+              if (!expected.has(suffix) && exists) throw new Error('Unexpected rollback artifact ' + suffix);
             }
           `,
         ],
@@ -94,7 +139,7 @@ test('fresh copied volume supports one-to-one, aggregate, and source fanout', as
     expect(exitCode, stderr).toBe(0);
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
     expect(result).toEqual({
-      schemaVersion: 6,
+      schemaVersion: 7,
       sourceCounts: [1, 1, 2],
       oneSourceRouteCount: 2,
       idempotent: true,

@@ -59,7 +59,7 @@ The persistent-volume matrix copies legacy one-to-one and aggregate fixtures to 
 5. Start with the same persistent volume and encryption key.
 6. Check `/readyz`, queue depth, migration review notices, and a read-only credential/profile preview.
 
-Config and database migrations are automatic and idempotent. Config upgrades retain `.pre-vN-backup` files; database migrations are additive and recorded in `schema_migrations`.
+Config and database migrations are automatic and idempotent. Config upgrades retain `.pre-vN-backup` files; database migrations are additive and recorded in `schema_migrations` (through `010-bluesky-account-runtime` for per-account auth health).
 
 ## Rollback
 
