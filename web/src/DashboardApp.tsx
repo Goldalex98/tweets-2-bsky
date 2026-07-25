@@ -381,8 +381,8 @@ export default function DashboardApp() {
     });
   }, []);
 
-  // Credential saves keep the dialog open, so the pinned mapping snapshot must
-  // pick up the new config revision or the next save fails the version check.
+  // Section-scoped saves keep the sheet open, so the pinned mapping snapshot
+  // must pick up the new config revision or the next save fails the version check.
   useEffect(() => {
     setEditingMapping((current) => {
       if (!current) return current;
@@ -506,6 +506,24 @@ export default function DashboardApp() {
     },
     [destinations.fetchDestinations, editingMapping, run],
   );
+
+  const dismissMigrationReview = useCallback(() => {
+    if (!editingMapping) return;
+    void run(async () => {
+      await api.patch(
+        `/api/destinations/${editingMapping.id}/migration-review`,
+        withConfigVersion({}, editingMapping),
+      );
+      await destinations.fetchDestinations();
+    }, 'Migration review dismissed.');
+  }, [destinations.fetchDestinations, editingMapping, run]);
+
+  const openBlueskyAccountSettings = useCallback(() => {
+    setEditingMapping(null);
+    setPendingEditSection(undefined);
+    setActiveTab('settings');
+    setSettingsSection('bluesky');
+  }, []);
 
   const submitEdit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1139,6 +1157,7 @@ export default function DashboardApp() {
         sourceInput={editSourceInput}
         parseSummary={editSourceSummary}
         busy={busy}
+        canReviewMigration={isAdmin}
         onClose={() => {
           setEditingMapping(null);
           setPendingEditSection(undefined);
@@ -1152,19 +1171,8 @@ export default function DashboardApp() {
             current.filter((source) => normalizeTwitterUsername(source) !== normalizeTwitterUsername(username)),
           )
         }
-        onTestCredentials={() => {
-          if (!editingMapping) return;
-          void run(async () => {
-            await destinations.testCredentials(editingMapping, editForm.bskyPassword);
-          }, 'Credentials are valid.');
-        }}
-        onSaveCredentials={() => {
-          if (!editingMapping) return;
-          void run(async () => {
-            await destinations.saveCredentials(editingMapping, editForm.bskyPassword);
-            setEditForm((current) => ({ ...current, bskyPassword: '' }));
-          }, 'Credentials saved.');
-        }}
+        onManageAccount={openBlueskyAccountSettings}
+        onDismissMigrationReview={dismissMigrationReview}
         onSaveSourceFilters={async (username, filters) => {
           if (!editingMapping) return;
           await run(async () => {

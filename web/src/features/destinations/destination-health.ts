@@ -1,3 +1,4 @@
+import type { BadgeProps } from '../../components/ui/badge';
 import type { AccountMapping } from './types';
 
 export type HealthSeverity = 'healthy' | 'warning' | 'danger' | 'neutral';
@@ -7,6 +8,13 @@ export interface DestinationHealthSummary {
   label: string;
   detail?: string;
 }
+
+export const HEALTH_BADGE_VARIANT: Record<HealthSeverity, NonNullable<BadgeProps['variant']>> = {
+  healthy: 'success',
+  warning: 'warning',
+  danger: 'danger',
+  neutral: 'outline',
+};
 
 export function summarizeDestinationHealth(mapping: AccountMapping): DestinationHealthSummary {
   if (mapping.destinationState === 'paused' || !mapping.enabled) {
@@ -26,6 +34,25 @@ export function summarizeDestinationHealth(mapping: AccountMapping): Destination
       detail: mapping.runtime.lastErrorMessage || 'Bluesky authentication failed.',
     };
   }
+  // Strict === false so older servers that omit the field do not trigger this.
+  if (mapping.credentialConfigured === false) {
+    return {
+      severity: 'danger',
+      label: 'Missing credential',
+      detail: 'Add an app password in Settings → Bluesky accounts.',
+    };
+  }
+  if (mapping.blueskyAccount?.health?.lastErrorCategory === 'did-mismatch') {
+    const handle =
+      mapping.blueskyAccount.canonicalHandle ||
+      mapping.blueskyAccount.loginIdentifier ||
+      mapping.bskyIdentifier;
+    return {
+      severity: 'danger',
+      label: 'DID mismatch',
+      detail: `Account @${handle} resolved a different DID than expected.`,
+    };
+  }
   const sourceIssue = mapping.sources?.find((source) => source.runtime?.lastErrorCategory);
   if (sourceIssue?.runtime?.lastErrorCategory) {
     return {
@@ -35,7 +62,11 @@ export function summarizeDestinationHealth(mapping: AccountMapping): Destination
     };
   }
   if (mapping.migrationReview?.needsAdminReview) {
-    return { severity: 'warning', label: 'Needs review' };
+    return {
+      severity: 'neutral',
+      label: 'Migrated — review',
+      detail: "Migrated from legacy configuration. Open the destination's Operations tab to review and dismiss.",
+    };
   }
   if (mapping.queue?.pending) {
     return { severity: 'neutral', label: `${mapping.queue.pending} queued` };

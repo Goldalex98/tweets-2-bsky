@@ -208,8 +208,21 @@ async function mockDashboard(page: Page) {
     if (/^\/api\/queue\/items\/[^/]+\/[^/]+$/.test(path) && method === 'DELETE') {
       return json(route, { success: true, affected: 1 });
     }
-    if (/^\/api\/mappings\/[^/]+\/migration-review$/.test(path)) {
-      return json(route, { ...version, success: true, migrationReview: { needsAdminReview: false } });
+    if (/^\/api\/(destinations|mappings)\/[^/]+\/migration-review$/.test(path)) {
+      const destination = destinations[0] as Record<string, unknown> | undefined;
+      if (destination?.migrationReview && typeof destination.migrationReview === 'object') {
+        destination.migrationReview = {
+          ...(destination.migrationReview as object),
+          needsAdminReview: false,
+          reviewedAt: '2026-07-25T20:00:00.000Z',
+        };
+      }
+      return json(route, {
+        ...version,
+        success: true,
+        migrationReview: { needsAdminReview: false, reviewedAt: '2026-07-25T20:00:00.000Z' },
+        destination,
+      });
     }
     if (path === '/api/backup/restore/validate') {
       return json(route, { valid: true, mode: 'redacted', dryRun: true, writesPerformed: 0 });
@@ -377,4 +390,107 @@ test('responsive keyboard and operational redaction smoke', async ({ page }) => 
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Add Bluesky destination' })).toBeFocused();
+});
+
+test('destination editor uses section navigation and dismisses migration review', async ({ page }) => {
+  const mutations = await mockDashboard(page);
+  await page.route('**/api/destinations', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return json(route, [
+      {
+        ...version,
+        id: 'destination-1',
+        twitterUsernames: ['alpha', 'beta'],
+        pausedTwitterUsernames: [],
+        bskyIdentifier: 'osint-mirrors.bsky.social',
+        bskyCanonicalHandle: 'osint-mirrors.bsky.social',
+        bskyDid: 'did:plc:mock',
+        bskyServiceUrl: 'https://bsky.social',
+        bskyAccountId: 'account-1',
+        credentialConfigured: true,
+        blueskyAccount: {
+          id: 'account-1',
+          loginIdentifier: 'osint-mirrors.bsky.social',
+          canonicalHandle: 'osint-mirrors.bsky.social',
+          did: 'did:plc:mock',
+          serviceUrl: 'https://bsky.social',
+          credentialConfigured: true,
+          health: { consecutiveFailures: 0 },
+        },
+        enabled: true,
+        destinationState: 'enabled',
+        postingPolicy,
+        profileManagement,
+        aiOverrides: {
+          imageAltText: 'inherit',
+          textCapabilities: {
+            translation: 'inherit',
+            summarization: 'inherit',
+            cleanup: 'inherit',
+            hashtags: 'inherit',
+          },
+        },
+        moderationPolicy: {
+          blockKeywords: [],
+          blockDomains: [],
+          blockSourceUsernames: [],
+          sensitiveContent: 'allow',
+          dryRun: false,
+        },
+        duplicateSuppression: { enabled: false, windowHours: 24, perceptualImageHash: false },
+        migrationReview: {
+          needsAdminReview: true,
+          migratedFromSchemaVersion: 1,
+          notices: ['Legacy migration notice.'],
+        },
+        sources: [
+          {
+            username: 'alpha',
+            routeId: 'route_alpha',
+            state: 'enabled',
+            delivery: { mode: 'immediate' },
+          },
+          {
+            username: 'beta',
+            routeId: 'route_beta',
+            state: 'enabled',
+            delivery: { mode: 'immediate' },
+          },
+        ],
+        queue: null,
+        runtime: null,
+      },
+    ]);
+  });
+
+  await page.goto('/accounts');
+  await expect(page.getByText('Migrated — review').first()).toBeVisible();
+
+  await page.goto('/accounts?destinationId=destination-1&section=moderation');
+  const dialog = page.getByRole('dialog', { name: 'Edit Bluesky Destination' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Moderation, routing, and dedup' })).toBeVisible();
+
+  const sections = dialog.getByRole('navigation', { name: 'Destination sections' });
+  for (const label of ['Overview', 'Sources & routes', 'Delivery', 'Moderation', 'Automation', 'Operations']) {
+    await expect(sections.getByRole('button', { name: label })).toBeVisible();
+  }
+
+  await sections.getByRole('button', { name: 'Overview' }).click();
+  await expect(dialog.getByText('Linked Bluesky account')).toBeVisible();
+  await expect(dialog.getByText('Credential saved')).toBeVisible();
+  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
+
+  await sections.getByRole('button', { name: 'Operations' }).click();
+  await expect(dialog.getByText('Legacy migration notice.')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Mark as reviewed' }).click();
+  await expect
+    .poll(() =>
+      mutations.some((entry) => entry.path === '/api/destinations/destination-1/migration-review'),
+    )
+    .toBe(true);
+
+  await sections.getByRole('button', { name: 'Delivery' }).click();
+  await expect(dialog.getByLabel('Prepend the X username')).toBeVisible();
+  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
 });

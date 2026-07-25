@@ -83,6 +83,11 @@ export function listBlueskyAccountViews(config: AppConfig): BlueskyAccountView[]
     .map((account) => toAccountView(config, account));
 }
 
+export function getBlueskyAccountView(config: AppConfig, accountId: string): BlueskyAccountView | undefined {
+  const account = config.blueskyAccounts.find((candidate) => candidate.id === accountId);
+  return account ? toAccountView(config, account) : undefined;
+}
+
 export async function createValidatedBlueskyAccount(
   config: AppConfig,
   input: {

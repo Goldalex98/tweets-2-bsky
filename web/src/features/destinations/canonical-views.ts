@@ -30,20 +30,6 @@ export interface SourceView {
   runtime?: SourceRuntimeState | null;
 }
 
-export interface RouteView {
-  id: string;
-  username: string;
-  destinationId: string;
-  state: 'enabled' | 'paused';
-  delivery?: RouteDeliveryPolicy;
-  routingPolicy?: RoutingPolicy;
-  moderationPolicy?: ModerationPolicy;
-  duplicateSuppression?: DuplicateSuppressionPolicy;
-}
-
-/** @deprecated Prefer DestinationView. Compatibility alias during AccountMapping retirement. */
-export type { AccountMapping as LegacyAccountMapping } from './types';
-
 export function toSourceViews(destination: DestinationView): SourceView[] {
   return (
     destination.sources ??
@@ -54,19 +40,4 @@ export function toSourceViews(destination: DestinationView): SourceView[] {
         : ('enabled' as const),
     }))
   );
-}
-
-export function toRouteViews(destination: DestinationView): RouteView[] {
-  return toSourceViews(destination)
-    .filter((source): source is SourceView & { routeId: string } => Boolean(source.routeId))
-    .map((source) => ({
-      id: source.routeId,
-      username: source.username,
-      destinationId: destination.id,
-      state: source.state,
-      delivery: source.delivery,
-      routingPolicy: source.routingPolicy,
-      moderationPolicy: source.moderationPolicy,
-      duplicateSuppression: source.duplicateSuppression,
-    }));
 }

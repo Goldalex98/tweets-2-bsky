@@ -72,7 +72,7 @@ Every successful config write increments top-level `revision` and changes `updat
 
 ### Frontend boundaries
 
-`web/src/api/client.ts` owns cookie/CSRF behavior, conflict types, and API error normalization. `web/src/components/ui/` contains keyboard-accessible primitives including focus-trapped dialogs. `DashboardApp.tsx` is the dashboard orchestrator; Settings includes a Bluesky accounts section, and the destination editor exposes connection, content-policy, and route-delivery panels. Feature extraction should continue incrementally instead of risking a behavior-changing rewrite.
+`web/src/api/client.ts` owns cookie/CSRF behavior, conflict types, and API error normalization. `web/src/components/ui/` contains keyboard-accessible primitives including focus-trapped dialogs. `DashboardApp.tsx` is the dashboard orchestrator; Settings includes a Bluesky accounts section for credentials. The destination editor is a six-section sheet (Overview, Sources & routes, Delivery, Moderation, Automation, Operations) with a read-only linked-account summary and deep links such as `/accounts?destinationId=…&section=moderation`. Feature extraction should continue incrementally instead of risking a behavior-changing rewrite.
 
 ## Current Source/Destination/Route architecture
 

@@ -1,16 +1,9 @@
 import { Pencil, Trash2 } from 'lucide-react';
-import { Badge, type BadgeProps } from '../../components/ui/badge';
+import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { getMappingGroupMeta } from '../../lib/dashboard-utils';
-import { summarizeDestinationHealth, type HealthSeverity } from './destination-health';
+import { HEALTH_BADGE_VARIANT, summarizeDestinationHealth } from './destination-health';
 import type { AccountMapping, BskyProfileView } from './types';
-
-const HEALTH_BADGE_VARIANT: Record<HealthSeverity, NonNullable<BadgeProps['variant']>> = {
-  healthy: 'success',
-  warning: 'warning',
-  danger: 'danger',
-  neutral: 'outline',
-};
 
 interface DestinationsTableProps {
   mappings: AccountMapping[];

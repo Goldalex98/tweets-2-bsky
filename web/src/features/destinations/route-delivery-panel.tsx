@@ -16,20 +16,20 @@ export function RouteDeliveryPanel({ mapping, busy, onSave }: RouteDeliveryPanel
   const [selectedRouteId, setSelectedRouteId] = useState(sources[0]?.routeId || '');
   const selected = sources.find((source) => source.routeId === selectedRouteId) ?? sources[0];
   const [mode, setMode] = useState<'immediate' | 'digest'>(selected?.delivery?.mode || 'immediate');
-  const [timezone, setTimezone] = useState(selected?.delivery?.digest.timezone || 'UTC');
-  const [hour, setHour] = useState(String(selected?.delivery?.digest.hour ?? 9));
-  const [minute, setMinute] = useState(String(selected?.delivery?.digest.minute ?? 0));
+  const [timezone, setTimezone] = useState(selected?.delivery?.digest?.timezone || 'UTC');
+  const [hour, setHour] = useState(String(selected?.delivery?.digest?.hour ?? 9));
+  const [minute, setMinute] = useState(String(selected?.delivery?.digest?.minute ?? 0));
   const [cadence, setCadence] = useState<'hourly' | 'daily' | 'weekly'>(
-    selected?.delivery?.digest.cadence || 'daily',
+    selected?.delivery?.digest?.cadence || 'daily',
   );
 
   useEffect(() => {
     if (!selected) return;
     setMode(selected.delivery?.mode || 'immediate');
-    setTimezone(selected.delivery?.digest.timezone || 'UTC');
-    setHour(String(selected.delivery?.digest.hour ?? 9));
-    setMinute(String(selected.delivery?.digest.minute ?? 0));
-    setCadence(selected.delivery?.digest.cadence || 'daily');
+    setTimezone(selected.delivery?.digest?.timezone || 'UTC');
+    setHour(String(selected.delivery?.digest?.hour ?? 9));
+    setMinute(String(selected.delivery?.digest?.minute ?? 0));
+    setCadence(selected.delivery?.digest?.cadence || 'daily');
   }, [selected]);
 
   if (sources.length === 0) {
@@ -122,11 +122,11 @@ export function RouteDeliveryPanel({ mapping, busy, onSave }: RouteDeliveryPanel
               timezone: timezone.trim() || 'UTC',
               hour: parsedHour,
               minute: parsedMinute,
-              grouping: selected.delivery?.digest.grouping || 'none',
-              template: selected.delivery?.digest.template || '',
-              maxEntries: selected.delivery?.digest.maxEntries || 20,
-              maxGraphemes: selected.delivery?.digest.maxGraphemes || 300,
-              includeSourceAttribution: selected.delivery?.digest.includeSourceAttribution ?? true,
+              grouping: selected.delivery?.digest?.grouping || 'none',
+              template: selected.delivery?.digest?.template || '',
+              maxEntries: selected.delivery?.digest?.maxEntries || 20,
+              maxGraphemes: selected.delivery?.digest?.maxGraphemes || 300,
+              includeSourceAttribution: selected.delivery?.digest?.includeSourceAttribution ?? true,
             },
           });
         }}

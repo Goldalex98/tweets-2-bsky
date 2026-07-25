@@ -6,7 +6,11 @@ This document describes implemented behavior in schema v7. Items under **Future 
 
 A destination is one Bluesky identity linked to a managed Bluesky account for posting credentials. A route connects one canonical X, webhook, or API source to that destination. One-to-one destinations default to no attribution; aggregate destinations default to source attribution when multiple sources are present. Adding a source never backfills automatically, and credential validation never changes a profile.
 
+App passwords are managed only under Settings → Bluesky accounts. The destination editor shows a read-only linked-account card (handle, DID, service URL, credential status, health) and never accepts or displays a password.
+
 Dashboard destination, source, route, account, and settings edits carry the `revision` and `updatedAt` last read from the API. A stale edit returns `409 CONFIG_REVISION_CONFLICT`; refresh, review the newer values, and reapply the change. The server never merges a stale form over newer configuration.
+
+Destinations migrated from legacy configuration may carry a `migrationReview` notice. That is an informational status (`Migrated — review`), not a delivery failure. An administrator clears it from the destination editor's Operations tab (`PATCH /api/destinations/:id/migration-review` or the `/api/mappings/...` alias).
 
 Bulk X input accepts commas, whitespace, and newlines, normalizes `@name`, and reports invalid or duplicate entries. Source removal preserves history and pending work unless the operator explicitly selects a destructive option.
 

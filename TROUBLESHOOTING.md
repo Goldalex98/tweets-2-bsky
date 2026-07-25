@@ -245,6 +245,16 @@ system Edge both hang the same way).
 a `node.exe` (Cursor ships one under
 `%LOCALAPPDATA%\Programs\cursor\resources\app\resources\helpers\node.exe`).
 
+### Destination shows “Migrated — review” but posting works
+
+That badge is a legacy-migration notice (`migrationReview.needsAdminReview`), not a delivery failure. Destinations migrated from older config schemas keep the notice until an administrator acknowledges it.
+
+Fix: open the destination editor → Operations → **Mark as reviewed**. Non-admins see the notices but cannot dismiss them.
+
+### Destination editor has no app password field
+
+By design. App passwords live under Settings → Bluesky accounts. The destination Overview tab shows a read-only linked-account card (handle, DID, service URL, credential status). Use **Manage in Settings** to rotate or validate the password.
+
 ### Polls look different on Bluesky
 
 Bluesky has no poll embed. Mirrored poll posts become a text note (choices + link

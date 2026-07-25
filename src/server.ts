@@ -29,6 +29,7 @@ import { contentPolicyMetadataForPost, evaluateContentPolicy } from './content-p
 import {
   createValidatedBlueskyAccount,
   deleteBlueskyAccount,
+  getBlueskyAccountView,
   listBlueskyAccountViews,
   rotateBlueskyAccountCredentials,
   validateExistingBlueskyAccount,
@@ -1308,6 +1309,23 @@ interface MappingResponse extends Omit<AccountMapping, 'bskyPassword'> {
   destinationState: 'enabled' | 'paused';
   sourceCount: number;
   activeSourceCount: number;
+  credentialConfigured: boolean;
+  blueskyAccount?: {
+    id: string;
+    label?: string;
+    loginIdentifier: string;
+    canonicalHandle?: string;
+    did?: string;
+    serviceUrl: string;
+    credentialConfigured: boolean;
+    health: {
+      lastValidatedAt?: number;
+      lastSuccessAt?: number;
+      lastFailureAt?: number;
+      lastErrorCategory?: string;
+      consecutiveFailures: number;
+    } | null;
+  };
   sources: Array<{
     username: string;
     routeId?: string;
@@ -1711,9 +1729,14 @@ const sanitizeMapping = (
   requester: AuthenticatedUser,
 ): MappingResponse => {
   const { bskyPassword: _password, ...rest } = mapping;
-  const configVersion = getConfigVersion(getConfig());
+  const config = getConfig();
+  const configVersion = getConfigVersion(config);
   const createdBy = mapping.createdByUserId ? usersById.get(mapping.createdByUserId) : undefined;
   const ownerLabel = sanitizeLabelForRequester(mapping.owner, requester);
+  const accountView = mapping.bskyAccountId ? getBlueskyAccountView(config, mapping.bskyAccountId) : undefined;
+  const credentialConfigured = accountView
+    ? accountView.credentialConfigured
+    : typeof mapping.bskyPassword === 'string' && mapping.bskyPassword.length > 0;
 
   const response: MappingResponse = {
     ...rest,
@@ -1721,8 +1744,22 @@ const sanitizeMapping = (
     destinationState: mapping.enabled ? 'enabled' : 'paused',
     sourceCount: mapping.twitterUsernames.length,
     activeSourceCount: getActiveTwitterUsernames(mapping).length,
+    credentialConfigured,
+    ...(accountView
+      ? {
+          blueskyAccount: {
+            id: accountView.id,
+            label: accountView.label,
+            loginIdentifier: accountView.loginIdentifier,
+            canonicalHandle: accountView.canonicalHandle,
+            did: accountView.did,
+            serviceUrl: accountView.serviceUrl,
+            credentialConfigured: accountView.credentialConfigured,
+            health: accountView.health,
+          },
+        }
+      : {}),
     sources: mapping.twitterUsernames.map((username) => {
-      const config = getConfig();
       const source = config.sources.find((candidate) => candidate.username === username);
       const route = source
         ? config.routes.find((candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping.id)
@@ -3287,7 +3324,20 @@ app.patch('/api/destinations/:id/content-policies', authenticateToken, asAuthedH
     }
   }
   saveCanonicalConfig(config);
-  res.json({ success: true, destination, route, ...getConfigVersion(config) });
+  // Canonical destination fields were mutated in place; re-load so the projected
+  // mapping (and revision tokens) match what was just persisted.
+  const fresh = getConfig();
+  const refreshed = fresh.mappings.find((entry) => entry.id === req.params.id);
+  if (!refreshed) {
+    res.status(404).json({ error: 'Destination not found.' });
+    return;
+  }
+  res.json({
+    success: true,
+    destination: sanitizeMapping(refreshed, createUserLookupById(fresh), req.user),
+    route: route ? (fresh.routes.find((candidate) => candidate.id === route.id) ?? route) : undefined,
+    ...getConfigVersion(fresh),
+  });
 }));
 
 app.get(['/api/destinations/:id/sources', '/api/mappings/:id/sources'], authenticateToken, asAuthedHandler((req, res) => {
@@ -4167,6 +4217,10 @@ app.put(['/api/destinations/:id', '/api/mappings/:id'], authenticateToken, asAut
     createdByUserId,
     postingPolicy,
     profileManagement,
+    aiOverrides:
+      req.body?.aiOverrides !== undefined
+        ? normalizeAiOverrides(req.body.aiOverrides)
+        : existingMapping.aiOverrides,
     profileSyncSourceUsername: profileManagement.profileSync.sourceUsername,
   };
 
@@ -4902,7 +4956,11 @@ app.post('/api/mappings/:id/posting/preview', authenticateToken, asAuthedHandler
   }
 }));
 
-app.patch('/api/mappings/:id/migration-review', authenticateToken, requireAdmin, (req, res) => {
+app.patch(
+  ['/api/destinations/:id/migration-review', '/api/mappings/:id/migration-review'],
+  authenticateToken,
+  requireAdmin,
+  asAuthedHandler((req, res) => {
   const config = getConfig();
   if (rejectStaleConfigMutation(config, req.body, res)) return;
   const mapping = config.mappings.find((entry) => entry.id === req.params.id);
@@ -4920,8 +4978,14 @@ app.patch('/api/mappings/:id/migration-review', authenticateToken, requireAdmin,
     reviewedAt: new Date().toISOString(),
   };
   saveConfig(config);
-  res.json({ success: true, migrationReview: mapping.migrationReview, ...getConfigVersion(config) });
-});
+  res.json({
+    success: true,
+    migrationReview: mapping.migrationReview,
+    destination: sanitizeMapping(mapping, createUserLookupById(config), req.user),
+    ...getConfigVersion(config),
+  });
+}),
+);
 
 // --- Status & Actions Routes ---
 

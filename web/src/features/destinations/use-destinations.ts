@@ -141,13 +141,6 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     [fetchDestinations, withConflictRefresh],
   );
 
-  const testCredentials = useCallback(async (mapping: AccountMapping, password: string) => {
-    return api.post(`/api/destinations/${mapping.id}/credentials/test`, {
-      bskyPassword: password,
-      bskyServiceUrl: mapping.bskyServiceUrl,
-    });
-  }, []);
-
   const patchSource = useCallback(
     async (mapping: AccountMapping, username: string, payload: { filters?: SourceFilterPolicy; state?: 'enabled' | 'paused' }) => {
       const response = await withConflictRefresh(() =>
@@ -223,19 +216,6 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     return response.data;
   }, []);
 
-  const saveCredentials = useCallback(
-    async (mapping: AccountMapping, password: string) => {
-      await withConflictRefresh(() =>
-        api.put(
-          `/api/destinations/${mapping.id}/credentials`,
-          withConfigVersion({ bskyPassword: password, bskyServiceUrl: mapping.bskyServiceUrl }, mapping),
-        ),
-      );
-      await fetchDestinations();
-    },
-    [fetchDestinations, withConflictRefresh],
-  );
-
   const deleteDestination = useCallback(
     async (mapping: Pick<AccountMapping, 'id'> & ConfigVersion) => {
       await withConflictRefresh(() => api.delete(`/api/mappings/${mapping.id}`, { data: mapping }));
@@ -282,8 +262,6 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     createDestination,
     updateDestination,
     syncSources,
-    testCredentials,
-    saveCredentials,
     patchSource,
     previewSourceFilter,
     previewPostingPolicy,

@@ -3,6 +3,7 @@ import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { Card, CardContent } from '../../components/ui/card';
 import { getMappingGroupMeta } from '../../lib/dashboard-utils';
+import { HEALTH_BADGE_VARIANT, summarizeDestinationHealth } from './destination-health';
 import type { AccountMapping, BskyProfileView } from './types';
 
 interface DestinationCardProps {
@@ -33,6 +34,7 @@ export function DestinationCard({
   onQueuePinSync,
 }: DestinationCardProps) {
   const group = getMappingGroupMeta(mapping);
+  const health = summarizeDestinationHealth(mapping);
   const canProfileSync =
     mapping.profileManagement?.allowProfileMutation && mapping.profileManagement.profileSync.mode !== 'off';
   const canPinSync =
@@ -56,8 +58,8 @@ export function DestinationCard({
               </p>
             </div>
           </div>
-          <Badge variant={mapping.destinationState === 'paused' || !mapping.enabled ? 'warning' : 'success'}>
-            {mapping.destinationState === 'paused' || !mapping.enabled ? 'Paused' : 'Active'}
+          <Badge variant={HEALTH_BADGE_VARIANT[health.severity]} title={health.detail}>
+            {health.label}
           </Badge>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">

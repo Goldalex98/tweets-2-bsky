@@ -1,17 +1,21 @@
-import fs from 'node:fs';
 import { expect, test } from 'bun:test';
+import fs from 'node:fs';
 
-const appShellSource = fs.readFileSync(new URL('../../web/src/App.tsx', import.meta.url), 'utf8');
-const destinationWizardSource = fs.readFileSync(
-  new URL('../../web/src/features/destinations/add-destination-wizard.tsx', import.meta.url),
+const destinationHookSource = fs.readFileSync(
+  new URL('../../web/src/features/destinations/use-destinations.ts', import.meta.url),
   'utf8',
 );
 const destinationDialogSource = fs.readFileSync(
   new URL('../../web/src/features/destinations/edit-destination-dialog.tsx', import.meta.url),
   'utf8',
 );
-const destinationHookSource = fs.readFileSync(
-  new URL('../../web/src/features/destinations/use-destinations.ts', import.meta.url),
+const destinationAccountCardSource = fs.readFileSync(
+  new URL('../../web/src/features/destinations/destination-account-card.tsx', import.meta.url),
+  'utf8',
+);
+const appShellSource = fs.readFileSync(new URL('../../web/src/App.tsx', import.meta.url), 'utf8');
+const destinationWizardSource = fs.readFileSync(
+  new URL('../../web/src/features/destinations/add-destination-wizard.tsx', import.meta.url),
   'utf8',
 );
 const settingsSource = fs.readFileSync(
@@ -29,17 +33,21 @@ test('destination onboarding exposes aggregate review and safe backfill defaults
   expect(destinationWizardSource).toContain('X Sources ({props.sources.length})');
   expect(destinationWizardSource).toContain('Backfill:</strong> None (request separately after creation)');
   expect(destinationWizardSource).toContain('Profile &amp; pin policy:</strong>');
-  // The review step must show mutations off unless the operator opted in.
   expect(destinationWizardSource).toContain(
     "allowProfileMutation ? 'Mutations allowed (sync modes still off)' : 'Mutations disabled'",
   );
   expect(settingsSource).toContain('value.intervalMinutes');
 });
 
-test('source and credential edits use isolated APIs', () => {
+test('source edits stay isolated and credentials leave the destination editor', () => {
   expect(destinationHookSource).toContain('/sources/${encodeURIComponent(username)}');
-  expect(destinationHookSource).toContain('/credentials/test');
-  expect(destinationHookSource).toContain('/credentials`');
-  expect(destinationDialogSource).toContain('Saving source and');
-  expect(destinationDialogSource).toContain('policy changes never sends or changes the app password');
+  expect(destinationHookSource).not.toContain('/credentials');
+  expect(destinationDialogSource).not.toContain('type="password"');
+  expect(destinationDialogSource).not.toContain('bskyPassword');
+  expect(destinationDialogSource).not.toContain('app password');
+  expect(destinationAccountCardSource).toContain('App passwords are never shown here');
+  expect(destinationAccountCardSource).toContain('Settings → Bluesky accounts');
+  expect(destinationDialogSource).toContain('Destination sections');
+  expect(destinationDialogSource).toContain("'overview'");
+  expect(destinationDialogSource).toContain("'operations'");
 });

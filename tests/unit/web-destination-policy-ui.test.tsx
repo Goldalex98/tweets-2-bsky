@@ -20,7 +20,30 @@ const mapping = (): AccountMapping =>
     bskyIdentifier: 'aggregate.bsky.social',
     bskyServiceUrl: 'https://bsky.social',
     enabled: true,
+    credentialConfigured: true,
   }) as unknown as AccountMapping;
+
+const dialogProps = {
+  sources: ['alpha', 'beta'] as string[],
+  sourceInput: '',
+  parseSummary: { duplicates: [], invalid: [] },
+  busy: false,
+  canReviewMigration: true,
+  onClose: () => undefined,
+  onSubmit: () => undefined,
+  onFormChange: () => undefined,
+  onSourceInputChange: () => undefined,
+  onAddSources: () => undefined,
+  onRemoveSource: () => undefined,
+  onManageAccount: () => undefined,
+  onDismissMigrationReview: () => undefined,
+  onSaveSourceFilters: async () => undefined,
+  onPreviewSourceFilter: async () => ({ allowed: true, reason: 'allowed' }),
+  onPreviewPosting: async () => ({ text: 'preview', attributionApplied: false, originalLinkApplied: false }),
+  onPreviewProfileSync: () => undefined,
+  onApplyProfileSync: () => undefined,
+  onQueuePinSync: () => undefined,
+};
 
 const scheduler = (intervalMinutes: number): SchedulerSettings => ({
   revision: 3,
@@ -121,38 +144,49 @@ describe('profile mutation control', () => {
 });
 
 describe('edit destination dialog', () => {
-  test('exposes attribution and profile mutation controls for an existing destination', () => {
+  test('exposes attribution controls on the delivery section', () => {
     const markup = renderToStaticMarkup(
       <EditDestinationDialog
         mapping={mapping()}
         form={form()}
-        sources={['alpha', 'beta']}
-        sourceInput=""
-        parseSummary={{ duplicates: [], invalid: [] }}
-        busy={false}
-        onClose={() => undefined}
-        onSubmit={() => undefined}
-        onFormChange={() => undefined}
-        onSourceInputChange={() => undefined}
-        onAddSources={() => undefined}
-        onRemoveSource={() => undefined}
-        onTestCredentials={() => undefined}
-        onSaveCredentials={() => undefined}
-        onSaveSourceFilters={async () => undefined}
-        onPreviewSourceFilter={async () => ({ allowed: true, reason: 'allowed' })}
-        onPreviewPosting={async () => ({ text: 'preview', attributionApplied: false, originalLinkApplied: false })}
-        onPreviewProfileSync={() => undefined}
-        onApplyProfileSync={() => undefined}
-        onQueuePinSync={() => undefined}
+        {...dialogProps}
+        initialSection="delivery"
       />,
     );
 
     expect(markup).toContain('id="edit-destination-attribution-mode"');
-    expect(markup).toContain('id="edit-destination-allow-profile-mutation"');
-    expect(markup).toContain('Source filters');
     expect(markup).toContain('Preview sample post');
     expect(markup).toContain('aria-modal="true"');
+    expect(markup).toContain('Destination sections');
+    expect(markup).not.toContain('type="password"');
     expect(markup).not.toContain('disabled="">Save Destination</button>');
+  });
+
+  test('exposes profile mutation controls on the automation section', () => {
+    const markup = renderToStaticMarkup(
+      <EditDestinationDialog
+        mapping={mapping()}
+        form={form()}
+        {...dialogProps}
+        sources={['alpha']}
+        initialSection="automation"
+      />,
+    );
+
+    expect(markup).toContain('id="edit-destination-allow-profile-mutation"');
+  });
+
+  test('exposes source filters on the sources section', () => {
+    const markup = renderToStaticMarkup(
+      <EditDestinationDialog
+        mapping={mapping()}
+        form={form()}
+        {...dialogProps}
+        initialSection="sources"
+      />,
+    );
+
+    expect(markup).toContain('Source filters');
   });
 
   test('blocks saving while the attribution template is invalid', () => {
@@ -166,24 +200,9 @@ describe('edit destination dialog', () => {
             attribution: { ...current.postingPolicy.attribution, template: 'Broken {' },
           },
         }))}
+        {...dialogProps}
         sources={['alpha']}
-        sourceInput=""
-        parseSummary={{ duplicates: [], invalid: [] }}
-        busy={false}
-        onClose={() => undefined}
-        onSubmit={() => undefined}
-        onFormChange={() => undefined}
-        onSourceInputChange={() => undefined}
-        onAddSources={() => undefined}
-        onRemoveSource={() => undefined}
-        onTestCredentials={() => undefined}
-        onSaveCredentials={() => undefined}
-        onSaveSourceFilters={async () => undefined}
-        onPreviewSourceFilter={async () => ({ allowed: true, reason: 'allowed' })}
-        onPreviewPosting={async () => ({ text: 'preview', attributionApplied: false, originalLinkApplied: false })}
-        onPreviewProfileSync={() => undefined}
-        onApplyProfileSync={() => undefined}
-        onQueuePinSync={() => undefined}
+        initialSection="delivery"
       />,
     );
 

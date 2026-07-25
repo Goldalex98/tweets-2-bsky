@@ -142,10 +142,29 @@ export interface QueueMappingCounts {
 /** Canonical destination dashboard view (compatibility projection during AccountMapping retirement). */
 export type DestinationView = AccountMapping;
 
+/** Nested Bluesky account summary on destination API responses (never includes appPassword). */
+export interface DestinationBlueskyAccount {
+  id: string;
+  label?: string;
+  loginIdentifier: string;
+  canonicalHandle?: string;
+  did?: string;
+  serviceUrl: string;
+  credentialConfigured: boolean;
+  health: {
+    lastValidatedAt?: number;
+    lastSuccessAt?: number;
+    lastFailureAt?: number;
+    lastErrorCategory?: string;
+    consecutiveFailures: number;
+  } | null;
+}
+
 export interface AccountMapping extends ConfigVersion {
   id: string;
   twitterUsernames: string[];
   pausedTwitterUsernames?: string[];
+  bskyAccountId?: string;
   bskyIdentifier: string;
   bskyPassword?: string;
   bskyServiceUrl?: string;
@@ -155,6 +174,8 @@ export interface AccountMapping extends ConfigVersion {
   destinationState?: 'enabled' | 'paused';
   sourceCount?: number;
   activeSourceCount?: number;
+  credentialConfigured?: boolean;
+  blueskyAccount?: DestinationBlueskyAccount;
   sources?: Array<{
     username: string;
     routeId?: string;
