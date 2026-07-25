@@ -56,3 +56,12 @@ Never solve a rollback by deleting `database.sqlite`, `config.json`, encryption 
 ## Docker and Portainer
 
 Both Compose examples persist `/app/data`, carry encryption/proxy environment values, and probe `/readyz`. Portainer deployments should use stack secrets or protected environment values for `JWT_SECRET` and `CONFIG_ENCRYPTION_KEY`, an externally managed TLS proxy network, and an immutable image tag for controlled releases.
+
+### Image publish platforms
+
+GHCR and Docker Hub publish share `.github/workflows/docker-build-push.yml`:
+
+- **Branch pushes** (`master` / `main`): `linux/amd64` only, on `ubuntu-latest`.
+- **Version tags (`v*`) and `workflow_dispatch`**: `linux/amd64` and `linux/arm64` on native runners (`ubuntu-latest` + `ubuntu-24.04-arm`), then a manifest-list merge. QEMU is not used.
+
+Prefer a release tag (or a manual workflow run) when you need an ARM/Raspberry Pi image. Day-to-day `latest` from branch pushes is amd64-oriented and publishes much faster.

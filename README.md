@@ -76,6 +76,8 @@ docker run -d \
 
 Alternative image: `ghcr.io/j4ckxyz/tweets-2-bsky:latest`.
 
+Branch pushes publish **amd64** images quickly. Multi-arch (`amd64` + `arm64`) images are built on version tags (`v*`) or a manual “Publish Docker Image” workflow run — use those for Raspberry Pi / ARM hosts.
+
 ### Option B: Source Install (PM2 or Manual)
 
 Prerequisites:
