@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.3.9-slim AS build
+FROM oven/bun:1.3.14-slim AS build
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN bun run build \
   && bun install --frozen-lockfile --production
 
 
-FROM oven/bun:1.3.9-slim AS runtime
+FROM oven/bun:1.3.14-slim AS runtime
 
 WORKDIR /app
 
