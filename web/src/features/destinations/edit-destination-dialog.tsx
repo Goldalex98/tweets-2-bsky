@@ -14,7 +14,7 @@ import { Dialog } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { NavList, type NavListItem } from '../../components/ui/nav-list';
-import { validateAttributionTemplate } from '../../lib/dashboard-utils';
+import { normalizeTwitterUsername, validateAttributionTemplate } from '../../lib/dashboard-utils';
 import { ConnectionList } from './connection-list';
 import { ContentPolicyPanel } from './content-policy-panel';
 import { DestinationAccountCard } from './destination-account-card';
@@ -63,6 +63,7 @@ interface EditDestinationDialogProps {
   onAddSources(): void;
   onRemoveSource(username: string): void;
   onManageAccount(): void;
+  onSectionChange?(section: DestinationSectionId): void;
   onDismissMigrationReview(): void;
   onSaveSourceFilters(username: string, filters: SourceFilterPolicy): Promise<void>;
   onPreviewSourceFilter(
@@ -93,11 +94,16 @@ const SECTION_ITEMS: Array<NavListItem<DestinationSectionId>> = [
   { id: 'operations', label: 'Operations', icon: ClipboardList },
 ];
 
-function isMainFormDirty(form: MappingFormState, mapping: AccountMapping): boolean {
+function normalizedSourceKey(usernames: readonly string[]): string {
+  return [...usernames].map(normalizeTwitterUsername).filter(Boolean).sort().join('\0');
+}
+
+function isMainFormDirty(form: MappingFormState, mapping: AccountMapping, sources: readonly string[]): boolean {
   return (
     form.owner !== (mapping.owner || '') ||
     form.groupName !== (mapping.groupName || '') ||
     form.groupEmoji !== (mapping.groupEmoji || '📁') ||
+    normalizedSourceKey(sources) !== normalizedSourceKey(mapping.twitterUsernames) ||
     JSON.stringify(form.postingPolicy) !== JSON.stringify(mapping.postingPolicy) ||
     JSON.stringify(form.profileManagement) !== JSON.stringify(mapping.profileManagement) ||
     JSON.stringify(form.aiOverrides) !==
@@ -141,28 +147,49 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
     }
   }, [activeSection, mappingId]);
 
+  const confirmDiscardIfDirty = (message: string): boolean => {
+    if (!props.mapping || !isMainFormDirty(props.form, props.mapping, props.sources)) return true;
+    return window.confirm(message);
+  };
+
+  const applySectionChange = (next: DestinationSectionId) => {
+    setActiveSection(next);
+    props.onSectionChange?.(next);
+  };
+
   const requestSectionChange = (next: DestinationSectionId) => {
     if (!props.mapping || next === activeSection) {
-      setActiveSection(next);
+      applySectionChange(next);
       return;
     }
-    if (isMainFormDirty(props.form, props.mapping)) {
-      const confirmed = window.confirm(
-        'You have unsaved destination settings. Switch sections anyway? Use Save Destination to keep owner, folder, attribution, AI, and profile changes.',
-      );
-      if (!confirmed) return;
+    if (
+      !confirmDiscardIfDirty(
+        'You have unsaved destination settings. Switch sections anyway? Use Save Destination to keep owner, folder, sources, attribution, AI, and profile changes.',
+      )
+    ) {
+      return;
     }
-    setActiveSection(next);
+    applySectionChange(next);
   };
 
   const requestClose = () => {
-    if (props.mapping && isMainFormDirty(props.form, props.mapping)) {
-      const confirmed = window.confirm(
-        'You have unsaved destination settings. Close without saving?',
-      );
-      if (!confirmed) return;
+    if (
+      !confirmDiscardIfDirty('You have unsaved destination settings. Close without saving?')
+    ) {
+      return;
     }
     props.onClose();
+  };
+
+  const requestManageAccount = () => {
+    if (
+      !confirmDiscardIfDirty(
+        'You have unsaved destination settings. Leave for Settings without saving?',
+      )
+    ) {
+      return;
+    }
+    props.onManageAccount();
   };
 
   const health = props.mapping ? summarizeDestinationHealth(props.mapping) : null;
@@ -213,7 +240,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
           >
             {props.mapping && activeSection === 'overview' ? (
               <div className="space-y-5">
-                <DestinationAccountCard mapping={props.mapping} onManageAccount={props.onManageAccount} />
+                <DestinationAccountCard mapping={props.mapping} onManageAccount={requestManageAccount} />
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
                     <Label htmlFor="edit-owner">Owner</Label>

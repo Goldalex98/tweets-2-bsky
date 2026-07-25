@@ -335,7 +335,6 @@ export interface MappingFormState {
   bskyServiceUrl: string;
   groupName: string;
   groupEmoji: string;
-  profileSyncSourceUsername: string;
   postingPolicy: PostingPolicy;
   profileManagement: ProfileManagementPolicy;
   aiOverrides: DestinationAIOverrides;

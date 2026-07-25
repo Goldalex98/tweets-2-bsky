@@ -345,8 +345,9 @@ export default function DashboardApp() {
   const [editSourceInput, setEditSourceInput] = useState('');
   const [editSourceSummary, setEditSourceSummary] = useState<SourceParseSummary>({ duplicates: [], invalid: [] });
 
-  const startEdit = useCallback((mapping: AccountMapping) => {
+  const startEdit = useCallback((mapping: AccountMapping, section?: string) => {
     setEditingMapping(mapping);
+    setPendingEditSection(section);
     setEditSources(mapping.twitterUsernames);
     setEditSourceInput('');
     setEditSourceSummary({ duplicates: [], invalid: [] });
@@ -393,14 +394,19 @@ export default function DashboardApp() {
   }, [destinations.mappings]);
 
   useEffect(() => {
-    const url = buildDashboardUrl({ tab: activeTab, settingsSection, destinationId: editingMapping?.id });
+    const url = buildDashboardUrl({
+      tab: activeTab,
+      settingsSection,
+      destinationId: editingMapping?.id,
+      editSection: editingMapping?.id ? pendingEditSection : undefined,
+    });
     const [urlPath, urlQuery = ''] = url.split('?');
     const currentSearch = window.location.search.replace(/^\?/, '');
     if (normalizePath(window.location.pathname) !== urlPath || currentSearch !== urlQuery) {
       window.history.pushState({ tab: activeTab }, '', url);
     }
     localStorage.setItem('dashboard-tab', activeTab);
-  }, [activeTab, settingsSection, editingMapping?.id]);
+  }, [activeTab, settingsSection, editingMapping?.id, pendingEditSection]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -412,6 +418,7 @@ export default function DashboardApp() {
         setPendingEditSection(location.editSection);
       } else {
         setEditingMapping(null);
+        setPendingEditSection(undefined);
       }
     };
     window.addEventListener('popstate', onPopState);
@@ -424,12 +431,12 @@ export default function DashboardApp() {
     if (activeTab !== 'accounts' || !pendingDestinationId) return;
     const mapping = destinations.mappings.find((entry) => entry.id === pendingDestinationId);
     if (!mapping) return;
-    startEdit(mapping);
+    startEdit(mapping, pendingEditSection);
     setPendingDestinationId(undefined);
-    // pendingEditSection is intentionally left set here: EditDestinationDialog
-    // reads it to scroll to the right panel once it opens, and it is cleared
-    // when the dialog closes instead (see onClose below).
-  }, [activeTab, destinations.mappings, pendingDestinationId, startEdit]);
+    // pendingEditSection stays set so EditDestinationDialog can open on that
+    // section via initialSection; it is cleared when the dialog closes or when
+    // startEdit is called without a section (list Edit / Save Destination).
+  }, [activeTab, destinations.mappings, pendingDestinationId, pendingEditSection, startEdit]);
 
   const openDestinationFromBlueskyAccount = useCallback(
     (destinationId: string) => {
@@ -540,6 +547,7 @@ export default function DashboardApp() {
       // syncSources refreshes the destination list itself.
       await destinations.syncSources(updated, editSources);
       setEditingMapping(null);
+      setPendingEditSection(undefined);
     }, 'Destination updated.');
   };
 
@@ -1172,6 +1180,7 @@ export default function DashboardApp() {
           )
         }
         onManageAccount={openBlueskyAccountSettings}
+        onSectionChange={setPendingEditSection}
         onDismissMigrationReview={dismissMigrationReview}
         onSaveSourceFilters={async (username, filters) => {
           if (!editingMapping) return;

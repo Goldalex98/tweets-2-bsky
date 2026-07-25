@@ -470,16 +470,67 @@ test('destination editor uses section navigation and dismisses migration review'
   const dialog = page.getByRole('dialog', { name: 'Edit Bluesky Destination' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'Moderation, routing, and dedup' })).toBeVisible();
+  await expect(page).toHaveURL(/section=moderation/);
 
   const sections = dialog.getByRole('navigation', { name: 'Destination sections' });
-  for (const label of ['Overview', 'Sources & routes', 'Delivery', 'Moderation', 'Automation', 'Operations']) {
+  const sectionChecks: Array<{ label: string; assertion: () => Promise<void> }> = [
+    {
+      label: 'Overview',
+      assertion: async () => {
+        await expect(dialog.getByText('Linked Bluesky account')).toBeVisible();
+        await expect(dialog.getByText('Credential saved')).toBeVisible();
+        await expect(dialog.getByText('did:plc:mock')).toBeVisible();
+      },
+    },
+    {
+      label: 'Sources & routes',
+      assertion: async () => {
+        await expect(dialog.getByText('Source filters')).toBeVisible();
+      },
+    },
+    {
+      label: 'Delivery',
+      assertion: async () => {
+        await expect(dialog.getByLabel('Prepend the X username')).toBeVisible();
+      },
+    },
+    {
+      label: 'Moderation',
+      assertion: async () => {
+        await expect(dialog.getByRole('heading', { name: 'Moderation, routing, and dedup' })).toBeVisible();
+      },
+    },
+    {
+      label: 'Automation',
+      assertion: async () => {
+        await expect(dialog.locator('#edit-destination-allow-profile-mutation')).toBeVisible();
+      },
+    },
+    {
+      label: 'Operations',
+      assertion: async () => {
+        await expect(dialog.getByText('Legacy migration notice.')).toBeVisible();
+      },
+    },
+  ];
+
+  for (const { label, assertion } of sectionChecks) {
     await expect(sections.getByRole('button', { name: label })).toBeVisible();
+    await sections.getByRole('button', { name: label }).click();
+    await assertion();
   }
+
+  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
 
   await sections.getByRole('button', { name: 'Overview' }).click();
   await expect(dialog.getByText('Linked Bluesky account')).toBeVisible();
-  await expect(dialog.getByText('Credential saved')).toBeVisible();
-  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
+  await expect.poll(() => page.url()).toContain('section=overview');
+
+  await sections.getByRole('button', { name: 'Delivery' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog.getByLabel('Prepend the X username')).toBeVisible();
+  await expect(dialog.getByRole('navigation', { name: 'Destination sections' })).toBeVisible();
+  await expect.poll(() => page.url()).toContain('section=delivery');
 
   await sections.getByRole('button', { name: 'Operations' }).click();
   await expect(dialog.getByText('Legacy migration notice.')).toBeVisible();
@@ -490,7 +541,7 @@ test('destination editor uses section navigation and dismisses migration review'
     )
     .toBe(true);
 
-  await sections.getByRole('button', { name: 'Delivery' }).click();
-  await expect(dialog.getByLabel('Prepend the X username')).toBeVisible();
-  await expect(dialog.locator('input[type="password"]')).toHaveCount(0);
+  await page.goto('/accounts?destinationId=destination-1&section=nonsense');
+  await expect(page.getByRole('dialog', { name: 'Edit Bluesky Destination' })).toBeVisible();
+  await expect(page.getByRole('dialog').getByText('Linked Bluesky account')).toBeVisible();
 });

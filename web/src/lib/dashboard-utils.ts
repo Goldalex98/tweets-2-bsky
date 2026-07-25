@@ -197,7 +197,6 @@ export function defaultMappingForm(): MappingFormState {
     bskyServiceUrl: 'https://bsky.social',
     groupName: '',
     groupEmoji: '📁',
-    profileSyncSourceUsername: '',
     postingPolicy: {
       attribution: {
         mode: 'never',

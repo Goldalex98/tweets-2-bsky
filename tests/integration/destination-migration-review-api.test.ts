@@ -167,7 +167,11 @@ test('migration review dismissal persists and destination aliases stay secret-sa
               listHasPassword: JSON.stringify(listBefore.body).includes('<redacted-app-password>') || JSON.stringify(listBefore.body).includes('appPassword'),
               dismissedHasPassword: JSON.stringify(dismissed.body).includes('<redacted-app-password>') || JSON.stringify(dismissed.body).includes('appPassword'),
               contentPoliciesHasPassword: JSON.stringify(contentPolicies.body).includes('<redacted-app-password>') || JSON.stringify(contentPolicies.body).includes('bskyPassword'),
-              listCredentialConfigured: Array.isArray(listBefore.body) ? listBefore.body[0]?.credentialConfigured : null
+              listCredentialConfigured: Array.isArray(listBefore.body) ? listBefore.body[0]?.credentialConfigured : null,
+              listBlueskyAccountKeys: Array.isArray(listBefore.body) && listBefore.body[0]?.blueskyAccount
+                ? Object.keys(listBefore.body[0].blueskyAccount).sort()
+                : null,
+              listBodyHasAppPasswordKey: JSON.stringify(listBefore.body).includes('"appPassword"'),
             }));
           } finally {
             listener.close();
@@ -200,10 +204,20 @@ test('migration review dismissal persists and destination aliases stay secret-sa
       dismissedHasPassword: boolean;
       contentPoliciesHasPassword: boolean;
       listCredentialConfigured: boolean | null;
+      listBlueskyAccountKeys: string[] | null;
+      listBodyHasAppPasswordKey: boolean;
     };
     expect(result.listBefore.status).toBe(200);
     expect(result.listCredentialConfigured).toBe(true);
     expect(result.listHasPassword).toBe(false);
+    expect(result.listBodyHasAppPasswordKey).toBe(false);
+    // addMapping may create a legacy-inline destination without a nested account summary;
+    // when the nested object is present it must never include appPassword.
+    if (result.listBlueskyAccountKeys) {
+      expect(result.listBlueskyAccountKeys).not.toContain('appPassword');
+      expect(result.listBlueskyAccountKeys).toContain('credentialConfigured');
+      expect(result.listBlueskyAccountKeys).toContain('health');
+    }
     expect(result.stale).toMatchObject({ status: 409, body: { code: 'CONFIG_REVISION_CONFLICT' } });
     expect(result.dismissed.status).toBe(200);
     expect(result.dismissed.body.migrationReview.needsAdminReview).toBe(false);

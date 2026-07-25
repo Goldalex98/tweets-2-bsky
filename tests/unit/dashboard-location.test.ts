@@ -30,5 +30,8 @@ describe('dashboard location helpers', () => {
     expect(
       buildDashboardUrl({ tab: 'accounts', destinationId: 'abc', editSection: 'moderation' }),
     ).toBe('/accounts?destinationId=abc&section=moderation');
+    expect(
+      buildDashboardUrl({ tab: 'accounts', destinationId: 'abc', editSection: 'automation' }),
+    ).toBe('/accounts?destinationId=abc&section=automation');
   });
 });
