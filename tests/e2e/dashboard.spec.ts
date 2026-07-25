@@ -96,7 +96,7 @@ async function mockDashboard(page: Page) {
       return json(route, created, 201);
     }
     if (path === '/api/groups') return json(route, []);
-    if (path === '/api/version') return json(route, { version: '2.0.0', startedAt: Date.now() });
+    if (path === '/api/version') return json(route, { version: '3.0.0', startedAt: Date.now() });
     if (path === '/api/twitter-config') {
       return json(route, {
         ...version,

@@ -21,6 +21,25 @@ E2E tests build and serve the dashboard locally, use an isolated browser context
 
 On Windows, `bun run test:e2e` launches Playwright under Node (not Bun) because Bun cannot complete the browser CDP pipe handshake. Install Node, or set `PLAYWRIGHT_NODE` to a `node.exe` path — see `TROUBLESHOOTING.md`.
 
+## Versioning
+
+App semver lives in `package.json`. The README “Current release” line is kept in sync by release CI via `scripts/sync-release-version.ts`. Config/database schema versions are independent of app semver.
+
+Every push to `main` runs `.github/workflows/release.yml` (`bun run release` / semantic-release). It analyzes Conventional Commits since the previous `v*` tag:
+
+- `fix:` → patch
+- `feat:` → minor
+- `BREAKING CHANGE:` footer or `feat!:` / `fix!:` → major
+- `chore:`, `docs:`, `ci:`, and similar → no release
+
+A releasable merge bumps `package.json` and the README, commits with `chore(release): X.Y.Z [skip ci]`, creates tag `vX.Y.Z` and a GitHub Release. Existing Docker publish workflows then build multi-arch images for that tag.
+
+Dry-run locally (needs full history, tags, and `GITHUB_TOKEN` or `GH_TOKEN`):
+
+```bash
+bun run release -- --dry-run
+```
+
 ## Release validation
 
 `bun run release:validate` runs the copied-volume migration matrix, database migration/checkpoint tests, backup/restore tests, health/queue tests, and mocked E2E suite. Add `--docker` where Docker is available:
