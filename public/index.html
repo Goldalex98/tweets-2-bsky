@@ -741,7 +741,18 @@
                                                     {recentActivity.map((log, idx) => (
                                                         <tr key={idx}>
                                                             <td className="ps-4 small text-muted" style={{whiteSpace: 'nowrap'}}>
-                                                                {new Date(log.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                                {(() => {
+                                                                    const raw = log.created_at;
+                                                                    if (!raw) return '--';
+                                                                    const trimmed = String(raw).trim();
+                                                                    const iso = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
+                                                                        ? trimmed
+                                                                        : (trimmed.includes('T') ? `${trimmed}Z` : `${trimmed.replace(' ', 'T')}Z`);
+                                                                    const date = new Date(iso);
+                                                                    return Number.isNaN(date.getTime())
+                                                                        ? '--'
+                                                                        : date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                                                })()}
                                                             </td>
                                                             <td><span className="fw-semibold text-primary">@{log.twitter_username}</span></td>
                                                             <td>

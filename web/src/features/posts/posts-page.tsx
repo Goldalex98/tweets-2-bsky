@@ -6,6 +6,7 @@ import { Label } from '../../components/ui/label';
 import {
   buildFacetSegments,
   formatCompactNumber,
+  formatLocalDateTime,
   getMappingGroupMeta,
   getTwitterPostUrl,
   selectClassName,
@@ -133,7 +134,7 @@ function LocalPostCard({ post, mapping }: { post: LocalPostSearchResult; mapping
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold">@{post.bskyIdentifier} <span className="text-muted-foreground">from @{post.twitterUsername}</span></p>
-          <p className="text-xs text-muted-foreground">{post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}</p>
+          <p className="text-xs text-muted-foreground">{formatLocalDateTime(post.createdAt)}</p>
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="outline">{group.emoji} {group.name}</Badge>
@@ -228,7 +229,7 @@ function FeedPostCard({
         </div>
       ) : null}
       <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-        <span>{post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}</span>
+        <span>{formatLocalDateTime(post.createdAt)}</span>
         <div className="flex items-center gap-3"><PostLink href={sourceUrl} label="Source" /><PostLink href={postUrl} label="Bluesky" /></div>
       </div>
     </article>

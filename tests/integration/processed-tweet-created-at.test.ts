@@ -33,10 +33,14 @@ test('saveTweet preserves created_at on replace so restored skips stay older tha
           });
           const restored = dbService.getTweet('collision-1', 'destination.example');
           const restoredAt = parseSqliteUtcTimestampMs(restored?.created_at);
+          const recent = dbService.getRecentProcessedTweets(1);
           await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
             createdAtPreserved: restored?.created_at === original?.created_at,
             restoredStaleVersusEnqueue:
               typeof restoredAt === 'number' && Number.isFinite(restoredAt) && restoredAt < enqueuedAt,
+            createdAtIsIsoUtc: typeof original?.created_at === 'string' && /Z$/i.test(original.created_at),
+            recentActivityIsIsoUtc:
+              typeof recent[0]?.created_at === 'string' && /Z$/i.test(recent[0].created_at),
           }));
         `,
       ],
@@ -50,6 +54,8 @@ test('saveTweet preserves created_at on replace so restored skips stay older tha
     expect(JSON.parse(fs.readFileSync(resultPath, 'utf8'))).toEqual({
       createdAtPreserved: true,
       restoredStaleVersusEnqueue: true,
+      createdAtIsIsoUtc: true,
+      recentActivityIsIsoUtc: true,
     });
   } finally {
     temporary.cleanup();

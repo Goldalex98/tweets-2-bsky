@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { Label } from '../../components/ui/label';
+import { formatLocalDateTime, parseDisplayInstant } from '../../lib/dashboard-utils';
 import type { BlueskyAccountView } from '../bluesky-accounts/types';
 import { BlueskyAccountSelect } from './bluesky-account-select';
 import type { AccountMapping } from './types';
@@ -17,8 +18,8 @@ interface DestinationAccountCardProps {
 }
 
 function formatEpoch(value?: number): string | null {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
-  return new Date(value).toLocaleString();
+  const date = parseDisplayInstant(value);
+  return date ? formatLocalDateTime(value) : null;
 }
 
 function accountHealthLabel(lastErrorCategory?: string, credentialConfigured?: boolean): {

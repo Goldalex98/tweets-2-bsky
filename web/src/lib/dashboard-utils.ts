@@ -468,3 +468,35 @@ export function buildFacetSegments(text: string, facets: BskyFacet[]): FacetSegm
 export function formatCompactNumber(value: number): string {
   return compactNumberFormatter.format(Math.max(0, value));
 }
+
+/**
+ * Parse API/SQLite timestamps for display. Naive "YYYY-MM-DD HH:MM:SS" values
+ * from SQLite CURRENT_TIMESTAMP are UTC and must not be treated as local.
+ */
+export function parseDisplayInstant(value?: string | number | null): Date | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) {
+    const date = new Date(trimmed);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const iso = trimmed.includes('T') ? `${trimmed}Z` : `${trimmed.replace(' ', 'T')}Z`;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function formatLocalDateTime(value?: string | number | null): string {
+  const date = parseDisplayInstant(value);
+  return date ? date.toLocaleString() : 'Unknown time';
+}
+
+export function formatLocalTime(value?: string | number | null): string {
+  const date = parseDisplayInstant(value);
+  return date ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--';
+}
