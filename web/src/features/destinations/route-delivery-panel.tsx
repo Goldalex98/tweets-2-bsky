@@ -3,17 +3,29 @@ import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { selectClassName } from '../../lib/dashboard-utils';
+import { pickSelectedUsername } from './source-selection';
 import type { AccountMapping, RouteDeliveryPolicy } from './types';
 
 interface RouteDeliveryPanelProps {
   mapping: AccountMapping;
   busy: boolean;
+  selectedUsername?: string;
+  onSelectedUsernameChange?(username: string): void;
   onSave(routeId: string, delivery: RouteDeliveryPolicy): Promise<void>;
 }
 
-export function RouteDeliveryPanel({ mapping, busy, onSave }: RouteDeliveryPanelProps) {
+export function RouteDeliveryPanel({
+  mapping,
+  busy,
+  selectedUsername: preferredUsername,
+  onSelectedUsernameChange,
+  onSave,
+}: RouteDeliveryPanelProps) {
   const sources = (mapping.sources ?? []).filter((source) => source.routeId);
-  const [selectedRouteId, setSelectedRouteId] = useState(sources[0]?.routeId || '');
+  const usernames = sources.map((source) => source.username);
+  const initialUsername = pickSelectedUsername(usernames, undefined, preferredUsername);
+  const initialSource = sources.find((source) => source.username === initialUsername) ?? sources[0];
+  const [selectedRouteId, setSelectedRouteId] = useState(initialSource?.routeId || '');
   const selected = sources.find((source) => source.routeId === selectedRouteId) ?? sources[0];
   const [mode, setMode] = useState<'immediate' | 'digest'>(selected?.delivery?.mode || 'immediate');
   const [timezone, setTimezone] = useState(selected?.delivery?.digest?.timezone || 'UTC');
@@ -22,6 +34,23 @@ export function RouteDeliveryPanel({ mapping, busy, onSave }: RouteDeliveryPanel
   const [cadence, setCadence] = useState<'hourly' | 'daily' | 'weekly'>(
     selected?.delivery?.digest?.cadence || 'daily',
   );
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sync only when membership, revision, or focus changes
+  useEffect(() => {
+    const nextUsername = pickSelectedUsername(
+      usernames,
+      selected?.username,
+      preferredUsername,
+    );
+    const nextSource = sources.find((source) => source.username === nextUsername) ?? sources[0];
+    if (!nextSource?.routeId) {
+      setSelectedRouteId('');
+      return;
+    }
+    if (nextSource.routeId !== selectedRouteId) {
+      setSelectedRouteId(nextSource.routeId);
+    }
+  }, [mapping.revision, mapping.updatedAt, usernames.join('\0'), preferredUsername]);
 
   useEffect(() => {
     if (!selected) return;
@@ -49,7 +78,12 @@ export function RouteDeliveryPanel({ mapping, busy, onSave }: RouteDeliveryPanel
           id="route-delivery-source"
           className={selectClassName}
           value={selected?.routeId || ''}
-          onChange={(event) => setSelectedRouteId(event.target.value)}
+          onChange={(event) => {
+            const routeId = event.target.value;
+            setSelectedRouteId(routeId);
+            const source = sources.find((entry) => entry.routeId === routeId);
+            if (source) onSelectedUsernameChange?.(source.username);
+          }}
         >
           {sources.map((source) => (
             <option key={source.routeId} value={source.routeId}>

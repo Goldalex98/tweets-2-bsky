@@ -2554,20 +2554,23 @@ app.use(
     saveCanonicalConfig,
     rejectStaleConfigMutation,
     listAccounts: (requester) => {
+      const config = getConfig();
       const user: AuthenticatedUser = {
         id: requester.id,
         isAdmin: requester.isAdmin,
         permissions: requester.isAdmin
           ? ADMIN_USER_PERMISSIONS
-          : getConfig().users.find((entry) => entry.id === requester.id)?.permissions ??
+          : config.users.find((entry) => entry.id === requester.id)?.permissions ??
             getDefaultUserPermissions('user'),
       };
-      return listBlueskyAccountViews(getConfig()).filter((account) => {
-        if (!account.linkedDestinationId) {
-          return canManageAllMappings(user);
-        }
-        return canManageDestination(user, account.linkedDestinationId);
-      });
+      // Keep list visibility aligned with mutation rights (linked destination,
+      // creator of still-unlinked account, or manage-all).
+      return listBlueskyAccountViews(config).filter((account) =>
+        canMutateBlueskyAccount(config, user, account.id, {
+          canManageAllMappings: canManageAllMappings(user),
+          canManageDestination: (destinationId) => canManageDestination(user, destinationId),
+        }),
+      );
     },
     canMutateAccount: (requester, accountId) => {
       const user: AuthenticatedUser = {

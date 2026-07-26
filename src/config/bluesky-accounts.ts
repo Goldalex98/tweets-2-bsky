@@ -180,8 +180,9 @@ export function canMutateBlueskyAccount(
     return true;
   }
   const account = findBlueskyAccount(config, accountId);
+  // Unknown ids must not pass the gate; handlers should see 403, not proceed.
   if (!account) {
-    return true;
+    return false;
   }
   const linked = findDestinationForAccount(config, accountId);
   if (linked) {

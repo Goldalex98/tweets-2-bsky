@@ -439,6 +439,14 @@ export default function DashboardApp() {
     });
   }, [destinations.mappings]);
 
+  // Source membership is applied immediately; keep chips aligned with the server list.
+  useEffect(() => {
+    if (!editingMapping) return;
+    const latest = destinations.mappings.find((entry) => entry.id === editingMapping.id);
+    if (!latest) return;
+    setEditSources(latest.twitterUsernames);
+  }, [destinations.mappings, editingMapping]);
+
   useEffect(() => {
     const url = buildDashboardUrl({
       tab: activeTab,
@@ -612,7 +620,9 @@ export default function DashboardApp() {
     event.preventDefault();
     if (!editingMapping) return;
     void run(async () => {
-      const updated = await destinations.updateDestination(editingMapping, {
+      // Source membership is applied immediately via Add/Remove; Save Destination
+      // must not re-sync twitterUsernames or a stale chip list can delete sources.
+      await destinations.updateDestination(editingMapping, {
         owner: editForm.owner.trim(),
         groupName: editForm.groupName.trim(),
         groupEmoji: editForm.groupEmoji.trim(),
@@ -620,18 +630,70 @@ export default function DashboardApp() {
         profileManagement: editForm.profileManagement,
         aiOverrides: editForm.aiOverrides,
       });
-      // syncSources refreshes the destination list itself.
-      await destinations.syncSources(updated, editSources);
       setEditingMapping(null);
       setPendingEditSection(undefined);
     }, 'Destination updated.');
   };
 
-  const addEditSources = () => {
-    const parsed = parseTwitterUsernameInput(editSources, editSourceInput);
-    setEditSources(parsed.usernames);
+  const addEditSources = async (): Promise<string | undefined> => {
+    if (!editingMapping) return undefined;
+    const inputSnapshot = editSourceInput;
+    const parsed = parseTwitterUsernameInput(editSources, inputSnapshot);
     setEditSourceSummary(parsed.summary);
-    setEditSourceInput('');
+    const previous = new Set(editSources.map((username) => normalizeTwitterUsername(username)));
+    const added = parsed.usernames.filter((username) => !previous.has(normalizeTwitterUsername(username)));
+    if (added.length === 0) {
+      // Nothing new to persist; clear the input after surfacing parse feedback.
+      setEditSourceInput('');
+      return undefined;
+    }
+
+    // Do not use run(): it swallows errors, which would clear focus/input incorrectly.
+    setBusy(true);
+    try {
+      const updated = await destinations.syncSources(editingMapping, parsed.usernames);
+      setEditingMapping(updated);
+      setEditSources(updated.twitterUsernames);
+      setEditSourceInput('');
+      showNotice(
+        'success',
+        added.length === 1 ? `Added @${added[0]}.` : `Added ${added.length} sources.`,
+      );
+      return added[0];
+    } catch (error) {
+      handleError(error, 'Failed to add sources.');
+      return undefined;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeEditSource = (username: string) => {
+    if (!editingMapping) return;
+    const normalized = normalizeTwitterUsername(username);
+    if (!editSources.some((source) => normalizeTwitterUsername(source) === normalized)) return;
+    // Capture identity at prompt time; recompute the target list at confirm so a
+    // concurrent add is not wiped by a stale chip snapshot.
+    const mappingAtPrompt = editingMapping;
+    void askConfirmation({
+      title: `Remove @${normalized}?`,
+      description: 'This removes the source route from this destination immediately. Pending queue items are kept.',
+      confirmLabel: 'Remove source',
+      destructive: true,
+    }).then((ok) => {
+      if (!ok) return;
+      return run(async () => {
+        const latest =
+          destinations.mappings.find((entry) => entry.id === mappingAtPrompt.id) ?? mappingAtPrompt;
+        const nextSources = latest.twitterUsernames.filter(
+          (source) => normalizeTwitterUsername(source) !== normalized,
+        );
+        if (nextSources.length === latest.twitterUsernames.length) return;
+        const updated = await destinations.syncSources(latest, nextSources);
+        setEditingMapping(updated);
+        setEditSources(updated.twitterUsernames);
+      }, `Removed @${normalized}.`);
+    });
   };
 
   const [folderFilter, setFolderFilter] = useState('__all__');
@@ -1328,11 +1390,7 @@ export default function DashboardApp() {
         onFormChange={setEditForm}
         onSourceInputChange={setEditSourceInput}
         onAddSources={addEditSources}
-        onRemoveSource={(username) =>
-          setEditSources((current) =>
-            current.filter((source) => normalizeTwitterUsername(source) !== normalizeTwitterUsername(username)),
-          )
-        }
+        onRemoveSource={removeEditSource}
         onManageAccount={openBlueskyAccountSettings}
         onSectionChange={setPendingEditSection}
         onDismissMigrationReview={dismissMigrationReview}
