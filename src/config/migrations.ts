@@ -58,7 +58,7 @@ export interface ConfigMigrationReport {
 export class ConfigMigrationConflictError extends Error {
   constructor(public readonly report: ConfigMigrationReport) {
     super(
-      `Config v3 migration found ${report.conflicts.length} conflicting legacy destination or route definition(s).`,
+      `Config migration found ${report.conflicts.length} conflicting legacy destination or route definition(s).`,
     );
     this.name = 'ConfigMigrationConflictError';
   }

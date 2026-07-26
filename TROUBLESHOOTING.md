@@ -112,7 +112,7 @@ Examples:
 
 ```bash
 # Docker
-docker run -d --name tweets-2-bsky -e SCHEDULED_ACCOUNT_TIMEOUT_MS=900000 -p 3000:3000 -v tweets2bsky_data:/app/data j4ckxyz/tweets-2-bsky:latest
+docker run -d --name tweets-2-bsky -e SCHEDULED_ACCOUNT_TIMEOUT_MS=900000 -p 3000:3000 -v tweets2bsky_data:/app/data ghcr.io/goldalex98/tweets-2-bsky:latest
 
 # Source install (.env)
 echo 'SCHEDULED_ACCOUNT_TIMEOUT_MS=900000' >> .env
@@ -153,13 +153,13 @@ For easiest portability, use a named Docker volume:
 
 ```bash
 docker volume create tweets2bsky_data
-docker run -d --name tweets-2-bsky -p 3000:3000 -v tweets2bsky_data:/app/data ghcr.io/j4ckxyz/tweets-2-bsky:latest
+docker run -d --name tweets-2-bsky -p 3000:3000 -v tweets2bsky_data:/app/data ghcr.io/goldalex98/tweets-2-bsky:latest
 ```
 
 The container stores persistent state under `TWEETS2BSKY_DATA_DIR` (default `/app/data`). If you mount a different path, set that env var to match:
 
 ```bash
-docker run -d --name tweets-2-bsky -p 3000:3000 -v /host/path:/persist -e TWEETS2BSKY_DATA_DIR=/persist ghcr.io/j4ckxyz/tweets-2-bsky:latest
+docker run -d --name tweets-2-bsky -p 3000:3000 -v /host/path:/persist -e TWEETS2BSKY_DATA_DIR=/persist ghcr.io/goldalex98/tweets-2-bsky:latest
 ```
 
 ### Inbound API returns 400/401/409

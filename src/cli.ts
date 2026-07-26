@@ -1564,7 +1564,7 @@ program
 
 program
   .command('config-migration-report [file]')
-  .description('Dry-run a config v3 migration without writing files or exposing secrets')
+  .description('Dry-run a config schema migration without writing files or exposing secrets')
   .action((file?: string) => {
     const raw = file
       ? JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'))

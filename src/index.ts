@@ -1083,7 +1083,6 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
     // waited for explicitly below, which is what actually matters here.
     await page.setContent(html, { waitUntil: 'load' });
 
-    // Wait for the twitter iframe to load and render
     try {
       await page.waitForSelector('iframe', { timeout: 10000 });
       // Small extra wait for images inside iframe
@@ -1149,7 +1148,6 @@ async function pollForVideoProcessing(jobId: string): Promise<BlobRef> {
     } else if (state === 'JOB_STATE_FAILED') {
       throw new Error(`Video processing failed: ${statusData.jobStatus.error || 'Unknown error'}`);
     } else {
-      // Wait before next poll
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
 
@@ -1386,8 +1384,8 @@ function addTwitterHandleLinkFacets(
   return [...existingFacets, ...newFacets].sort((a, b) => a.index.byteStart - b.index.byteStart);
 }
 
-// Replaced safeSearch with fetchUserTweets to use UserTweets endpoint instead of Search
-// Added processedIds for early stopping optimization
+// Uses the UserTweets endpoint (not Search) via the scraper's getTweets;
+// processedIds allows the caller to stop early once already-seen tweets appear.
 async function fetchUserTweets(
   username: string,
   limit: number,
@@ -1711,14 +1709,12 @@ async function processTweets(
                   sessionKey,
                 );
 
-                // Check if it was saved
                 const savedParent = findProcessedTweetDual(
                   (twitterId, key) => dbService.getTweet(twitterId, key),
                   replyStatusId,
                   mapping,
                 );
                 if (savedParent && savedParent.status === 'migrated') {
-                  // Update local map
                   localProcessedMap[replyStatusId] = {
                     uri: savedParent.bsky_uri,
                     cid: savedParent.bsky_cid,
@@ -2436,11 +2432,12 @@ import { getAgent, invalidateCachedAgentOnAuthFailure } from './bsky.js';
 //      timeline (rate-limited by acquireScraperSlot) and drops new tweets
 //      into the durable post_queue table. Fast and cheap, so the configured
 //      check interval actually holds regardless of how much is being posted.
-//   2. Post workers — Bluesky-side only. Drain the queue with one worker per
-//      mapping (threads stay ordered) and several mappings in parallel, so a
-//      slow video upload or a long thread never delays other accounts.
-// One-shot CLI modes (--run-once, --dry-run, --backfill-mapping,
-// --import-history) keep the original inline fetch→post path.
+//   2. Post workers — Bluesky-side only. Drain the queue with writes
+//      serialized per destination lease (threads stay ordered) while
+//      different destinations run concurrently, so a slow video upload or a
+//      long thread never delays other accounts.
+// One-shot CLI modes (--run-once, --backfill-mapping, --import-history) also
+// drain the durable queue after their sync; only --dry-run stays fully inline.
 // ============================================================================
 
 // Filters a fetched timeline down to enqueueable tweets and inserts them.
@@ -3572,9 +3569,9 @@ async function importHistory(
     const client = await getTwitterScraper(sessionKey);
     if (client) {
       try {
-        // Use getTweets which reliably fetches user timeline
-        // limit defaults to 15 in function signature, but for history import we might want more.
-        // However, the generator will fetch as much as we ask.
+        // Use getTweets which reliably fetches user timeline. Callers pass an
+        // explicit limit for history import; 100 is only the fallback for
+        // limit === 0/undefined.
         const fetchLimit = limit || 100;
         await acquireScraperSlot();
         const generator = client.getTweets(twitterUsername, fetchLimit);
@@ -4558,7 +4555,6 @@ async function main(): Promise<void> {
   }
 
   if (options.importHistory) {
-    // ... existing import history logic ...
     const username = options.username;
     if (!username) {
       console.error('Please specify a username with --username <username>');

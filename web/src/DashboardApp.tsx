@@ -183,7 +183,7 @@ export default function DashboardApp() {
 
   useEffect(() => {
     console.log(
-      '%cTweets-2-Bsky %cReady to syndicate! 🚀\n%cView source & contribute: https://github.com/j4ckxyz/tweets-2-bsky',
+      '%cTweets-2-Bsky %cReady to syndicate! 🚀\n%cView source & contribute: https://github.com/Goldalex98/tweets-2-bsky',
       'color: #0284c7; font-weight: bold;',
       'color: #64748b;',
       'color: #94a3b8;',

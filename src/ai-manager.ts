@@ -27,7 +27,8 @@ export interface AIProviderClient {
 }
 
 // Determine Provider and Credentials.
-// Priority: AI Config > Legacy Gemini Config > Environment Variables.
+// Priority: AI Config > Environment Variables. Any legacy top-level
+// geminiApiKey is folded into aiConfig by normalizeAiConfig before this runs.
 // Returns null when alt-text generation is effectively disabled (no usable credentials).
 export function resolveAiProvider(
   aiConfig: AIConfig = getConfig().ai,

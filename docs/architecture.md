@@ -37,15 +37,15 @@ Sources own ingestion/fetch policy, routes own relationship/content/delivery pol
 config.json
     |
     v
-enabled mappings -> X fetch sweep -> post_queue (SQLite)
-                                      |
-                                      v
-                         per-mapping post workers
-                                      |
-                                      v
+enabled sources/routes -> X fetch sweep -> post_queue (SQLite)
+                                            |
+                                            v
+                         destination-locked post workers
+                                            |
+                                            v
                               Bluesky destination
-                                      |
-                                      v
+                                            |
+                                            v
                          processed_tweets (SQLite)
 ```
 
