@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
+import { filtersFingerprint, pickSelectedUsername } from './source-selection';
 import type { AccountMapping, SourceFilterPolicy } from './types';
 
 const DEFAULT_FILTERS: SourceFilterPolicy = {
@@ -37,6 +38,16 @@ function joinList(values: string[]): string {
   return values.join(', ');
 }
 
+function draftFromFilters(filters: SourceFilterPolicy | undefined): SourceFilterPolicy {
+  return {
+    ...DEFAULT_FILTERS,
+    ...(filters || {}),
+    includeKeywords: [...(filters?.includeKeywords || [])],
+    excludeKeywords: [...(filters?.excludeKeywords || [])],
+    languages: [...(filters?.languages || [])],
+  };
+}
+
 export interface SourceFilterPreviewResult {
   allowed: boolean;
   reason: string;
@@ -45,6 +56,8 @@ export interface SourceFilterPreviewResult {
 interface SourceFiltersPanelProps {
   mapping: AccountMapping;
   busy: boolean;
+  selectedUsername?: string;
+  onSelectedUsernameChange?(username: string): void;
   onSaveFilters(username: string, filters: SourceFilterPolicy): Promise<void>;
   onPreviewFilter(
     username: string,
@@ -61,19 +74,23 @@ interface SourceFiltersPanelProps {
   ): Promise<SourceFilterPreviewResult>;
 }
 
-export function SourceFiltersPanel({ mapping, busy, onSaveFilters, onPreviewFilter }: SourceFiltersPanelProps) {
+export function SourceFiltersPanel({
+  mapping,
+  busy,
+  selectedUsername: preferredUsername,
+  onSelectedUsernameChange,
+  onSaveFilters,
+  onPreviewFilter,
+}: SourceFiltersPanelProps) {
   const sources = mapping.sources?.length
     ? mapping.sources
     : mapping.twitterUsernames.map((username) => ({ username, state: 'enabled' as const, filters: DEFAULT_FILTERS }));
-  const [selected, setSelected] = useState(sources[0]?.username || '');
-  const activeSource = sources.find((source) => source.username === selected) || sources[0];
-  const [draft, setDraft] = useState<SourceFilterPolicy>(() => ({
-    ...DEFAULT_FILTERS,
-    ...(activeSource?.filters || {}),
-    includeKeywords: [...(activeSource?.filters?.includeKeywords || [])],
-    excludeKeywords: [...(activeSource?.filters?.excludeKeywords || [])],
-    languages: [...(activeSource?.filters?.languages || [])],
-  }));
+  const usernames = sources.map((source) => source.username);
+
+  const [selected, setSelected] = useState(() => pickSelectedUsername(usernames, undefined, preferredUsername));
+  const selectedUsername = pickSelectedUsername(usernames, selected, preferredUsername);
+  const activeSource = sources.find((source) => source.username === selectedUsername) || sources[0];
+  const [draft, setDraft] = useState<SourceFilterPolicy>(() => draftFromFilters(activeSource?.filters));
   const [includeDraft, setIncludeDraft] = useState(joinList(draft.includeKeywords));
   const [excludeDraft, setExcludeDraft] = useState(joinList(draft.excludeKeywords));
   const [languagesDraft, setLanguagesDraft] = useState(joinList(draft.languages));
@@ -81,18 +98,12 @@ export function SourceFiltersPanel({ mapping, busy, onSaveFilters, onPreviewFilt
   const [previewResult, setPreviewResult] = useState<SourceFilterPreviewResult | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [loadedFiltersKey, setLoadedFiltersKey] = useState(() =>
+    `${selectedUsername}\0${filtersFingerprint(activeSource?.filters)}`,
+  );
 
-  const selectedUsername = activeSource?.username || selected;
-
-  const syncDraftFromSource = (username: string) => {
-    const source = sources.find((entry) => entry.username === username);
-    const next = {
-      ...DEFAULT_FILTERS,
-      ...(source?.filters || {}),
-      includeKeywords: [...(source?.filters?.includeKeywords || [])],
-      excludeKeywords: [...(source?.filters?.excludeKeywords || [])],
-      languages: [...(source?.filters?.languages || [])],
-    };
+  const applySourceDraft = (username: string, filters: SourceFilterPolicy | undefined) => {
+    const next = draftFromFilters(filters);
     setSelected(username);
     setDraft(next);
     setIncludeDraft(joinList(next.includeKeywords));
@@ -100,6 +111,26 @@ export function SourceFiltersPanel({ mapping, busy, onSaveFilters, onPreviewFilt
     setLanguagesDraft(joinList(next.languages));
     setPreviewResult(null);
     setMessage(null);
+    setLoadedFiltersKey(`${username}\0${filtersFingerprint(filters)}`);
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sync when membership, revision, focus, or resolved selection changes
+  useEffect(() => {
+    if (!selectedUsername) {
+      if (selected) setSelected('');
+      return;
+    }
+    const source = sources.find((entry) => entry.username === selectedUsername);
+    const nextKey = `${selectedUsername}\0${filtersFingerprint(source?.filters)}`;
+    if (selectedUsername !== selected || nextKey !== loadedFiltersKey) {
+      applySourceDraft(selectedUsername, source?.filters);
+    }
+  }, [mapping.revision, mapping.updatedAt, usernames.join('\0'), preferredUsername, selectedUsername]);
+
+  const syncDraftFromSource = (username: string) => {
+    const source = sources.find((entry) => entry.username === username);
+    applySourceDraft(username, source?.filters);
+    onSelectedUsernameChange?.(username);
   };
 
   const resolvedDraft = useMemo(

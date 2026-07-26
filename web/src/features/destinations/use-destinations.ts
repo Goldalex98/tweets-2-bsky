@@ -27,8 +27,8 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     setLoading(false);
   }, [authenticated, fetchTracker]);
 
-  const fetchDestinations = useCallback(async () => {
-    if (!authenticated) return;
+  const fetchDestinations = useCallback(async (): Promise<AccountMapping[] | undefined> => {
+    if (!authenticated) return undefined;
     const token = fetchTracker.begin();
     setLoading(true);
     try {
@@ -36,7 +36,7 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
         api.get<AccountMapping[]>('/api/destinations'),
         api.get<AccountGroup[]>('/api/groups'),
       ]);
-      if (!fetchTracker.isCurrent(token)) return;
+      if (!fetchTracker.isCurrent(token)) return undefined;
       const loadedMappings = Array.isArray(destinationsResponse.data) ? destinationsResponse.data : [];
       setMappings(loadedMappings);
       setGroups(Array.isArray(groupsResponse.data) ? groupsResponse.data : []);
@@ -44,21 +44,23 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
       const actors = loadedMappings.map((mapping) => mapping.bskyIdentifier);
       if (actors.length === 0) {
         setProfiles({});
-        return;
+        return loadedMappings;
       }
       try {
         const profileResponse = await api.post<Record<string, BskyProfileView>>('/api/bsky/profiles', { actors });
-        if (!fetchTracker.isCurrent(token)) return;
+        if (!fetchTracker.isCurrent(token)) return loadedMappings;
         setProfiles(profileResponse.data || {});
       } catch (profileError) {
         // Avatars are decorative: a Bluesky outage must not blank the destination list.
-        if (!fetchTracker.isCurrent(token)) return;
+        if (!fetchTracker.isCurrent(token)) return loadedMappings;
         onError(profileError, 'Failed to load Bluesky profile previews.');
       }
+      return loadedMappings;
     } catch (requestError) {
-      if (!fetchTracker.isCurrent(token)) return;
+      if (!fetchTracker.isCurrent(token)) return undefined;
       setError('Failed to load destinations.');
       onError(requestError, 'Failed to load destinations.');
+      return undefined;
     } finally {
       if (fetchTracker.isCurrent(token)) setLoading(false);
     }
@@ -153,8 +155,16 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
           );
           version = response.data;
         }
-        await fetchDestinations();
-        return version;
+        const loaded = await fetchDestinations();
+        const latest = loaded?.find((entry) => entry.id === mapping.id);
+        if (!latest) {
+          // Never synthesize sources without routeId — content/delivery panels
+          // key off route metadata and would hide the newly added source.
+          throw new Error(
+            'Destination list refresh failed after updating sources. Reload and try again.',
+          );
+        }
+        return latest;
       });
     },
     [fetchDestinations, withConflictRefresh],

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
@@ -9,6 +9,7 @@ import {
   validateAttributionTemplate,
 } from '../../lib/dashboard-utils';
 import type { AIOverrideMode, AttributionMode, MappingFormState, SyncMode } from './types';
+import { pickSelectedUsername } from './source-selection';
 
 interface PolicyFieldsProps {
   idPrefix: string;
@@ -132,6 +133,11 @@ export function PostingPolicyPreview({ idPrefix, form, sourceUsernames, busy, on
   const [username, setUsername] = useState(sourceUsernames[0] || 'source');
   const [result, setResult] = useState<{ text: string; attributionApplied: boolean; originalLinkApplied: boolean } | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: username list identity is the join key
+  useEffect(() => {
+    setUsername((current) => pickSelectedUsername(sourceUsernames, current) || 'source');
+  }, [sourceUsernames.join('\0')]);
 
   return (
     <fieldset className="space-y-3 rounded-md border p-4" data-testid={`${idPrefix}-posting-preview`}>

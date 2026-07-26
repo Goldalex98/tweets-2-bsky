@@ -1,13 +1,18 @@
+# Local / simple Docker deploy for this fork.
+# Image: ghcr.io/goldalex98/tweets-2-bsky (published from this repository).
+# Production refuses to start without CONFIG_ENCRYPTION_KEY when NODE_ENV=production.
+# Generate: openssl rand -hex 32
 services:
   tweets-2-bsky:
-    image: j4ckxyz/tweets-2-bsky:latest
+    image: ghcr.io/goldalex98/tweets-2-bsky:latest
     container_name: tweets-2-bsky
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
+      NODE_ENV: ${NODE_ENV:-production}
       TWEETS2BSKY_DATA_DIR: /app/data
-      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:-}
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:?Set CONFIG_ENCRYPTION_KEY in .env (openssl rand -hex 32)}
       JWT_SECRET: ${JWT_SECRET:-}
       TRUST_PROXY: ${TRUST_PROXY:-false}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}

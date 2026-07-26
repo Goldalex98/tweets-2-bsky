@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { selectClassName } from '../../lib/dashboard-utils';
+import { pickSelectedUsername } from './source-selection';
 import type {
   AccountMapping,
   AIOverrideMode,
@@ -47,6 +48,8 @@ const DEFAULT_AI_OVERRIDES: DestinationAIOverrides = {
 interface ContentPolicyPanelProps {
   mapping: AccountMapping;
   busy?: boolean;
+  selectedUsername?: string;
+  onSelectedUsernameChange?(username: string): void;
   onSave(payload: {
     moderationPolicy: ModerationPolicy;
     duplicateSuppression: DuplicateSuppressionPolicy;
@@ -78,11 +81,21 @@ function listValue(values: string[] | undefined): string {
   return (values ?? []).join(', ');
 }
 
-export function ContentPolicyPanel({ mapping, busy, onSave, onPreview }: ContentPolicyPanelProps) {
+export function ContentPolicyPanel({
+  mapping,
+  busy,
+  selectedUsername: preferredUsername,
+  onSelectedUsernameChange,
+  onSave,
+  onPreview,
+}: ContentPolicyPanelProps) {
   const sources = mapping.sources ?? [];
-  const initialRouteId = sources[0]?.routeId ?? '';
+  const usernames = sources.map((source) => source.username);
+  const initialUsername = pickSelectedUsername(usernames, undefined, preferredUsername);
+  const initialSource = sources.find((source) => source.username === initialUsername) ?? sources[0];
+  const initialRouteId = initialSource?.routeId ?? '';
   const [state, setState] = useState<ContentPolicyEditorState>(() => {
-    const source = sources[0];
+    const source = initialSource;
     return {
       username: source?.username ?? '',
       routeId: source?.routeId ?? '',
@@ -104,7 +117,7 @@ export function ContentPolicyPanel({ mapping, busy, onSave, onPreview }: Content
     [sources, state.routeId],
   );
 
-  const selectRoute = (routeId: string) => {
+  const selectRoute = (routeId: string, announce = true) => {
     const source = sources.find((entry) => entry.routeId === routeId);
     if (!source) return;
     setState((current) => ({
@@ -115,7 +128,23 @@ export function ContentPolicyPanel({ mapping, busy, onSave, onPreview }: Content
       routeModerationPolicy: source.moderationPolicy ?? current.routeModerationPolicy,
       routeDuplicateSuppression: source.duplicateSuppression ?? current.routeDuplicateSuppression,
     }));
+    if (announce) onSelectedUsernameChange?.(source.username);
   };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sync only when membership, revision, or focus changes
+  useEffect(() => {
+    const nextUsername = pickSelectedUsername(usernames, state.username, preferredUsername);
+    const nextSource = sources.find((source) => source.username === nextUsername) ?? sources[0];
+    if (!nextSource) {
+      if (state.routeId || state.username) {
+        setState((current) => ({ ...current, username: '', routeId: '' }));
+      }
+      return;
+    }
+    if (nextSource.routeId !== state.routeId || nextSource.username !== state.username) {
+      selectRoute(nextSource.routeId ?? '', false);
+    }
+  }, [mapping.revision, mapping.updatedAt, usernames.join('\0'), preferredUsername]);
 
   return (
     <section className="space-y-4" aria-labelledby="content-policy-heading">

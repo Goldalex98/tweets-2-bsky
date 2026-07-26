@@ -92,4 +92,22 @@ describe('canMutateBlueskyAccount', () => {
       }),
     ).toBe(false);
   });
+
+  test('unknown account ids are denied for non-admins', () => {
+    expect(
+      canMutateBlueskyAccount(config, { id: 'user-a' }, 'acct-missing', {
+        canManageAllMappings: false,
+        canManageDestination: () => true,
+      }),
+    ).toBe(false);
+  });
+
+  test('admins may still mutate unknown account ids (handler returns not-found)', () => {
+    expect(
+      canMutateBlueskyAccount(config, { id: 'admin' }, 'acct-missing', {
+        canManageAllMappings: true,
+        canManageDestination: () => false,
+      }),
+    ).toBe(true);
+  });
 });

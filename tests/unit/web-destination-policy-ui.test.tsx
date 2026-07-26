@@ -33,7 +33,7 @@ const dialogProps = {
   onSubmit: () => undefined,
   onFormChange: () => undefined,
   onSourceInputChange: () => undefined,
-  onAddSources: () => undefined,
+  onAddSources: async () => undefined,
   onRemoveSource: () => undefined,
   onManageAccount: () => undefined,
   onDismissMigrationReview: () => undefined,
@@ -187,6 +187,8 @@ describe('edit destination dialog', () => {
     );
 
     expect(markup).toContain('Source filters');
+    expect(markup).toContain('Source add/remove applies immediately');
+    expect(markup).not.toContain('Source add/remove is applied when you click Save Destination');
   });
 
   test('blocks saving while the attribution template is invalid', () => {

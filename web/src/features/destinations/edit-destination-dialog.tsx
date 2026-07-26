@@ -14,7 +14,7 @@ import { Dialog } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { NavList, type NavListItem } from '../../components/ui/nav-list';
-import { normalizeTwitterUsername, validateAttributionTemplate } from '../../lib/dashboard-utils';
+import { validateAttributionTemplate } from '../../lib/dashboard-utils';
 import type { BlueskyAccountView } from '../bluesky-accounts/types';
 import { ConnectionList } from './connection-list';
 import { ContentPolicyPanel } from './content-policy-panel';
@@ -65,7 +65,8 @@ interface EditDestinationDialogProps {
   onSubmit(event: FormEvent<HTMLFormElement>): void;
   onFormChange(update: (current: MappingFormState) => MappingFormState): void;
   onSourceInputChange(value: string): void;
-  onAddSources(): void;
+  /** Returns the first newly added username when sources were persisted. */
+  onAddSources(): Promise<string | undefined>;
   onRemoveSource(username: string): void;
   onManageAccount(): void;
   onSectionChange?(section: DestinationSectionId): void;
@@ -99,16 +100,11 @@ const SECTION_ITEMS: Array<NavListItem<DestinationSectionId>> = [
   { id: 'operations', label: 'Operations', icon: ClipboardList },
 ];
 
-function normalizedSourceKey(usernames: readonly string[]): string {
-  return [...usernames].map(normalizeTwitterUsername).filter(Boolean).sort().join('\0');
-}
-
-function isMainFormDirty(form: MappingFormState, mapping: AccountMapping, sources: readonly string[]): boolean {
+function isMainFormDirty(form: MappingFormState, mapping: AccountMapping): boolean {
   return (
     form.owner !== (mapping.owner || '') ||
     form.groupName !== (mapping.groupName || '') ||
     form.groupEmoji !== (mapping.groupEmoji || '📁') ||
-    normalizedSourceKey(sources) !== normalizedSourceKey(mapping.twitterUsernames) ||
     JSON.stringify(form.postingPolicy) !== JSON.stringify(mapping.postingPolicy) ||
     JSON.stringify(form.profileManagement) !== JSON.stringify(mapping.profileManagement) ||
     JSON.stringify(form.aiOverrides) !==
@@ -131,6 +127,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
   const [activeSection, setActiveSection] = useState<DestinationSectionId>(() =>
     resolveDestinationSection(initialSection),
   );
+  const [focusedSourceUsername, setFocusedSourceUsername] = useState<string | undefined>();
   const sectionPanelRef = useRef<HTMLDivElement>(null);
   const skipInitialFocusRef = useRef(true);
 
@@ -139,6 +136,15 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
     setActiveSection(resolveDestinationSection(initialSection));
     skipInitialFocusRef.current = true;
   }, [mappingId, initialSection]);
+
+  useEffect(() => {
+    // Reset deep-link focus whenever the edited destination changes (including close).
+    if (!mappingId) {
+      setFocusedSourceUsername(undefined);
+      return;
+    }
+    setFocusedSourceUsername(undefined);
+  }, [mappingId]);
 
   useEffect(() => {
     if (!mappingId) return;
@@ -153,7 +159,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
   }, [activeSection, mappingId]);
 
   const confirmDiscardIfDirty = (message: string): boolean => {
-    if (!props.mapping || !isMainFormDirty(props.form, props.mapping, props.sources)) return true;
+    if (!props.mapping || !isMainFormDirty(props.form, props.mapping)) return true;
     return window.confirm(message);
   };
 
@@ -162,14 +168,15 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
     props.onSectionChange?.(next);
   };
 
-  const requestSectionChange = (next: DestinationSectionId) => {
+  const requestSectionChange = (next: DestinationSectionId, username?: string) => {
+    if (username) setFocusedSourceUsername(username);
     if (!props.mapping || next === activeSection) {
       applySectionChange(next);
       return;
     }
     if (
       !confirmDiscardIfDirty(
-        'You have unsaved destination settings. Switch sections anyway? Use Save Destination to keep owner, folder, sources, attribution, AI, and profile changes.',
+        'You have unsaved destination settings. Switch sections anyway? Use Save Destination to keep owner, folder, attribution, AI, and profile changes.',
       )
     ) {
       return;
@@ -230,7 +237,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
               <NavList
                 items={SECTION_ITEMS}
                 activeId={activeSection}
-                onSelect={requestSectionChange}
+                onSelect={(section) => requestSectionChange(section)}
                 ariaLabel="Destination sections"
                 className="min-w-max flex-row sm:min-w-0 sm:flex-col"
               />
@@ -304,9 +311,19 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                     <Input
                       id="edit-source-input"
                       value={props.sourceInput}
+                      disabled={props.busy}
                       onChange={(event) => props.onSourceInputChange(event.target.value)}
                     />
-                    <Button type="button" variant="outline" onClick={props.onAddSources}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={props.busy || !props.sourceInput.trim()}
+                      onClick={() => {
+                        void Promise.resolve(props.onAddSources()).then((focused) => {
+                          if (focused) setFocusedSourceUsername(focused);
+                        });
+                      }}
+                    >
                       Add
                     </Button>
                   </div>
@@ -318,6 +335,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                           type="button"
                           className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                           aria-label={`Remove @${username}`}
+                          disabled={props.busy}
                           onClick={() => props.onRemoveSource(username)}
                         >
                           <X aria-hidden="true" className="h-3 w-3" />
@@ -330,19 +348,24 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                       {entry.input}: {entry.reason}
                     </p>
                   ))}
-                  <p className="text-xs text-muted-foreground">
-                    Source add/remove is applied when you click Save Destination.
+                  <p className="text-xs text-muted-foreground" data-testid="source-membership-help">
+                    Source add/remove applies immediately. Source filters use Save filters; owner, folder,
+                    attribution, AI, and profile changes use Save Destination.
                   </p>
                 </div>
                 <SourceFiltersPanel
                   mapping={props.mapping}
                   busy={props.busy}
+                  selectedUsername={focusedSourceUsername}
+                  onSelectedUsernameChange={setFocusedSourceUsername}
                   onSaveFilters={props.onSaveSourceFilters}
                   onPreviewFilter={props.onPreviewSourceFilter}
                 />
                 <ConnectionList
                   mapping={props.mapping}
-                  onOpenSection={(section) => requestSectionChange(resolveDestinationSection(section))}
+                  onOpenSection={(section, username) =>
+                    requestSectionChange(resolveDestinationSection(section), username)
+                  }
                 />
               </div>
             ) : null}
@@ -366,6 +389,8 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                   key={`${props.mapping.id}-delivery`}
                   mapping={props.mapping}
                   busy={props.busy}
+                  selectedUsername={focusedSourceUsername}
+                  onSelectedUsernameChange={setFocusedSourceUsername}
                   onSave={props.onSaveRouteDelivery}
                 />
                 <p className="text-xs text-muted-foreground">
@@ -380,6 +405,8 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                   key={props.mapping.id}
                   mapping={props.mapping}
                   busy={props.busy}
+                  selectedUsername={focusedSourceUsername}
+                  onSelectedUsernameChange={setFocusedSourceUsername}
                   onSave={props.onSaveContentPolicy}
                   onPreview={props.onPreviewContentPolicy}
                 />

@@ -661,7 +661,7 @@ test('destination editor uses section navigation and dismisses migration review'
     {
       label: 'Sources & routes',
       assertion: async () => {
-        await expect(dialog.getByText('Source filters')).toBeVisible();
+        await expect(dialog.getByTestId('source-filters-panel')).toBeVisible();
       },
     },
     {
@@ -720,4 +720,147 @@ test('destination editor uses section navigation and dismisses migration review'
   await page.goto('/accounts?destinationId=destination-1&section=nonsense');
   await expect(page.getByRole('dialog', { name: 'Edit Bluesky Destination' })).toBeVisible();
   await expect(page.getByRole('dialog').getByText('Linked Bluesky account')).toBeVisible();
+});
+
+test('adding a source updates the filter select without closing the editor', async ({ page }) => {
+  await mockDashboard(page);
+
+  const defaultFilters = {
+    originalPosts: true,
+    selfReplies: true,
+    externalReplies: false,
+    quotes: true,
+    reposts: false,
+    mediaOnly: false,
+    includeKeywords: [],
+    excludeKeywords: [],
+    languages: [],
+    sensitiveContent: 'mirror',
+  };
+
+  let revision = 7;
+  let updatedAt = version.updatedAt;
+  let destination = {
+    ...version,
+    id: 'destination-1',
+    twitterUsernames: ['alpha'],
+    pausedTwitterUsernames: [],
+    bskyIdentifier: 'osint-mirrors.bsky.social',
+    bskyCanonicalHandle: 'osint-mirrors.bsky.social',
+    bskyDid: 'did:plc:mock',
+    bskyServiceUrl: 'https://bsky.social',
+    bskyAccountId: 'account-1',
+    credentialConfigured: true,
+    enabled: true,
+    destinationState: 'enabled',
+    postingPolicy,
+    profileManagement,
+    aiOverrides: {
+      imageAltText: 'inherit',
+      textCapabilities: {
+        translation: 'inherit',
+        summarization: 'inherit',
+        cleanup: 'inherit',
+        hashtags: 'inherit',
+      },
+    },
+    moderationPolicy: {
+      blockKeywords: [],
+      blockDomains: [],
+      blockSourceUsernames: [],
+      sensitiveContent: 'allow',
+      dryRun: false,
+    },
+    duplicateSuppression: { enabled: false, windowHours: 24, perceptualImageHash: false },
+    sources: [
+      {
+        username: 'alpha',
+        routeId: 'route_alpha',
+        state: 'enabled',
+        filters: defaultFilters,
+        delivery: { mode: 'immediate' },
+      },
+    ],
+    queue: null,
+    runtime: null,
+  };
+
+  await page.route('**/api/destinations', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return json(route, [destination]);
+  });
+
+  await page.route('**/api/destinations/destination-1/sources', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = (route.request().postDataJSON?.() ?? {}) as { sources?: string[] };
+    const added = (body.sources ?? []).map((entry) => String(entry).replace(/^@/, '').toLowerCase());
+    revision += 1;
+    updatedAt = new Date().toISOString();
+    destination = {
+      ...destination,
+      revision,
+      updatedAt,
+      twitterUsernames: [...destination.twitterUsernames, ...added],
+      sources: [
+        ...destination.sources,
+        ...added.map((username) => ({
+          username,
+          routeId: `route_${username}`,
+          state: 'enabled',
+          filters: defaultFilters,
+          delivery: { mode: 'immediate' },
+        })),
+      ],
+    };
+    return json(route, { revision, updatedAt, added, success: true, sourceCount: destination.twitterUsernames.length });
+  });
+
+  await page.goto('/accounts?destinationId=destination-1&section=sources');
+  const dialog = page.getByRole('dialog', { name: 'Edit Bluesky Destination' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Source add/remove applies immediately')).toBeVisible();
+
+  const filterSelect = dialog.locator('#source-filter-username');
+  await expect(filterSelect.locator('option')).toHaveCount(1);
+  await expect(filterSelect).toHaveValue('alpha');
+
+  await dialog.locator('#edit-source-input').fill('gamma');
+  await dialog.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(page.getByText('Added @gamma.')).toBeVisible();
+
+  await expect(filterSelect.locator('option')).toHaveCount(2);
+  await expect(filterSelect.locator('option[value="gamma"]')).toHaveCount(1);
+  await expect(filterSelect).toHaveValue('gamma');
+  await expect(dialog.getByText('@gamma → @osint-mirrors.bsky.social')).toBeVisible();
+
+  // Switch away, then use ConnectionList Filters to re-focus the new source.
+  await filterSelect.selectOption('alpha');
+  await expect(filterSelect).toHaveValue('alpha');
+  await dialog
+    .getByRole('list', { name: 'Source to destination connections' })
+    .getByRole('listitem')
+    .filter({ hasText: '@gamma →' })
+    .getByRole('button', { name: 'Filters' })
+    .click();
+  await expect(filterSelect).toHaveValue('gamma');
+  await expect(dialog).toBeVisible();
+
+  // Save Destination must not mutate source membership (no DELETE /sources/...).
+  const membershipMutations: string[] = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() !== 'GET' && path.includes('/sources')) {
+      membershipMutations.push(`${request.method()} ${path}`);
+    }
+  });
+  await page.route('**/api/destinations/destination-1', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    revision += 1;
+    updatedAt = new Date().toISOString();
+    destination = { ...destination, revision, updatedAt };
+    return json(route, destination);
+  });
+  await dialog.getByRole('button', { name: 'Save Destination' }).click();
+  await expect(page.getByText('Destination updated.')).toBeVisible();
+  expect(membershipMutations.filter((entry) => entry.startsWith('DELETE'))).toEqual([]);
 });
