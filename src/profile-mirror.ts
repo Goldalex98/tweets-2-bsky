@@ -121,12 +121,6 @@ export interface FediverseBridgeResult {
   announcementCid: string;
 }
 
-export interface FediverseBridgeStatusResult {
-  bsky: BlueskyCredentialValidation;
-  bridgeAccountHandle: string;
-  bridged: boolean;
-}
-
 export interface EnsureBotSelfLabelResult {
   bsky: BlueskyCredentialValidation;
   updated: boolean;
@@ -872,23 +866,6 @@ const hasFollowRecordForDid = async (agent: BskyAgent, subjectDid: string): Prom
   }
 
   return false;
-};
-
-export const getFediverseBridgeStatus = async (args: {
-  bskyIdentifier: string;
-  bskyPassword: string;
-  bskyServiceUrl?: string;
-}): Promise<FediverseBridgeStatusResult> => {
-  const { agent, credentials } = await loginBlueskyAgent(args);
-
-  const bridgeProfile = await fetchPublicProfile(FEDIVERSE_BRIDGE_HANDLE);
-  const bridged = await hasFollowRecordForDid(agent, bridgeProfile.did);
-
-  return {
-    bsky: credentials,
-    bridgeAccountHandle: bridgeProfile.handle,
-    bridged,
-  };
 };
 
 const uploadProfileImage = async (agent: BskyAgent, url: string, kind: ProfileImageKind): Promise<BlobRef> => {

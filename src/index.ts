@@ -520,10 +520,6 @@ const xRateGovernor = new XRateGovernor({
   },
 });
 
-export function getXRateLimitSnapshot() {
-  return xRateGovernor.snapshot();
-}
-
 async function acquireScraperSlot(): Promise<void> {
   await xRateGovernor.acquire();
 }

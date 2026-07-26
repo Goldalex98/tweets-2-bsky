@@ -245,16 +245,3 @@ export function resolveRuntimeProfileSyncSource(args: {
   );
   return selected && candidates.includes(selected) ? selected : null;
 }
-
-export function getCompatibleProfileSyncSourceUsername(args: {
-  profileSyncSourceUsername?: string;
-  profileManagement?: {
-    profileSync?: {
-      sourceUsername?: string;
-    };
-  };
-}): string | undefined {
-  return normalizeTwitterUsername(
-    args.profileManagement?.profileSync?.sourceUsername ?? args.profileSyncSourceUsername,
-  );
-}

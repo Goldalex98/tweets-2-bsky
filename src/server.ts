@@ -6248,10 +6248,6 @@ export function recalculateNextCheckTime(intervalMinutes = getSchedulerIntervalM
   return nextCheckTime;
 }
 
-export function triggerImmediateRun(): void {
-  requestImmediateSchedulerPass();
-}
-
 export function clearBackfill(id: string, requestId?: string) {
   if (requestId) {
     pendingBackfills = pendingBackfills.filter((bid) => !(bid.id === id && bid.requestId === requestId));

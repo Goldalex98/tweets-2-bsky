@@ -438,4 +438,3 @@ export interface AppConfig {
 }
 
 export type CanonicalAppConfig = Omit<AppConfig, 'mappings'>;
-export type CompatibilityAppConfig = AppConfig;

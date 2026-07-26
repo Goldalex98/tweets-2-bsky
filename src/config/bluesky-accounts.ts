@@ -2,18 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { normalizeBlueskyServiceUrl, normalizeTwitterUsername } from '../mapping-helpers.js';
 import type { AppConfig, BlueskyAccount, Destination } from './schemas.js';
 
-export interface ResolvedBlueskyCredentials {
-  accountId: string;
-  destinationId?: string;
-  storageKey?: string;
-  serviceUrl: string;
-  loginIdentifier: string;
-  appPassword: string;
-  did?: string;
-  canonicalHandle: string;
-  displayIdentifier: string;
-}
-
 export function blueskyAccountIdentity(account: Pick<BlueskyAccount, 'did' | 'serviceUrl' | 'loginIdentifier'>): string {
   const did = typeof account.did === 'string' ? account.did.trim().toLowerCase() : '';
   if (did) {
@@ -50,44 +38,6 @@ export function findDestinationForAccount(
   return config.destinations.find((destination) => destination.bskyAccountId === accountId);
 }
 
-export function resolveBlueskyAccount(
-  config: Pick<AppConfig, 'blueskyAccounts'>,
-  accountId: string,
-): BlueskyAccount {
-  const account = findBlueskyAccount(config, accountId);
-  if (!account) {
-    throw new Error(`Bluesky account ${accountId} was not found.`);
-  }
-  return account;
-}
-
-export function resolveDestinationCredentials(
-  config: Pick<AppConfig, 'blueskyAccounts' | 'destinations'>,
-  destinationId: string,
-): ResolvedBlueskyCredentials {
-  const destination = config.destinations.find((entry) => entry.id === destinationId);
-  if (!destination) {
-    throw new Error(`Destination ${destinationId} was not found.`);
-  }
-  if (!destination.bskyAccountId) {
-    throw new Error(`Destination ${destinationId} is not linked to a Bluesky account.`);
-  }
-  const account = resolveBlueskyAccount(config, destination.bskyAccountId);
-  const canonicalHandle =
-    normalizeTwitterUsername(account.canonicalHandle ?? account.loginIdentifier) ??
-    account.loginIdentifier.trim().toLowerCase();
-  return {
-    accountId: account.id,
-    destinationId: destination.id,
-    storageKey: destination.storageKey,
-    serviceUrl: account.serviceUrl,
-    loginIdentifier: account.loginIdentifier,
-    appPassword: account.appPassword,
-    did: account.did,
-    canonicalHandle,
-    displayIdentifier: canonicalHandle,
-  };
-}
 
 export function createBlueskyAccount(input: {
   loginIdentifier: string;

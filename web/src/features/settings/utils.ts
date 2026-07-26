@@ -1,4 +1,4 @@
-import type { AuthUser, UserFormState, UserPermissions } from './types';
+import type { UserFormState, UserPermissions } from './types';
 
 export const DEFAULT_USER_PERMISSIONS: UserPermissions = {
   viewAllMappings: false,
@@ -48,8 +48,4 @@ export function defaultUserForm(): UserFormState {
 
 export function normalizePermissions(permissions?: Partial<UserPermissions>): UserPermissions {
   return { ...DEFAULT_USER_PERMISSIONS, ...(permissions || {}) };
-}
-
-export function getUserLabel(user?: Pick<AuthUser, 'username' | 'email'> | null): string {
-  return user?.username || user?.email || 'user';
 }

@@ -23,7 +23,6 @@ import {
 } from './storage-paths.js';
 
 export * from './config/defaults.js';
-export * from './config/domain-service.js';
 export * from './config/migrations.js';
 export * from './config/normalize.js';
 export * from './config/projection.js';
@@ -413,17 +412,6 @@ export function addMapping(mapping: NewAccountMapping): void {
   };
   config.mappings.push(newMapping);
   saveConfig(config);
-}
-
-export function updateMapping(id: string, updates: Partial<Omit<AccountMapping, 'id'>>): void {
-  const config = getConfig();
-  const index = config.mappings.findIndex((mapping) => mapping.id === id);
-  const existing = config.mappings[index];
-
-  if (index !== -1 && existing) {
-    config.mappings[index] = { ...existing, ...updates };
-    saveConfig(config);
-  }
 }
 
 export function removeMapping(id: string): void {

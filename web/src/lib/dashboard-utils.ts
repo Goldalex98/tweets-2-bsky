@@ -98,9 +98,6 @@ export function buildDashboardUrl(location: DashboardLocation): string {
 export const ADD_ACCOUNT_STEPS = ['Sources', 'Create', 'Bluesky', 'Verify & Create'] as const;
 export const ADD_ACCOUNT_STEP_COUNT = ADD_ACCOUNT_STEPS.length;
 export const ACCOUNT_SEARCH_MIN_SCORE = 22;
-export const ACCOUNT_PAGE_SIZE_DEFAULT = 50;
-export const DEFAULT_BACKFILL_LIMIT = 15;
-export const FEDIVERSE_BRIDGE_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const selectClassName =
   'flex h-10 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
@@ -300,17 +297,6 @@ export function normalizeEmail(value: string): string {
 
 export function normalizeUsername(value: string): string {
   return value.trim().replace(/^@/, '').toLowerCase();
-}
-
-export function getProfileAgeMs(createdAt?: string): number | null {
-  if (!createdAt) return null;
-  const parsed = Date.parse(createdAt);
-  return Number.isFinite(parsed) ? Date.now() - parsed : null;
-}
-
-export function canBridgeToFediverse(createdAt?: string): boolean {
-  const ageMs = getProfileAgeMs(createdAt);
-  return ageMs !== null && ageMs >= FEDIVERSE_BRIDGE_MIN_AGE_MS;
 }
 
 export function parseTwitterUsernameInput(
