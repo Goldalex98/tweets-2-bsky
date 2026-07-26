@@ -1,5 +1,6 @@
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
+import { formatLocalDateTime } from '../../lib/dashboard-utils';
 import type { AccountMapping } from './types';
 
 interface MigrationReviewPanelProps {
@@ -25,7 +26,7 @@ export function MigrationReviewPanel({ mapping, canReview, busy, onDismiss }: Mi
       </div>
       <p className="text-xs text-muted-foreground">
         Migrated from schema version {review.migratedFromSchemaVersion}.
-        {review.reviewedAt ? ` Reviewed at ${new Date(review.reviewedAt).toLocaleString()}.` : ''}
+        {review.reviewedAt ? ` Reviewed at ${formatLocalDateTime(review.reviewedAt)}.` : ''}
       </p>
       {review.notices.length > 0 ? (
         <ul className="list-disc space-y-1 pl-5 text-sm">

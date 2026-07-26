@@ -1,4 +1,5 @@
 import { ArrowUpRight, History } from 'lucide-react';
+import { formatLocalTime } from '../../lib/dashboard-utils';
 import { describePolicyDifference } from '../../lib/policy-snapshot-labels';
 import { Badge } from '../ui/badge';
 import { Button, buttonVariants } from '../ui/button';
@@ -164,7 +165,7 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                   const canOverride = activity.status === 'skipped' && activity.destination_id && activity.retained_until && activity.retained_until > Date.now() && !activity.override_requeued_at && props.canOverrideSkipped;
                   return (
                     <tr key={`${activity.twitter_id}-${activity.created_at || index}`} className="interactive-row border-b border-border/60 last:border-0">
-                      <td className="px-2 py-3 align-top text-xs text-muted-foreground">{activity.created_at ? new Date(activity.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--'}</td>
+                      <td className="px-2 py-3 align-top text-xs text-muted-foreground">{formatLocalTime(activity.created_at)}</td>
                       <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
                       <td className="px-2 py-3 align-top"><Badge variant="outline">{group.emoji} {group.name}</Badge></td>
                       <td className="px-2 py-3 align-top"><Badge variant={activity.status === 'migrated' ? 'success' : activity.status === 'failed' ? 'danger' : 'outline'}>{activity.status}</Badge></td>

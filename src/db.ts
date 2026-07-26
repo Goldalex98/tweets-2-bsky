@@ -22,6 +22,12 @@ import {
   parseEncryptionKey,
 } from './secret-storage.js';
 import type { NormalizedPost } from './normalized-post.js';
+import {
+  parseSqliteUtcTimestampMs,
+  toIsoUtcTimestamp,
+} from './sqlite-utc-timestamp.js';
+
+export { parseSqliteUtcTimestampMs, toIsoUtcTimestamp } from './sqlite-utc-timestamp.js';
 
 interface DbStatement {
   get: (...params: unknown[]) => unknown;
@@ -288,20 +294,9 @@ const rowToProcessedTweet = (row: ProcessedTweetRow): ProcessedTweet => ({
   bsky_tail_cid: row.bsky_tail_cid ?? undefined,
   delivery_diagnostics: row.delivery_diagnostics ?? undefined,
   status: row.status,
-  created_at: row.created_at,
+  // Expose UTC with an explicit Z so browsers/toLocale* convert to local time.
+  created_at: toIsoUtcTimestamp(row.created_at) ?? row.created_at,
 });
-
-// SQLite's CURRENT_TIMESTAMP is UTC but formatted without a timezone marker
-// ("YYYY-MM-DD HH:MM:SS"), so Date.parse would otherwise interpret it as
-// local time. Callers that compare a processed_tweets row's created_at
-// against a Date.now()-derived value (e.g. settlement freshness checks) need
-// a real epoch, not one skewed by the host's timezone offset.
-export function parseSqliteUtcTimestampMs(value?: string | null): number | undefined {
-  if (!value) return undefined;
-  const iso = value.includes('T') || value.endsWith('Z') ? value : `${value.replace(' ', 'T')}Z`;
-  const parsed = Date.parse(iso);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
 
 function normalizeSearchValue(value: string): string {
   return value
@@ -413,9 +408,8 @@ function scoreProcessedTweet(tweet: ProcessedTweet, query: string, tokens: strin
   const blendedScore = maxScore + (usernameScore + identifierScore + textScore + idScore - maxScore) * 0.22;
 
   const recencyBoost = (() => {
-    if (!tweet.created_at) return 0;
-    const timestamp = Date.parse(tweet.created_at);
-    if (!Number.isFinite(timestamp)) return 0;
+    const timestamp = parseSqliteUtcTimestampMs(tweet.created_at);
+    if (typeof timestamp !== 'number') return 0;
     const ageDays = (Date.now() - timestamp) / (24 * 60 * 60 * 1000);
     return Math.max(0, 7 - ageDays);
   })();
@@ -457,6 +451,10 @@ export const dbService = {
   },
 
   saveTweet(tweet: ProcessedTweet) {
+    // Preserve created_at on REPLACE when the caller still has it (e.g. restoring
+    // a skip after a colliding override-requeue). Dropping it would stamp
+    // CURRENT_TIMESTAMP and make settlement treat the restored skip as fresher
+    // than an already-queued item, silently dropping the queue row.
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO processed_tweets 
       (twitter_id, twitter_username, bsky_identifier, source_type, external_post_id,
@@ -464,8 +462,8 @@ export const dbService = {
        error_category, error_message, policy_version, policy_snapshot, decision_version, decision_trace,
        retained_candidate_json, retained_until, override_requeued_at, override_requeued_by, first_failure_at,
        last_failure_at, attempts, tweet_text, bsky_uri, bsky_cid, bsky_root_uri,
-       bsky_root_cid, bsky_tail_uri, bsky_tail_cid, delivery_diagnostics, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       bsky_root_cid, bsky_tail_uri, bsky_tail_cid, delivery_diagnostics, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
     `);
     stmt.run(
       tweet.twitter_id,
@@ -501,6 +499,7 @@ export const dbService = {
       tweet.bsky_tail_cid || null,
       tweet.delivery_diagnostics ?? null,
       tweet.status,
+      tweet.created_at ?? null,
     );
   },
 
@@ -564,9 +563,9 @@ export const dbService = {
         if (b.score !== a.score) {
           return b.score - a.score;
         }
-        const aTime = a.created_at ? Date.parse(a.created_at) : 0;
-        const bTime = b.created_at ? Date.parse(b.created_at) : 0;
-        return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+        const aTime = parseSqliteUtcTimestampMs(a.created_at) ?? 0;
+        const bTime = parseSqliteUtcTimestampMs(b.created_at) ?? 0;
+        return bTime - aTime;
       })
       .slice(0, safeLimit);
   },

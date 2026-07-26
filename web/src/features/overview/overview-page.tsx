@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import type { ActivityLog } from '../activity/types';
 import type { AccountMapping, BskyProfileView } from '../destinations/types';
 import type { StatusState } from '../status/types';
-import { formatCompactNumber, formatState } from '../../lib/dashboard-utils';
+import { formatCompactNumber, formatLocalDateTime, formatState } from '../../lib/dashboard-utils';
 
 interface DashboardLink {
   id: DashboardTab;
@@ -71,7 +71,7 @@ export function OverviewPage({
         <Metric label="Current State" value={formatState(currentStatus?.state || 'idle')} />
         <Metric
           label="Latest Activity"
-          value={latestActivity?.created_at ? new Date(latestActivity.created_at).toLocaleString() : 'No activity yet'}
+          value={latestActivity?.created_at ? formatLocalDateTime(latestActivity.created_at) : 'No activity yet'}
           compact
         />
         <Card>
@@ -123,7 +123,7 @@ export function OverviewPage({
                       : `@${mapping.bskyIdentifier}`}
                 </p>
                 <span className="text-xs text-muted-foreground">
-                  Last post: {mapping.runtime?.lastBskyPostAt ? new Date(mapping.runtime.lastBskyPostAt).toLocaleString() : 'never'}
+                  Last post: {mapping.runtime?.lastBskyPostAt ? formatLocalDateTime(mapping.runtime.lastBskyPostAt) : 'never'}
                 </span>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
@@ -134,7 +134,7 @@ export function OverviewPage({
                 {(mapping.sources ?? []).map((source) => (
                   <div key={`${mapping.id}-${source.username}`} className="text-xs text-muted-foreground">
                     <span className="font-medium text-foreground">@{source.username}</span> · last check{' '}
-                    {source.runtime?.lastCheckAt ? new Date(source.runtime.lastCheckAt).toLocaleString() : 'never'}
+                    {source.runtime?.lastCheckAt ? formatLocalDateTime(source.runtime.lastCheckAt) : 'never'}
                     {source.runtime?.lastErrorCategory
                       ? ` · ${source.runtime.lastErrorCategory}: ${source.runtime.lastErrorMessage ?? 'failed'}`
                       : ''}
