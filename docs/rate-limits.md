@@ -47,8 +47,9 @@ behaviour that shapes the defaults:
 
 ### How the app protects the scraping account
 
-All X requests — timeline sweeps, thread lookups, media and pinned-tweet fetches — pass through a
-single process-wide governor (`src/x-rate-limit.ts`):
+All scraper/API-style X requests — timeline sweeps, thread lookups, and pinned-tweet fetches — pass
+through a single process-wide governor (`src/x-rate-limit.ts`). X-hosted media downloads use the
+separate bounded HTTPS downloader and are not counted by this scraper request budget:
 
 1. **Spacing.** `SCRAPER_MIN_GAP_MS` plus up to `SCRAPER_JITTER_MS` of jitter between requests, so
    traffic is neither bursty nor metronomic.

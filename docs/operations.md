@@ -34,7 +34,7 @@ From the destinations list, select up to 50 destinations and apply pause/resume 
 
 Posting attribution is `never`, `multiple-sources`, or `always`. Preview uses the same transformer as delivery. Existing queue entries retain their policy snapshot; changing a policy does not silently rewrite queued work.
 
-X polls are not Bluesky polls: the mirror appends a text note with choices and the original X link, and attaches an external URL card when the post has no other embed. Quote and video link fallbacks are recorded in `delivery_diagnostics` on queue/history rows and shown in the Activity dashboard.
+X polls are not Bluesky polls: the mirror appends a text note with choices and the original X link, and attaches an external URL card when the post has no other embed. Quote, video, and repost-wrapper fallbacks are recorded in `delivery_diagnostics` on queue/history rows and shown in the Activity dashboard. Reposts retain the wrapper status identity and always keep an X status link; when nested original content is unavailable, wrapper text is retained instead of silently dropping the repost.
 
 Profile mutations require both `allowProfileMutation` and the specific profile, label, suffix, or pin policy. Preview and credential validation are read-only. Aggregate destinations do not infer a profile source.
 

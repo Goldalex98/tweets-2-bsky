@@ -136,6 +136,8 @@ See [Security, encryption, backups, and restore](docs/security-and-backups.md).
 - Uses `@the-convocation/twitter-scraper` with browser cookies — not Twitter’s paid official API.
 - Required cookies: `auth_token` and `ct0`. Rotate them in Settings when they expire.
 - Treat cookies as secrets. Chromium is used for some quote-tweet screenshot fallbacks (bundled in Docker).
+- Reposts retain the wrapper status identity. If the scraper cannot provide the nested original status,
+  the wrapper text and X status link are preserved and recorded as a delivery diagnostic.
 
 ## Pipeline (fetch sweep + post queue)
 
@@ -218,6 +220,7 @@ Sections labeled **Future ideas** in those docs are roadmap only.
 
 ```bash
 bun install --frozen-lockfile
+bun run verify:deps
 bun run dev
 bun run dev:web
 bun run build

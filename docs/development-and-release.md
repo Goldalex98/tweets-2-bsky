@@ -6,6 +6,7 @@ Bun is the canonical runtime and package manager. The pinned release toolchain i
 
 ```bash
 bun install --frozen-lockfile
+bun run verify:deps
 bun run lint:check
 bun run typecheck:server
 bun run typecheck:web

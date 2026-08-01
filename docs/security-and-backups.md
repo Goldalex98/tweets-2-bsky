@@ -30,7 +30,9 @@ string (`confirmation` body field or `x-destructive-confirmation`). The confirma
 | Import configuration | `IMPORT_CONFIG` |
 | Reset another user's password | `RESET_USER_PASSWORD` |
 | Clear all queued backfills | `CLEAR_ALL_BACKFILLS` |
-| Full config export / full backup create & restore | existing `EXPORT_WITH_SECRETS` / backup confirmations |
+| Full config export | `EXPORT_WITH_SECRETS` (plus current-admin password) |
+| Full backup create | `BACKUP_WITH_SECRETS` (plus current-admin password) |
+| Backup restore apply | `RESTORE` (plus current-admin password and the current config revision) |
 
 Bulk destination backfill additionally requires the `queueBackfills` permission (admins always pass)
 and rejects unknown destination ids with HTTP 404 instead of treating them as managed.

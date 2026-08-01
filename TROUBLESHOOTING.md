@@ -7,9 +7,10 @@ A powerful tool to crosspost Tweets to Bluesky, supporting threads, videos, and 
 ### Update Failures / Git Conflicts
 If `./update.sh` fails with "Pulling is not possible because you have unmerged files" or similar git errors:
 
-1. Reset your local repository to match the remote (Warning: this discards local changes to tracked files):
+1. Preserve or stash any local work, then reset your local repository to the active remote branch (this discards local changes to tracked files):
    ```bash
-   git reset --hard origin/master
+   git fetch origin
+   git reset --hard origin/main
    ```
 2. Run the update script again:
    ```bash
@@ -145,6 +146,21 @@ bun run cli -- queue-list
 Detailed health and metrics require dashboard authentication. Public probes intentionally contain no source,
 destination, cookie, or webhook identifiers. Cookie diagnostics report only configured/active/last-success/
 last-auth-failure state, never cookie values.
+
+### Repost content is truncated or shows only the wrapper
+
+The scraper sometimes returns a repost wrapper without the nested original status. The pipeline keeps
+the wrapper identity and X status link, records `repost-wrapper-fallback` in `delivery_diagnostics`,
+and exposes the fallback badge in Activity. This is a scraper-response limitation, not a Bluesky
+posting failure. Check the installed dependency contract before upgrading:
+
+```bash
+bun run verify:deps
+```
+
+If the compatibility check fails or the behavior changes after an X frontend update, inspect the
+upstream scraper release/issues, upgrade the package and lockfile together, rerun the offline quality
+gate, and reserve live X smoke tests for an explicitly approved maintenance window.
 
 ### Docker: permissions writing `/app/data`
 If the container fails to write `config.json` or `database.sqlite`, ensure `/app/data` is writable by the container process.
