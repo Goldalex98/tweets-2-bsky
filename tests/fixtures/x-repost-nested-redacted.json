@@ -1,0 +1,66 @@
+{
+  "id": "900000000000000001",
+  "username": "source_account",
+  "userId": "100000000000000001",
+  "isRetweet": true,
+  "permanentUrl": "https://twitter.com/source_account/status/900000000000000001",
+  "text": "RT @original_author: A representative long repost body truncated by its wrapper...",
+  "urls": [],
+  "photos": [],
+  "videos": [],
+  "hashtags": [],
+  "mentions": [],
+  "thread": [],
+  "__raw_UNSTABLE": {
+    "id_str": "900000000000000001",
+    "full_text": "RT @original_author: A representative long repost body truncated by its wrapper...",
+    "created_at": "Sat Aug 01 12:00:00 +0000 2026",
+    "retweeted_status_id_str": "800000000000000001",
+    "entities": { "urls": [] },
+    "retweeted_status_result": {
+      "result": {
+        "rest_id": "800000000000000001",
+        "legacy": {
+          "id_str": "800000000000000001",
+          "full_text": "Complete nested text retained by the scraper. This closing sentence must survive mapping.",
+          "entities": {
+            "urls": [{ "url": "https://t.co/redacted", "expanded_url": "https://example.invalid/report" }]
+          }
+        }
+      }
+    }
+  },
+  "retweetedStatusId": "800000000000000001",
+  "retweetedStatus": {
+    "id": "800000000000000001",
+    "username": "original_author",
+    "userId": "100000000000000002",
+    "text": "Complete nested text retained by the scraper. This closing sentence must survive mapping.",
+    "urls": ["https://example.invalid/report"],
+    "photos": [{
+      "id": "700000000000000001",
+      "url": "https://cdn.example.invalid/photo.jpg",
+      "alt_text": "Redacted representative alt text"
+    }],
+    "videos": [],
+    "hashtags": [],
+    "mentions": [],
+    "thread": [],
+    "__raw_UNSTABLE": {
+      "id_str": "800000000000000001",
+      "full_text": "Complete nested text retained by the scraper. This closing sentence must survive mapping.",
+      "lang": "en",
+      "entities": {
+        "urls": [{ "url": "https://t.co/redacted", "expanded_url": "https://example.invalid/report" }]
+      },
+      "extended_entities": {
+        "media": [{
+          "url": "https://t.co/media",
+          "media_url_https": "https://cdn.example.invalid/photo.jpg",
+          "type": "photo",
+          "ext_alt_text": "Redacted representative alt text"
+        }]
+      }
+    }
+  }
+}

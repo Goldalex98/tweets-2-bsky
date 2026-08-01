@@ -23,18 +23,30 @@ console.log(`exports: ${Object.keys(scraper).sort().join(', ')}`);
 const entryPath = require.resolve('@the-convocation/twitter-scraper');
 const candidates = [entryPath, path.join(path.dirname(entryPath), '..', 'esm', 'index.mjs')];
 let template: string | null = null;
+const readableBundles: string[] = [];
 for (const candidate of candidates) {
   try {
-    const match = fs
-      .readFileSync(candidate, 'utf8')
-      .match(/UserTweets:\s*["'](https:\/\/[^"']+)["']/);
-    if (match?.[1]) {
-      template = match[1];
-      break;
-    }
+    const contents = fs.readFileSync(candidate, 'utf8');
+    readableBundles.push(contents);
+    const match = contents.match(/UserTweets:\s*["'](https:\/\/[^"']+)["']/);
+    if (match?.[1]) template ??= match[1];
   } catch {
     // try next candidate
   }
+}
+
+const scraperTypesPath = path.join(path.dirname(entryPath), '..', '..', 'types', 'index.d.ts');
+try {
+  const scraperTypes = fs.readFileSync(scraperTypesPath, 'utf8');
+  for (const field of ['retweetedStatus?: Tweet', 'retweetedStatusId?: string']) {
+    if (!scraperTypes.includes(field)) failures.push(`scraper Tweet type is missing ${field}`);
+  }
+} catch {
+  failures.push('could not read the scraper Tweet type declarations');
+}
+if (!readableBundles.some((bundle) => bundle.includes('retweeted_status_result')) ||
+  !readableBundles.some((bundle) => bundle.includes('retweetedStatus ='))) {
+  failures.push('scraper bundle no longer appears to populate nested retweetedStatus content');
 }
 if (!template) {
   failures.push('could not read the UserTweets request template from the bundle');

@@ -69,14 +69,34 @@ const graphemes = (value: string): number =>
     ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].length
     : Array.from(value).length;
 
+const isXStatusUrl = (url: string): boolean =>
+  /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^/]+\/status\/[^/?#]+/i.test(url);
+
+const xStatusId = (url: string): string | undefined => {
+  if (!isXStatusUrl(url)) return undefined;
+  try {
+    const segments = new URL(url).pathname.split('/').filter(Boolean);
+    const statusIndex = segments.findIndex((segment) => segment.toLowerCase() === 'status');
+    return statusIndex >= 0 ? segments[statusIndex + 1] : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 function entryLine(entry: DigestEntry, index: number, includeSource: boolean): string {
   const attribution = includeSource ? ` (${entry.post.sourceId})` : '';
   const repostStatusUrl = entry.post.repostOf
-    ? entry.post.urls.find((url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^/]+\/status\/[^/?#]+/i.test(url))
+    ? entry.post.urls.find((url) => xStatusId(url) === entry.post.externalId)
     : undefined;
-  const linkUrl = repostStatusUrl ?? entry.post.urls[0];
-  const link = linkUrl ? ` ${linkUrl}` : '';
-  return `${index + 1}. ${entry.post.text}${link}${attribution}`.trim();
+  const externalUrl = entry.post.repostOf
+    ? entry.post.urls.find((url) => !isXStatusUrl(url))
+    : entry.post.urls[0];
+  const links = [
+    externalUrl,
+    repostStatusUrl ? `Repost on X: ${repostStatusUrl}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  const linkText = links.length > 0 ? ` ${links.join(' ')}` : '';
+  return `${index + 1}. ${entry.post.text}${linkText}${attribution}`.trim();
 }
 
 function renderGroupedEntries(entries: readonly DigestEntry[], policy: DigestPolicy): string {

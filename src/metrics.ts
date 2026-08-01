@@ -17,7 +17,9 @@ export type MetricCounter =
   | 'ingestionAccepted'
   | 'ingestionRejected'
   | 'digestRuns'
-  | 'digestFailures';
+  | 'digestFailures'
+  | 'repostRecoveredObservations'
+  | 'repostWrapperFallbackObservations';
 
 export type MetricHistogram = 'queueDelayMs' | 'postDurationMs';
 
@@ -41,6 +43,10 @@ const COUNTERS: MetricCounter[] = [
   'ingestionRejected',
   'digestRuns',
   'digestFailures',
+  // Fetch observations intentionally include repeated timeline sightings. The
+  // names make that scope explicit instead of implying unique accepted posts.
+  'repostRecoveredObservations',
+  'repostWrapperFallbackObservations',
 ];
 
 interface HistogramSnapshot {

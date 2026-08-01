@@ -3,7 +3,8 @@ export type DeliveryFallbackKind =
   | 'quote-link'
   | 'video-link'
   | 'poll-note'
-  | 'poll-card';
+  | 'poll-card'
+  | 'repost-wrapper-fallback';
 
 export interface DeliveryFallbackEvent {
   kind: DeliveryFallbackKind;
@@ -43,6 +44,8 @@ export function describeDeliveryFallback(event: DeliveryFallbackEvent): string {
       return 'Poll note appended';
     case 'poll-card':
       return 'Poll link card attached';
+    case 'repost-wrapper-fallback':
+      return 'Repost content unavailable; linked to X fallback';
     default:
       return event.reason;
   }

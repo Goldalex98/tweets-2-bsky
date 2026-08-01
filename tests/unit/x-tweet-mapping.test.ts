@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import fs from 'node:fs';
 import type { Tweet as ScraperTweet } from '@the-convocation/twitter-scraper';
 import { normalizeXPost } from '../../src/normalized-post.js';
 import { applyPostingPolicy, splitPostText } from '../../src/post-transform.js';
@@ -8,6 +9,23 @@ const scraperTweet = (value: Record<string, unknown>): ScraperTweet =>
   value as unknown as ScraperTweet;
 
 describe('X scraper tweet mapping', () => {
+  test('matches the installed scraper nested-repost contract using a redacted fixture', () => {
+    const fixture = JSON.parse(
+      fs.readFileSync(new URL('../fixtures/x-repost-nested-redacted.json', import.meta.url), 'utf8'),
+    ) as Record<string, unknown>;
+    const mapped = mapScraperTweetToLocalTweet(scraperTweet(fixture));
+
+    expect(mapped).toMatchObject({
+      id_str: '900000000000000001',
+      retweeted_status_id_str: '800000000000000001',
+      repostContentSource: 'nested',
+      permanentUrl: 'https://x.com/source_account/status/900000000000000001',
+      lang: 'en',
+    });
+    expect(mapped.full_text).toEndWith('This closing sentence must survive mapping.');
+    expect(mapped.extended_entities?.media?.[0]?.ext_alt_text).toBe('Redacted representative alt text');
+  });
+
   test('recovers complete nested repost content while preserving wrapper identity', () => {
     const finalSentence = 'This final sentence proves the complete repost survived.';
     const nestedText = `${'Complete original content with enough words to require threading. '.repeat(8)}${finalSentence}`;
@@ -81,6 +99,7 @@ describe('X scraper tweet mapping', () => {
       possibly_sensitive: true,
       lang: 'en',
       card: { name: 'poll2choice_text_only' },
+      repostContentSource: 'nested',
     });
     expect(mapped.full_text).toBe(`RT @OriginalAuthor: ${nestedText}`);
     expect(mapped.full_text?.match(/^RT @OriginalAuthor:/g)).toHaveLength(1);
@@ -90,6 +109,7 @@ describe('X scraper tweet mapping', () => {
 
     const normalized = normalizeXPost(mapped as unknown as Record<string, unknown>, 'source-x', 'sourceaccount');
     expect(normalized.repostOf?.externalId).toBe('original-7');
+    expect(normalized.repostContentSource).toBe('nested');
     expect(normalized.urls).toContain('https://x.com/SourceAccount/status/wrapper-42');
     const transformed = applyPostingPolicy(
       normalized.text,
@@ -166,5 +186,63 @@ describe('X scraper tweet mapping', () => {
 
     expect(mapped.full_text).toBe('RT @missing: Only the wrapper is available…');
     expect(mapped.permanentUrl).toBe('https://x.com/source/status/wrapper-3');
+    expect(mapped.repostContentSource).toBe('wrapper');
+  });
+
+  test('treats a textless nested status as wrapper fallback without losing wrapper entities', () => {
+    const mapped = mapScraperTweetToLocalTweet(
+      scraperTweet({
+        id: 'wrapper-empty',
+        username: 'source',
+        isRetweet: true,
+        text: 'RT @author: Wrapper body…',
+        urls: ['https://example.com/wrapper'],
+        photos: [],
+        videos: [],
+        hashtags: [],
+        mentions: [],
+        thread: [],
+        retweetedStatusId: 'original-empty',
+        retweetedStatus: {
+          id: 'original-empty',
+          username: 'author',
+          text: '   ',
+          urls: [],
+          photos: [],
+          videos: [],
+          hashtags: [],
+          mentions: [],
+          thread: [],
+        },
+      }),
+    );
+
+    expect(mapped.full_text).toBe('RT @author: Wrapper body…');
+    expect(mapped.entities?.urls?.[0]?.expanded_url).toBe('https://example.com/wrapper');
+    expect(mapped.retweeted_status_id_str).toBe('original-empty');
+    expect(mapped.repostContentSource).toBe('wrapper');
+  });
+
+  test('recognizes an ID-only repost payload as wrapper fallback', () => {
+    const mapped = mapScraperTweetToLocalTweet(
+      scraperTweet({
+        id: 'wrapper-id-only',
+        username: 'source',
+        text: 'RT @author: Wrapper only…',
+        retweetedStatusId: 'original-id-only',
+        urls: [],
+        photos: [],
+        videos: [],
+        hashtags: [],
+        mentions: [],
+        thread: [],
+      }),
+    );
+
+    expect(mapped.isRetweet).toBe(true);
+    expect(mapped.retweeted_status_id_str).toBe('original-id-only');
+    expect(mapped.repostContentSource).toBe('wrapper');
+    expect(normalizeXPost(mapped as unknown as Record<string, unknown>, 'source-x', 'source').repostContentSource)
+      .toBe('wrapper');
   });
 });

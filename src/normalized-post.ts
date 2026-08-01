@@ -46,6 +46,8 @@ export interface NormalizedPost {
   threadRoot?: NormalizedPostReference;
   quotedPost?: NormalizedPostReference;
   repostOf?: NormalizedPostReference;
+  /** Whether a repost body came from the nested status or degraded wrapper. */
+  repostContentSource?: 'nested' | 'wrapper';
   media: NormalizedMediaDescriptor[];
 }
 
@@ -247,6 +249,10 @@ export function validateNormalizedPost(
     threadRoot: normalizeReference(record.threadRoot, 'threadRoot'),
     quotedPost: normalizeReference(record.quotedPost, 'quotedPost'),
     repostOf: normalizeReference(record.repostOf, 'repostOf'),
+    repostContentSource:
+      record.repostContentSource === 'nested' || record.repostContentSource === 'wrapper'
+        ? record.repostContentSource
+        : undefined,
     media: rawMedia.map((item, index) => normalizeMedia(item, index, limits)),
   };
 }
@@ -377,6 +383,9 @@ export function normalizeXPost(tweet: Record<string, unknown>, sourceId: string,
       sourceId,
       externalId: String(repostId ?? externalId),
     };
+    if (tweet.repostContentSource === 'nested' || tweet.repostContentSource === 'wrapper') {
+      post.repostContentSource = tweet.repostContentSource;
+    }
   }
   return validateNormalizedPost(post, {
     ...DEFAULT_NORMALIZED_POST_LIMITS,

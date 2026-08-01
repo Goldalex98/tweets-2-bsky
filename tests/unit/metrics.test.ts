@@ -7,6 +7,8 @@ test('metrics collect counters and latency without identifier labels', () => {
   metrics.increment('sweeps');
   metrics.increment('discovered', 3);
   metrics.increment('enqueued', 2);
+  metrics.increment('repostRecoveredObservations', 2);
+  metrics.increment('repostWrapperFallbackObservations');
   metrics.observe('queueDelayMs', 250);
   metrics.observe('queueDelayMs', 750);
   metrics.observe('postDurationMs', 1200);
@@ -14,7 +16,13 @@ test('metrics collect counters and latency without identifier labels', () => {
 
   const snapshot = metrics.snapshot();
   expect(snapshot.uptimeSeconds).toBe(5);
-  expect(snapshot.counters).toMatchObject({ sweeps: 1, discovered: 3, enqueued: 2 });
+  expect(snapshot.counters).toMatchObject({
+    sweeps: 1,
+    discovered: 3,
+    enqueued: 2,
+    repostRecoveredObservations: 2,
+    repostWrapperFallbackObservations: 1,
+  });
   expect(snapshot.histograms.queueDelayMs).toEqual({
     count: 2,
     sum: 1000,
@@ -24,6 +32,8 @@ test('metrics collect counters and latency without identifier labels', () => {
   });
   const prometheus = metrics.toPrometheus();
   expect(prometheus).toContain('tweets2bsky_sweeps_total 1');
+  expect(prometheus).toContain('tweets2bsky_repost_recovered_observations_total 2');
+  expect(prometheus).toContain('tweets2bsky_repost_wrapper_fallback_observations_total 1');
   expect(prometheus).not.toContain('source-');
   expect(prometheus).not.toContain('destination-');
 });

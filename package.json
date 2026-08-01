@@ -39,7 +39,7 @@
     "typecheck": "bun run typecheck:server && bun run typecheck:web",
     "typecheck:server": "tsc --noEmit",
     "typecheck:web": "tsc --noEmit -p web/tsconfig.json",
-    "check": "bun run lint:check && bun run typecheck && bun run test:unit && bun run test:integration && bun run test:release && bun run build"
+    "check": "bun run verify:deps && bun run lint:check && bun run typecheck && bun run test:unit && bun run test:integration && bun run test:release && bun run build"
   },
   "keywords": [
     "bluesky",

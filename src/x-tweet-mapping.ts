@@ -26,6 +26,7 @@ export interface LocalTweet {
   };
   card?: TweetCard | null;
   permanentUrl?: string;
+  repostContentSource?: 'nested' | 'wrapper';
 }
 
 interface RawExtras {
@@ -81,9 +82,14 @@ const fallbackEntities = (tweet: ScraperTweet): TweetEntities => ({
   ],
 });
 
-const repostText = (wrapperText: string, nested: ScraperTweet): string => {
-  const nestedText = nested.__raw_UNSTABLE?.full_text ?? nested.text ?? '';
-  if (!nestedText) return wrapperText;
+const nestedRepostText = (nested: ScraperTweet | undefined): string | undefined => {
+  if (!nested) return undefined;
+  const rawText = nested.__raw_UNSTABLE?.full_text;
+  if (typeof rawText === 'string' && rawText.trim()) return rawText;
+  return typeof nested.text === 'string' && nested.text.trim() ? nested.text : undefined;
+};
+
+const repostText = (wrapperText: string, nested: ScraperTweet, nestedText: string): string => {
   const existingPrefix = wrapperText.match(/^RT\s+@[^:]+:\s*/i)?.[0];
   const prefix = existingPrefix ?? (nested.username ? `RT @${nested.username}: ` : 'RT: ');
   return `${prefix}${nestedText}`;
@@ -97,11 +103,17 @@ const repostText = (wrapperText: string, nested: ScraperTweet): string => {
 export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTweet {
   const wrapperRaw = scraperTweet.__raw_UNSTABLE;
   const wrapperExtras = wrapperRaw as (typeof wrapperRaw & RawExtras) | undefined;
-  const nested = scraperTweet.retweetedStatus;
+  const nestedCandidate = scraperTweet.retweetedStatus;
+  const recoveredNestedText = nestedRepostText(nestedCandidate);
+  // A textless nested object is not usable content. Treat it exactly like a
+  // missing nested status so wrapper text, entities and diagnostics survive.
+  const nested = recoveredNestedText ? nestedCandidate : undefined;
   const nestedRaw = nested?.__raw_UNSTABLE;
   const nestedExtras = nestedRaw as (typeof nestedRaw & RawExtras) | undefined;
   const wrapperText = wrapperRaw?.full_text ?? scraperTweet.text ?? '';
-  const contentText = nested ? repostText(wrapperText, nested) : wrapperText;
+  const contentText = nested && recoveredNestedText
+    ? repostText(wrapperText, nested, recoveredNestedText)
+    : wrapperText;
   const contentEntities = nestedRaw?.entities as unknown as TweetEntities | undefined;
   const contentExtendedEntities = nestedRaw?.extended_entities as unknown as TweetEntities | undefined;
   const synthesizedNestedEntities = nested ? fallbackEntities(nested) : undefined;
@@ -114,7 +126,12 @@ export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTw
     text: contentText,
     full_text: contentText,
     created_at: wrapperRaw?.created_at ?? scraperTweet.timeParsed?.toUTCString(),
-    isRetweet: Boolean(scraperTweet.isRetweet || nested || wrapperRaw?.retweeted_status_id_str),
+    isRetweet: Boolean(
+      scraperTweet.isRetweet ||
+      nestedCandidate ||
+      scraperTweet.retweetedStatusId ||
+      wrapperRaw?.retweeted_status_id_str
+    ),
     isPin: scraperTweet.isPin,
     possibly_sensitive:
       Boolean(nestedExtras?.possibly_sensitive) ||
@@ -136,7 +153,7 @@ export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTw
       : (wrapperRaw?.extended_entities as unknown as TweetEntities | undefined),
     quoted_status_id_str: nested ? nestedRaw?.quoted_status_id_str : wrapperRaw?.quoted_status_id_str,
     retweeted_status_id_str:
-      wrapperRaw?.retweeted_status_id_str ?? scraperTweet.retweetedStatusId ?? nested?.id,
+      wrapperRaw?.retweeted_status_id_str ?? scraperTweet.retweetedStatusId ?? nestedCandidate?.id,
     is_quote_status: nested ? Boolean(nestedRaw?.quoted_status_id_str) : Boolean(wrapperRaw?.quoted_status_id_str),
     in_reply_to_status_id_str: nested ? nestedRaw?.in_reply_to_status_id_str : wrapperRaw?.in_reply_to_status_id_str,
     in_reply_to_user_id_str: nested ? nestedExtras?.in_reply_to_user_id_str : wrapperExtras?.in_reply_to_user_id_str,
@@ -144,6 +161,11 @@ export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTw
       ? nestedExtras?.card ?? (nested as unknown as { card?: TweetCard }).card ?? wrapperExtras?.card
       : wrapperExtras?.card,
     permanentUrl,
+    repostContentSource: nested
+      ? 'nested'
+      : scraperTweet.isRetweet || nestedCandidate || scraperTweet.retweetedStatusId || wrapperRaw?.retweeted_status_id_str
+        ? 'wrapper'
+        : undefined,
     user: {
       screen_name: scraperTweet.username,
       id_str: scraperTweet.userId,

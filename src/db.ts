@@ -21,6 +21,7 @@ import {
   isEncryptedValue,
   parseEncryptionKey,
 } from './secret-storage.js';
+import type { DeliveryFallbackEvent } from './delivery-diagnostics.js';
 import type { NormalizedPost } from './normalized-post.js';
 import {
   parseSqliteUtcTimestampMs,
@@ -2677,6 +2678,7 @@ export interface DigestEntry {
   sourceType: string;
   externalPostId: string;
   post: NormalizedPost;
+  deliveryDiagnostics: DeliveryFallbackEvent[];
   policySnapshot?: string;
   status: 'pending' | 'claimed' | 'delivered' | 'cancelled';
   jobId?: string;
@@ -2684,20 +2686,29 @@ export interface DigestEntry {
   deliveredAt?: number;
 }
 
-const rowToDigestEntry = (row: Record<string, unknown>): DigestEntry => ({
-  id: Number(row.id),
-  destinationId: String(row.destination_id),
-  routeId: String(row.route_id),
-  sourceId: String(row.source_id),
-  sourceType: String(row.source_type),
-  externalPostId: String(row.external_post_id),
-  post: JSON.parse(String(row.normalized_post_json)) as NormalizedPost,
-  policySnapshot: optionalText(row.policy_snapshot),
-  status: String(row.status) as DigestEntry['status'],
-  jobId: optionalText(row.job_id),
-  createdAt: Number(row.created_at),
-  deliveredAt: optionalNumber(row.delivered_at),
-});
+const rowToDigestEntry = (row: Record<string, unknown>): DigestEntry => {
+  const post = JSON.parse(String(row.normalized_post_json)) as NormalizedPost;
+  return {
+    id: Number(row.id),
+    destinationId: String(row.destination_id),
+    routeId: String(row.route_id),
+    sourceId: String(row.source_id),
+    sourceType: String(row.source_type),
+    externalPostId: String(row.external_post_id),
+    post,
+    deliveryDiagnostics: post.repostContentSource === 'wrapper'
+      ? [{
+          kind: 'repost-wrapper-fallback',
+          reason: 'The scraper did not provide nested repost content; wrapper text and the X status link were retained.',
+        }]
+      : [],
+    policySnapshot: optionalText(row.policy_snapshot),
+    status: String(row.status) as DigestEntry['status'],
+    jobId: optionalText(row.job_id),
+    createdAt: Number(row.created_at),
+    deliveredAt: optionalNumber(row.delivered_at),
+  };
+};
 
 export const digestEntryService = {
   enqueue(input: {

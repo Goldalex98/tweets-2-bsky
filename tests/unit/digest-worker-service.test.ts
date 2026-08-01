@@ -58,6 +58,7 @@ const entry: DigestEntry = {
     urls: [],
     media: [],
   },
+  deliveryDiagnostics: [],
   status: 'claimed',
   jobId: job.id,
   createdAt: 1_000,

@@ -1337,6 +1337,10 @@ async function fetchUserTweets(
         activeSlot: useBackupCredentials ? 'backup' : 'primary',
         lastSuccessAt: Date.now(),
       });
+      const recoveredReposts = tweets.filter((tweet) => tweet.repostContentSource === 'nested').length;
+      const fallbackReposts = tweets.filter((tweet) => tweet.repostContentSource === 'wrapper').length;
+      if (recoveredReposts > 0) metricsService.increment('repostRecoveredObservations', recoveredReposts);
+      if (fallbackReposts > 0) metricsService.increment('repostWrapperFallbackObservations', fallbackReposts);
       xRateGovernor.noteSuccess();
       return tweets;
     } catch (error: unknown) {
@@ -1690,6 +1694,12 @@ async function processTweets(
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'");
     const deliveryFallbacks: DeliveryFallbackEvent[] = [];
+    if (isRetweet && tweet.repostContentSource === 'wrapper') {
+      deliveryFallbacks.push({
+        kind: 'repost-wrapper-fallback',
+        reason: 'The scraper did not provide nested repost content; wrapper text and the X status link were retained.',
+      });
+    }
 
     // 1. Link Expansion
     console.log(`[${twitterUsername}] 🔗 Expanding links...`);

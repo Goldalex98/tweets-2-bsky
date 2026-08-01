@@ -133,6 +133,40 @@ test('digest entries can be listed and released per job', async () => {
   expect(result.retainedEntryIds).toEqual([1]);
 });
 
+test('digest entries retain wrapper fallback provenance and expose its diagnostic', async () => {
+  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+    const { digestEntryService } = await import(${dbModule});
+    digestEntryService.enqueue({
+      destinationId: 'destination',
+      routeId: 'route',
+      post: {
+        sourceType: 'x',
+        sourceId: 'source',
+        externalId: 'wrapper-fallback',
+        text: 'RT @author: Wrapper body…',
+        createdAt: new Date(1000).toISOString(),
+        urls: ['https://x.com/source/status/wrapper-fallback'],
+        sensitive: false,
+        repostOf: { sourceType: 'x', sourceId: 'source', externalId: 'original' },
+        repostContentSource: 'wrapper',
+        media: [],
+      },
+      createdAt: 1001,
+    });
+    const [entry] = digestEntryService.list({ routeId: 'route' });
+    await Bun.write(${resultPath}, JSON.stringify({
+      provenance: entry.post.repostContentSource,
+      diagnostics: entry.deliveryDiagnostics,
+    }));
+  `);
+
+  expect(result.provenance).toBe('wrapper');
+  expect(result.diagnostics).toEqual([{
+    kind: 'repost-wrapper-fallback',
+    reason: 'The scraper did not provide nested repost content; wrapper text and the X status link were retained.',
+  }]);
+});
+
 test('backfill requests survive a process restart and a transient failure', async () => {
   const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
     const { backfillJobService } = await import(${dbModule});

@@ -33,6 +33,7 @@ const entry = (id: number, sourceId = 'news'): DigestEntry => ({
     sensitive: false,
     media: [],
   },
+  deliveryDiagnostics: [],
   status: 'pending',
   createdAt: id,
 });
@@ -72,12 +73,19 @@ describe('durable digest planning', () => {
     repost.post = {
       ...repost.post,
       sourceType: 'x',
+      externalId: 'wrapper-4',
       text: 'RT @author: Recovered repost',
-      urls: ['https://example.com/article', 'https://x.com/source/status/wrapper-4'],
+      urls: [
+        'https://example.com/article',
+        'https://x.com/other/status/quoted-4',
+        'https://x.com/source/status/wrapper-4',
+      ],
       repostOf: { sourceType: 'x', sourceId: 'news', externalId: 'original-4' },
     };
     const preview = buildDigestPreview([repost], { ...policy, grouping: 'none' });
     expect(preview.text).toContain('https://x.com/source/status/wrapper-4');
-    expect(preview.text).not.toContain('https://example.com/article');
+    expect(preview.text).toContain('https://example.com/article');
+    expect(preview.text).toContain('Repost on X: https://x.com/source/status/wrapper-4');
+    expect(preview.text).not.toContain('Repost on X: https://x.com/other/status/quoted-4');
   });
 });
