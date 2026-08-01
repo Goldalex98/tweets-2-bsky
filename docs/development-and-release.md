@@ -26,7 +26,7 @@ On Windows, `bun run test:e2e` launches Playwright under Node (not Bun) because 
 
 App semver lives in `package.json`. The README “Current release” line is kept in sync by release CI via `scripts/sync-release-version.ts`. Config/database schema versions are independent of app semver.
 
-Every push to `main` runs `.github/workflows/release.yml` (`bun run release` / semantic-release). It analyzes Conventional Commits since the previous `v*` tag:
+Every push to `main` starts `.github/workflows/release.yml` (`bun run release` / semantic-release), but a code push is not necessarily a release. The job analyzes Conventional Commits since the previous `v*` tag:
 
 - `fix:` → patch
 - `feat:` → minor
@@ -34,6 +34,23 @@ Every push to `main` runs `.github/workflows/release.yml` (`bun run release` / s
 - `chore:`, `docs:`, `ci:`, and similar → no release
 
 A releasable merge bumps `package.json` and the README, commits with `chore(release): X.Y.Z [skip ci]`, creates tag `vX.Y.Z` and a GitHub Release. Because tag pushes authenticated with `GITHUB_TOKEN` do not start other workflows, the release job then dispatches the GHCR and Docker Hub publishers for that tag (multi-arch).
+
+### When a pushed change does not bump the version
+
+This is expected when all commits since the last tag are `docs:`, `chore:`,
+`ci:`, or untyped subjects. For a behavior change, use a Conventional Commit
+subject such as `fix: preserve repost provenance` or `feat: add ...`; do not
+manually edit the version files to compensate. Semantic-release will include
+all unreleased commits in the next release-bearing run.
+
+When the version still looks stale after a release-bearing push:
+
+1. Check the Release workflow run on `main` for a failure or a skipped release.
+2. Compare `git log <latest-v-tag>..HEAD --format="%h %s"` with the commit rules above.
+3. Confirm the generated `vX.Y.Z` tag/GitHub Release and that `package.json` and
+   the README `Current release` line agree.
+4. Inspect release permissions and the semantic-release log before touching
+   `package.json` or `README.md`.
 
 Dry-run locally (needs full history, tags, and `GITHUB_TOKEN` or `GH_TOKEN`):
 

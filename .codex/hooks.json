@@ -1,0 +1,31 @@
+{
+  "description": "Repository guardrails for sensitive staging and migration-test reminders.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$(git rev-parse --show-toplevel)/.codex/hooks/block-sensitive-git.mjs\"",
+            "commandWindows": "bun \"$(git rev-parse --show-toplevel)/.codex/hooks/block-sensitive-git.mjs\"",
+            "statusMessage": "Checking sensitive git staging paths"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^apply_patch$|^Edit$|^Write$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$(git rev-parse --show-toplevel)/.codex/hooks/remind-migration-tests.mjs\"",
+            "commandWindows": "bun \"$(git rev-parse --show-toplevel)/.codex/hooks/remind-migration-tests.mjs\"",
+            "statusMessage": "Checking migration-test reminders"
+          }
+        ]
+      }
+    ]
+  }
+}
