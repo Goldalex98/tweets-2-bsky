@@ -71,7 +71,11 @@ const graphemes = (value: string): number =>
 
 function entryLine(entry: DigestEntry, index: number, includeSource: boolean): string {
   const attribution = includeSource ? ` (${entry.post.sourceId})` : '';
-  const link = entry.post.urls[0] ? ` ${entry.post.urls[0]}` : '';
+  const repostStatusUrl = entry.post.repostOf
+    ? entry.post.urls.find((url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^/]+\/status\/[^/?#]+/i.test(url))
+    : undefined;
+  const linkUrl = repostStatusUrl ?? entry.post.urls[0];
+  const link = linkUrl ? ` ${linkUrl}` : '';
   return `${index + 1}. ${entry.post.text}${link}${attribution}`.trim();
 }
 

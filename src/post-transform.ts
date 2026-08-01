@@ -11,6 +11,7 @@ export interface PostTransformContext {
   sourceCount: number;
   isReply: boolean;
   isThreadRoot: boolean;
+  forceOriginalPostLink?: boolean;
 }
 
 export interface LinkFacet {
@@ -136,7 +137,11 @@ export function applyPostingPolicy(
     }
   }
 
-  if (policy.appendOriginalPostLink && context.originalPostUrl && !text.includes(context.originalPostUrl)) {
+  if (
+    (policy.appendOriginalPostLink || context.forceOriginalPostLink) &&
+    context.originalPostUrl &&
+    !text.includes(context.originalPostUrl)
+  ) {
     text = `${text}\n\n${context.originalPostUrl}`.trim();
     originalLinkApplied = true;
   }

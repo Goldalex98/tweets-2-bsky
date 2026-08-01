@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 import { type AppBskyRichtextFacet, type BskyAgent, RichText } from '@atproto/api';
 import type { BlobRef } from '@atproto/api';
 import { Scraper } from '@the-convocation/twitter-scraper';
-import type { Tweet as ScraperTweet } from '@the-convocation/twitter-scraper';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import * as francModule from 'franc-min';
@@ -81,7 +80,8 @@ import {
   ensureSponsoredLinks,
   recoverCardData,
 } from './tweet-cards.js';
-import type { MediaEntity, TweetCard, TweetEntities } from './tweet-cards.js';
+import type { MediaEntity } from './tweet-cards.js';
+import { mapScraperTweetToLocalTweet, type LocalTweet as Tweet } from './x-tweet-mapping.js';
 
 // ESM __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -103,33 +103,6 @@ interface ProcessedTweetEntry {
 
 interface ProcessedTweetsMap {
   [twitterId: string]: ProcessedTweetEntry;
-}
-
-interface Tweet {
-  id?: string;
-  id_str?: string;
-  text?: string;
-  full_text?: string;
-  created_at?: string;
-  entities?: TweetEntities;
-  extended_entities?: TweetEntities;
-  quoted_status_id_str?: string;
-  retweeted_status_id_str?: string;
-  is_quote_status?: boolean;
-  in_reply_to_status_id_str?: string;
-  in_reply_to_status_id?: string;
-  in_reply_to_user_id_str?: string;
-  in_reply_to_user_id?: string;
-  isRetweet?: boolean;
-  isPin?: boolean;
-  possibly_sensitive?: boolean;
-  lang?: string;
-  user?: {
-    screen_name?: string;
-    id_str?: string;
-  };
-  card?: TweetCard | null;
-  permanentUrl?: string;
 }
 
 interface AspectRatio {
@@ -710,71 +683,6 @@ async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<P
     console.warn(`[${username}] ⚠️ Raw pinned-tweet lookup failed:`, (err as Error).message);
     return { ok: false };
   }
-}
-
-function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
-  const raw = scraperTweet.__raw_UNSTABLE;
-  if (!raw) {
-    // Fallback if raw data is missing (shouldn't happen for timeline tweets usually)
-    return {
-      id: scraperTweet.id,
-      id_str: scraperTweet.id,
-      text: scraperTweet.text,
-      full_text: scraperTweet.text,
-      isRetweet: scraperTweet.isRetweet,
-      // Construct minimal entities from parsed data
-      entities: {
-        urls: scraperTweet.urls.map((url: string) => ({ url, expanded_url: url })),
-        media: scraperTweet.photos.map((p) => ({
-          url: p.url,
-          expanded_url: p.url,
-          media_url_https: p.url,
-          type: 'photo',
-          ext_alt_text: p.alt_text,
-        })),
-      },
-      created_at: scraperTweet.timeParsed?.toUTCString(),
-      permanentUrl: scraperTweet.permanentUrl,
-      isPin: scraperTweet.isPin,
-      possibly_sensitive: scraperTweet.sensitiveContent,
-      lang:
-        typeof (scraperTweet as unknown as { language?: unknown }).language === 'string'
-          ? String((scraperTweet as unknown as { language?: unknown }).language)
-          : undefined,
-    };
-  }
-
-  const rawExtras = raw as typeof raw & {
-    possibly_sensitive?: unknown;
-    lang?: unknown;
-    in_reply_to_user_id_str?: string;
-    card?: TweetCard | null;
-  };
-
-  return {
-    id: raw.id_str,
-    id_str: raw.id_str,
-    text: raw.full_text,
-    full_text: raw.full_text,
-    created_at: raw.created_at,
-    isRetweet: scraperTweet.isRetweet,
-    isPin: scraperTweet.isPin,
-    possibly_sensitive: Boolean(rawExtras.possibly_sensitive) || scraperTweet.sensitiveContent,
-    lang: typeof rawExtras.lang === 'string' ? rawExtras.lang : undefined,
-    entities: raw.entities as unknown as TweetEntities,
-    extended_entities: raw.extended_entities as unknown as TweetEntities,
-    quoted_status_id_str: raw.quoted_status_id_str,
-    retweeted_status_id_str: raw.retweeted_status_id_str,
-    is_quote_status: !!raw.quoted_status_id_str,
-    in_reply_to_status_id_str: raw.in_reply_to_status_id_str,
-    in_reply_to_user_id_str: rawExtras.in_reply_to_user_id_str,
-    card: rawExtras.card,
-    permanentUrl: scraperTweet.permanentUrl,
-    user: {
-      screen_name: scraperTweet.username,
-      id_str: scraperTweet.userId,
-    },
-  };
 }
 
 // ============================================================================
@@ -2139,6 +2047,7 @@ async function processTweets(
       sourceCount: mapping.twitterUsernames.length,
       isReply: Boolean(replyParentInfo),
       isThreadRoot: !replyParentInfo,
+      forceOriginalPostLink: Boolean(isRetweet),
     });
     text = transformed.text;
     const deliveryDiagnosticsJson = serializeDeliveryDiagnostics(deliveryFallbacks);

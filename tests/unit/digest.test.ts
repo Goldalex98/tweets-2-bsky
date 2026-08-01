@@ -66,4 +66,18 @@ describe('durable digest planning', () => {
     expect(preview.entryIds).toEqual([1, 3]);
     expect(preview.truncatedEntryIds).toEqual([2]);
   });
+
+  test('prefers the wrapper status URL for repost entries', () => {
+    const repost = entry(4);
+    repost.post = {
+      ...repost.post,
+      sourceType: 'x',
+      text: 'RT @author: Recovered repost',
+      urls: ['https://example.com/article', 'https://x.com/source/status/wrapper-4'],
+      repostOf: { sourceType: 'x', sourceId: 'news', externalId: 'original-4' },
+    };
+    const preview = buildDigestPreview([repost], { ...policy, grouping: 'none' });
+    expect(preview.text).toContain('https://x.com/source/status/wrapper-4');
+    expect(preview.text).not.toContain('https://example.com/article');
+  });
 });

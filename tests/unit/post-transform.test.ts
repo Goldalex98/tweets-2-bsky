@@ -104,6 +104,32 @@ describe('posting policy transformer', () => {
     ).toBe('Root');
   });
 
+  test('forces an original-status link for reposts without duplicating it', () => {
+    const policy = {
+      attribution: {
+        mode: 'never' as const,
+        template: 'Source: @{username}',
+        rootPostsOnly: true,
+        linkSource: true,
+      },
+      appendOriginalPostLink: false,
+    };
+    const forced = applyPostingPolicy('Recovered repost body', policy, {
+      ...context,
+      forceOriginalPostLink: true,
+    });
+    expect(forced.text).toBe(`Recovered repost body\n\n${context.originalPostUrl}`);
+    expect(forced.originalLinkApplied).toBe(true);
+
+    const alreadyLinked = applyPostingPolicy(forced.text, policy, {
+      ...context,
+      forceOriginalPostLink: true,
+    });
+    expect(alreadyLinked.text.split(context.originalPostUrl)).toHaveLength(2);
+    expect(alreadyLinked.originalLinkApplied).toBe(false);
+    expect(applyPostingPolicy('Ordinary post', policy, context).text).toBe('Ordinary post');
+  });
+
   test('rejects unknown and malformed template variables', () => {
     expect(() => validateAttributionTemplate('Source: {unknown}')).toThrow('unsupported variable');
     expect(() => validateAttributionTemplate('Source: {username')).toThrow('invalid variable');

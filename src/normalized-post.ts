@@ -315,11 +315,16 @@ const actorOrUndefined = (username: unknown, id: unknown): NormalizedActor | und
 /** Adapts an X scraper tweet exactly once at the ingestion boundary. */
 export function normalizeXPost(tweet: Record<string, unknown>, sourceId: string, username: string): NormalizedPost {
   const externalId = String(tweet.id_str ?? tweet.id ?? '').trim();
+  const repostId = tweet.retweeted_status_id_str ?? tweet.retweeted_status_id;
+  const isRepost = Boolean(repostId || tweet.isRetweet);
   const entities = [
     ...readArray(readRecord(tweet.entities)?.urls),
     ...readArray(tweet.urls),
   ];
   const urls = entities.map(entityUrl).filter((entry): entry is string => typeof entry === 'string');
+  if (isRepost && typeof tweet.permanentUrl === 'string') {
+    urls.push(tweet.permanentUrl);
+  }
   const mediaValues = [
     ...readArray(readRecord(tweet.extended_entities)?.media),
     ...readArray(tweet.media),
@@ -366,8 +371,7 @@ export function normalizeXPost(tweet: Record<string, unknown>, sourceId: string,
   }
   const quoteId = tweet.quoted_status_id_str ?? tweet.quoted_status_id;
   if (quoteId) post.quotedPost = { sourceType: 'x', sourceId, externalId: String(quoteId) };
-  const repostId = tweet.retweeted_status_id_str ?? tweet.retweeted_status_id;
-  if (repostId || tweet.isRetweet) {
+  if (isRepost) {
     post.repostOf = {
       sourceType: 'x',
       sourceId,
