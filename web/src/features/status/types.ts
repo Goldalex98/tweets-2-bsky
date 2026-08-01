@@ -53,7 +53,22 @@ export interface SchedulerSettings extends ConfigVersion {
   restartRequired?: boolean;
   enabledSourceCount: number;
   estimatedChecksPerHour: number;
-  diagnostics?: Record<string, number | undefined>;
+  diagnostics?: {
+    scraperMinGapMs?: number;
+    scraperJitterMs?: number;
+    scraperMaxRequestsPerWindow?: number;
+    scraperWindowMs?: number;
+    scraperCooldownBaseMs?: number;
+    scraperCooldownMaxMs?: number;
+    schedulerMaxSourcesPerSweep?: number;
+    schedulerJitterPercent?: number;
+    fetchConcurrency?: number;
+    postWorkerConcurrency?: number;
+    postPacingMinMs?: number;
+    postPacingMaxMs?: number;
+    queueMaxAttempts?: number;
+    sweepFetchTimeoutMs?: number;
+  };
 }
 
 export interface StatusResponse {

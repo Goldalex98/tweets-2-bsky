@@ -32,14 +32,18 @@ export interface SettingsRouterDependencies {
 }
 
 export function buildSchedulerSettingsResponse(dependencies: SettingsRouterDependencies, config: AppConfig) {
-  const enabledSourceCount = config.mappings
-    .filter((mapping) => mapping.enabled)
-    .reduce((total, mapping) => total + dependencies.getActiveTwitterUsernames(mapping).length, 0);
+  const enabledSources = new Set(
+    config.mappings
+      .filter((mapping) => mapping.enabled)
+      .flatMap((mapping) => dependencies.getActiveTwitterUsernames(mapping))
+      .map((username) => username.toLowerCase()),
+  );
+  const enabledSourceCount = enabledSources.size;
   const intervalMinutes = dependencies.getSchedulerIntervalMinutes(config);
   const runtime = dependencies.getSchedulerRuntime();
-  const envDiagnostic = (name: string) => {
+  const envDiagnostic = (name: string, fallback: number, min: number, max: number) => {
     const value = Number(process.env[name]);
-    return Number.isFinite(value) ? value : undefined;
+    return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
   };
   return {
     ...dependencies.getConfigVersion(config),
@@ -54,14 +58,20 @@ export function buildSchedulerSettingsResponse(dependencies: SettingsRouterDepen
       ? Math.round((enabledSourceCount * 60) / intervalMinutes)
       : 0,
     diagnostics: {
-      scraperMinGapMs: envDiagnostic('SCRAPER_MIN_GAP_MS'),
-      scraperJitterMs: envDiagnostic('SCRAPER_JITTER_MS'),
-      fetchConcurrency: envDiagnostic('FETCH_CONCURRENCY'),
-      postWorkerConcurrency: envDiagnostic('POST_WORKER_CONCURRENCY'),
-      postPacingMinMs: envDiagnostic('POST_PACING_MIN_MS'),
-      postPacingMaxMs: envDiagnostic('POST_PACING_MAX_MS'),
-      queueMaxAttempts: envDiagnostic('QUEUE_MAX_ATTEMPTS'),
-      sweepFetchTimeoutMs: envDiagnostic('SWEEP_FETCH_TIMEOUT_MS'),
+      scraperMinGapMs: envDiagnostic('SCRAPER_MIN_GAP_MS', 800, 0, 60_000),
+      scraperJitterMs: envDiagnostic('SCRAPER_JITTER_MS', 400, 0, 60_000),
+      scraperMaxRequestsPerWindow: envDiagnostic('SCRAPER_MAX_REQUESTS_PER_WINDOW', 150, 1, 5_000),
+      scraperWindowMs: envDiagnostic('SCRAPER_WINDOW_MS', 15 * 60_000, 60_000, 60 * 60_000),
+      scraperCooldownBaseMs: envDiagnostic('SCRAPER_COOLDOWN_BASE_MS', 30_000, 1_000, 60 * 60_000),
+      scraperCooldownMaxMs: envDiagnostic('SCRAPER_COOLDOWN_MAX_MS', 15 * 60_000, 1_000, 6 * 60 * 60_000),
+      schedulerMaxSourcesPerSweep: envDiagnostic('SCHEDULER_MAX_SOURCES_PER_SWEEP', 25, 1, 10_000),
+      schedulerJitterPercent: envDiagnostic('SCHEDULER_JITTER_PERCENT', 10, 0, 50),
+      fetchConcurrency: envDiagnostic('FETCH_CONCURRENCY', 4, 1, 16),
+      postWorkerConcurrency: envDiagnostic('POST_WORKER_CONCURRENCY', 5, 1, 16),
+      postPacingMinMs: envDiagnostic('POST_PACING_MIN_MS', 3_000, 0, 120_000),
+      postPacingMaxMs: envDiagnostic('POST_PACING_MAX_MS', 8_000, 0, 300_000),
+      queueMaxAttempts: envDiagnostic('QUEUE_MAX_ATTEMPTS', 8, 1, 50),
+      sweepFetchTimeoutMs: envDiagnostic('SWEEP_FETCH_TIMEOUT_MS', 180_000, 30_000, 1_800_000),
     },
   };
 }

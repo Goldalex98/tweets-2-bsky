@@ -38,6 +38,8 @@ const dialogProps = {
   onManageAccount: () => undefined,
   onDismissMigrationReview: () => undefined,
   onSaveSourceFilters: async () => undefined,
+  onSaveSourceSchedule: async () => undefined,
+  schedulerIntervalMinutes: 5,
   onPreviewSourceFilter: async () => ({ allowed: true, reason: 'allowed' }),
   onPreviewPosting: async () => ({ text: 'preview', attributionApplied: false, originalLinkApplied: false }),
   onPreviewProfileSync: () => undefined,
@@ -55,6 +57,17 @@ const scheduler = (intervalMinutes: number): SchedulerSettings => ({
   nextCheckTime: null,
   enabledSourceCount: 24,
   estimatedChecksPerHour: 0,
+  diagnostics: {
+    scraperMinGapMs: 800,
+    scraperJitterMs: 400,
+    scraperMaxRequestsPerWindow: 150,
+    scraperWindowMs: 900_000,
+    scraperCooldownBaseMs: 30_000,
+    scraperCooldownMaxMs: 900_000,
+    schedulerMaxSourcesPerSweep: 25,
+    schedulerJitterPercent: 10,
+    fetchConcurrency: 4,
+  },
 });
 
 describe('attribution policy control', () => {
@@ -187,6 +200,7 @@ describe('edit destination dialog', () => {
     );
 
     expect(markup).toContain('Source filters');
+    expect(markup).toContain('X source polling');
     expect(markup).toContain('Source add/remove applies immediately');
     expect(markup).not.toContain('Source add/remove is applied when you click Save Destination');
   });
@@ -221,7 +235,10 @@ describe('scheduler interval control', () => {
 
     expect(markup).toContain('Check every (minutes)');
     expect(markup).toContain('24 enabled sources');
-    expect(markup).toContain('about 144 X checks per hour');
+    expect(markup).toContain('up to about 144 timeline checks per hour');
+    expect(markup).toContain('X request safety guardrails');
+    expect(markup).toContain('150 per');
+    expect(markup).toContain('Maximum sources per sweep');
   });
 
   test('rejects an out-of-range interval instead of posting it', () => {

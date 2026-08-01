@@ -7,10 +7,16 @@ import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import {
   estimateChecksPerHour,
+  formatLocalDateTime,
   MAX_CHECK_INTERVAL_MINUTES,
   MIN_CHECK_INTERVAL_MINUTES,
   parseCheckIntervalMinutes,
 } from '../../lib/dashboard-utils';
+import {
+  SourcePollingPanel,
+  uniquePollingOptions,
+} from '../destinations/source-polling-panel';
+import type { AccountMapping, SourceSchedulePolicy } from '../destinations/types';
 import type { SchedulerSettings } from '../status/types';
 import type {
   AccountSecurityEmailState,
@@ -115,11 +121,15 @@ export function SchedulerSection({
   setValue,
   saving,
   onSubmit,
+  mappings = [],
+  onSaveSourceSchedule,
 }: {
   value: SchedulerSettings;
   setValue: Dispatch<SetStateAction<SchedulerSettings | null>>;
   saving: boolean;
   onSubmit(event: FormEvent<HTMLFormElement>): void;
+  mappings?: readonly AccountMapping[];
+  onSaveSourceSchedule?(mapping: AccountMapping, username: string, schedule: SourceSchedulePolicy): Promise<void>;
 }) {
   // The field is kept as text so clearing it shows an error instead of posting NaN.
   const [draft, setDraft] = useState(String(value.intervalMinutes));
@@ -131,6 +141,8 @@ export function SchedulerSection({
 
   const parsed = parseCheckIntervalMinutes(draft);
   const checksPerHour = parsed.minutes === null ? null : estimateChecksPerHour(value.enabledSourceCount, parsed.minutes);
+  const pollingOptions = uniquePollingOptions(mappings);
+  const diagnostics = value.diagnostics;
 
   return (
     <Card>
@@ -140,6 +152,24 @@ export function SchedulerSection({
       </CardHeader>
       <CardContent className="border-t pt-4">
         <form className="space-y-4" onSubmit={onSubmit} noValidate>
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <div className="rounded-md border p-3">
+              <dt className="text-xs text-muted-foreground">Last scheduler sweep</dt>
+              <dd className="font-medium">
+                {value.lastCheckTime ? formatLocalDateTime(value.lastCheckTime) : 'No completed sweep yet'}
+              </dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-xs text-muted-foreground">Next scheduler wake</dt>
+              <dd className="font-medium">
+                {!value.enabled
+                  ? 'Disabled'
+                  : value.nextCheckTime
+                    ? formatLocalDateTime(value.nextCheckTime)
+                    : 'Pending'}
+              </dd>
+            </div>
+          </dl>
           <label className="flex items-center justify-between rounded-md border p-3 text-sm">
             <span>
               <strong>Enable scheduled checks</strong>
@@ -179,7 +209,7 @@ export function SchedulerSection({
             >
               {parsed.error
                 ? parsed.error
-                : `${MIN_CHECK_INTERVAL_MINUTES}-${MAX_CHECK_INTERVAL_MINUTES} minutes. ${value.enabledSourceCount} enabled source${value.enabledSourceCount === 1 ? '' : 's'} means about ${checksPerHour} X check${checksPerHour === 1 ? '' : 's'} per hour.`}
+                : `${MIN_CHECK_INTERVAL_MINUTES}-${MAX_CHECK_INTERVAL_MINUTES} minutes. If every source is due, ${value.enabledSourceCount} enabled source${value.enabledSourceCount === 1 ? '' : 's'} means up to about ${checksPerHour} timeline check${checksPerHour === 1 ? '' : 's'} per hour; adaptive policies are usually lower.`}
             </p>
           </div>
           <label className="flex items-center gap-2 text-sm">
@@ -194,6 +224,67 @@ export function SchedulerSection({
             <Save className="mr-2 h-4 w-4" />Save scheduler
           </Button>
         </form>
+
+        {onSaveSourceSchedule ? (
+          <div className="mt-6 border-t pt-6">
+            <SourcePollingPanel
+              options={pollingOptions}
+              globalIntervalMinutes={value.intervalMinutes}
+              busy={saving}
+              onSave={(option, schedule) =>
+                onSaveSourceSchedule(option.mapping, option.username, schedule)
+              }
+              title="Per-source polling"
+              description="Canonical X source policies apply everywhere that source is routed. Adaptive mode is recommended for breaking-news accounts."
+            />
+          </div>
+        ) : null}
+
+        {diagnostics ? (
+          <div className="mt-6 space-y-3 border-t pt-6" data-testid="scheduler-safety-diagnostics">
+            <div>
+              <h3 className="text-sm font-semibold">X request safety guardrails</h3>
+              <p className="text-xs text-muted-foreground">
+                Effective runtime values are read-only here. Change environment overrides only when operational
+                metrics show sustained headroom; changes require a restart.
+              </p>
+            </div>
+            <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Sustained request budget</dt>
+                <dd className="font-medium">
+                  {diagnostics.scraperMaxRequestsPerWindow ?? '—'} per{' '}
+                  {diagnostics.scraperWindowMs ? Math.round(diagnostics.scraperWindowMs / 60_000) : '—'} minutes
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Request spacing</dt>
+                <dd className="font-medium">
+                  {diagnostics.scraperMinGapMs ?? '—'}ms + up to {diagnostics.scraperJitterMs ?? '—'}ms jitter
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Source schedule jitter</dt>
+                <dd className="font-medium">±{diagnostics.schedulerJitterPercent ?? '—'}%</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">429 cooldown range</dt>
+                <dd className="font-medium">
+                  {diagnostics.scraperCooldownBaseMs ? Math.round(diagnostics.scraperCooldownBaseMs / 1000) : '—'}s–
+                  {diagnostics.scraperCooldownMaxMs ? Math.round(diagnostics.scraperCooldownMaxMs / 60_000) : '—'}m
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Maximum sources per sweep</dt>
+                <dd className="font-medium">{diagnostics.schedulerMaxSourcesPerSweep ?? '—'}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Fetch concurrency</dt>
+                <dd className="font-medium">{diagnostics.fetchConcurrency ?? '—'}</dd>
+              </div>
+            </dl>
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

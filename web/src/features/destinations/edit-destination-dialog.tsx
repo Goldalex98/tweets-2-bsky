@@ -30,7 +30,14 @@ import {
 } from './policy-controls';
 import { RouteDeliveryPanel } from './route-delivery-panel';
 import { SourceFiltersPanel } from './source-filters-panel';
-import type { AccountMapping, MappingFormState, SourceFilterPolicy, SourceParseSummary } from './types';
+import { SourcePollingPanel } from './source-polling-panel';
+import type {
+  AccountMapping,
+  MappingFormState,
+  SourceFilterPolicy,
+  SourceParseSummary,
+  SourceSchedulePolicy,
+} from './types';
 
 export const DESTINATION_SECTION_IDS = [
   'overview',
@@ -56,6 +63,7 @@ interface EditDestinationDialogProps {
   sourceInput: string;
   parseSummary: SourceParseSummary;
   busy: boolean;
+  schedulerIntervalMinutes?: number;
   canReviewMigration: boolean;
   /** Managed accounts that are unlinked, plus this destination's own account. */
   blueskyAccounts?: readonly BlueskyAccountView[];
@@ -72,6 +80,7 @@ interface EditDestinationDialogProps {
   onSectionChange?(section: DestinationSectionId): void;
   onDismissMigrationReview(): void;
   onSaveSourceFilters(username: string, filters: SourceFilterPolicy): Promise<void>;
+  onSaveSourceSchedule?(username: string, schedule: SourceSchedulePolicy): Promise<void>;
   onPreviewSourceFilter(
     username: string,
     filters: SourceFilterPolicy,
@@ -349,8 +358,8 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                     </p>
                   ))}
                   <p className="text-xs text-muted-foreground" data-testid="source-membership-help">
-                    Source add/remove applies immediately. Source filters use Save filters; owner, folder,
-                    attribution, AI, and profile changes use Save Destination.
+                    Source add/remove applies immediately. Filters and polling have their own save actions; owner,
+                    folder, attribution, AI, and profile changes use Save Destination.
                   </p>
                 </div>
                 <SourceFiltersPanel
@@ -361,6 +370,21 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                   onSaveFilters={props.onSaveSourceFilters}
                   onPreviewFilter={props.onPreviewSourceFilter}
                 />
+                {props.onSaveSourceSchedule ? (
+                  <SourcePollingPanel
+                    options={(props.mapping.sources ?? []).map((source) => ({
+                      mapping: props.mapping as AccountMapping,
+                      username: source.username,
+                      schedule: source.schedule,
+                      runtime: source.runtime,
+                    }))}
+                    globalIntervalMinutes={props.schedulerIntervalMinutes ?? 5}
+                    busy={props.busy}
+                    selectedUsername={focusedSourceUsername}
+                    onSelectedUsernameChange={setFocusedSourceUsername}
+                    onSave={(_option, schedule) => props.onSaveSourceSchedule?.(_option.username, schedule) ?? Promise.resolve()}
+                  />
+                ) : null}
                 <ConnectionList
                   mapping={props.mapping}
                   onOpenSection={(section, username) =>

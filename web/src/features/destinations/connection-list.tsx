@@ -36,7 +36,7 @@ export function ConnectionList({ mapping, onOpenSection }: ConnectionListProps) 
           </div>
           <div className="mt-2 flex flex-wrap gap-2">
             <Button type="button" size="sm" variant="outline" onClick={() => onOpenSection?.('sources', source.username)}>
-              Filters
+              Filters &amp; polling
             </Button>
             <Button type="button" size="sm" variant="outline" onClick={() => onOpenSection?.('moderation', source.username)}>
               Moderation

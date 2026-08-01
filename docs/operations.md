@@ -42,7 +42,9 @@ Routing filters run before moderation and duplicate suppression. Destination and
 
 ## Scheduler, adaptive polling, and rate limits
 
-The scheduler can be enabled, disabled, or rescheduled without triggering an immediate run. `runOnStartup` is independent. Source schedules inherit, use a fixed interval, or adapt between configured bounds.
+The scheduler can be enabled, disabled, or rescheduled without triggering an immediate run. `runOnStartup` is independent. Source schedules inherit, use a fixed interval, or adapt between configured bounds. Configure a source under **Destinations → Edit → Sources & routes → X source polling**, or manage all canonical sources under **Settings → Scheduler → Per-source polling**. The latter also shows each source's last check, last successful fetch, last observed post, next eligible check, backoff failures, and latest error.
+
+The global interval is the scheduler wake frequency. A source cannot achieve a one-minute minimum while the global scheduler wakes every five minutes. For a small set of breaking-news sources, use a one-minute global interval with adaptive `1–15` source policies; quiet sources back off automatically. Settings shows the resulting worst-case timeline-check estimate and the effective read-only X request guardrails. Low-level request budgets, spacing, cooldowns, and concurrency remain environment controls and require a restart.
 
 Relevant environment controls:
 

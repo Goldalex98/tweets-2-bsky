@@ -9,6 +9,7 @@ import type { BlueskyAccountFormState, BlueskyAccountView } from '../bluesky-acc
 import { IngestionDigestsPage } from '../ingestion/ingestion-digests-page';
 import type { DigestAdminView, IngestionCredentialView, IngestionSourceView } from '../ingestion/types';
 import type { SchedulerSettings } from '../status/types';
+import type { AccountMapping, SourceSchedulePolicy } from '../destinations/types';
 import {
   AccessScopeSection,
   AccountSecuritySection,
@@ -60,6 +61,7 @@ interface SettingsPageProps {
   update: UpdateStatusInfo | null;
   busy: boolean;
   schedulerSaving: boolean;
+  mappings: AccountMapping[];
   updateBusy: boolean;
   editingUserId: string | null;
   canCreateMappings: boolean;
@@ -94,6 +96,7 @@ interface SettingsPageProps {
   onSaveEmail(event: FormEvent<HTMLFormElement>): void;
   onSavePassword(event: FormEvent<HTMLFormElement>): void;
   onSaveScheduler(event: FormEvent<HTMLFormElement>): void;
+  onSaveSourceSchedule(mapping: AccountMapping, username: string, schedule: SourceSchedulePolicy): Promise<void>;
   onSaveTwitter(event: FormEvent<HTMLFormElement>): void;
   onSaveAi(event: FormEvent<HTMLFormElement>): void;
   onPreviewAiText(
@@ -186,7 +189,7 @@ export function SettingsPage(props: SettingsPageProps) {
           />
         ) : null}
         {props.section === 'system' && isAdmin ? <SystemSection runtime={props.runtime} update={props.update} updating={props.updateBusy} canCreate={props.canCreateMappings} onUpdate={props.onRunUpdate} onAdd={props.onAddDestination} /> : null}
-        {props.section === 'scheduler' && isAdmin && props.scheduler ? <SchedulerSection value={props.scheduler} setValue={props.setScheduler} saving={props.schedulerSaving} onSubmit={props.onSaveScheduler} /> : null}
+        {props.section === 'scheduler' && isAdmin && props.scheduler ? <SchedulerSection value={props.scheduler} setValue={props.setScheduler} saving={props.schedulerSaving || props.busy} onSubmit={props.onSaveScheduler} mappings={props.mappings} onSaveSourceSchedule={props.onSaveSourceSchedule} /> : null}
         {props.section === 'users' && isAdmin ? <UsersSection users={props.users} form={props.newUser} setForm={props.setNewUser} editingId={props.editingUserId} busy={props.busy} onCreate={props.onCreateUser} onEdit={props.onEditUser} onDelete={props.onDeleteUser} /> : null}
         {props.section === 'twitter' && isAdmin ? (
           <TwitterSettingsSection

@@ -1241,6 +1241,7 @@ export default function DashboardApp() {
               update={settings.updateStatus}
               busy={busy}
               schedulerSaving={schedulerSaving}
+              mappings={destinations.mappings}
               updateBusy={updateBusy}
               editingUserId={editingUserId}
               canCreateMappings={canCreateMappings}
@@ -1281,6 +1282,11 @@ export default function DashboardApp() {
                 event.preventDefault();
                 setSchedulerSaving(true);
                 void settings.saveScheduler().then(() => showNotice('success', 'Scheduler saved.')).catch((error) => handleError(error, 'Failed to save scheduler.')).finally(() => setSchedulerSaving(false));
+              }}
+              onSaveSourceSchedule={async (mapping, username, schedule) => {
+                await run(async () => {
+                  await destinations.patchSource(mapping, username, { schedule });
+                }, `Polling policy saved for @${username}.`);
               }}
               onSaveTwitter={(event) => saveWithNotice(event, settings.saveTwitter, 'Twitter credentials saved.')}
               onSaveAi={(event) => saveWithNotice(event, settings.saveAi, 'AI settings saved.')}
@@ -1378,6 +1384,7 @@ export default function DashboardApp() {
         sourceInput={editSourceInput}
         parseSummary={editSourceSummary}
         busy={busy}
+        schedulerIntervalMinutes={settings.scheduler?.intervalMinutes ?? 5}
         canReviewMigration={isAdmin}
         blueskyAccounts={editableBlueskyAccounts}
         canChangeAccount={editingMapping ? canManageMapping(editingMapping) : false}
@@ -1399,6 +1406,12 @@ export default function DashboardApp() {
           await run(async () => {
             await destinations.patchSource(editingMapping, username, { filters });
           }, `Filters saved for @${username}.`);
+        }}
+        onSaveSourceSchedule={async (username, schedule) => {
+          if (!editingMapping) return;
+          await run(async () => {
+            await destinations.patchSource(editingMapping, username, { schedule });
+          }, `Polling policy saved for @${username}.`);
         }}
         onPreviewSourceFilter={async (username, filters, metadata) => {
           if (!editingMapping) throw new Error('No destination selected.');

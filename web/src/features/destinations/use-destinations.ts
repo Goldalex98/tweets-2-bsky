@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import api, { type ConfigVersion, isConfigConflict, withConfigVersion } from '../../api/client';
 import { createLatestRequestTracker } from '../../lib/latest-request';
-import type { AccountGroup, AccountMapping, BskyProfileView, SourceFilterPolicy } from './types';
+import type {
+  AccountGroup,
+  AccountMapping,
+  BskyProfileView,
+  SourceFilterPolicy,
+  SourceSchedulePolicy,
+} from './types';
 
 interface UseDestinationsOptions {
   authenticated: boolean;
@@ -171,7 +177,15 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
   );
 
   const patchSource = useCallback(
-    async (mapping: AccountMapping, username: string, payload: { filters?: SourceFilterPolicy; state?: 'enabled' | 'paused' }) => {
+    async (
+      mapping: AccountMapping,
+      username: string,
+      payload: {
+        filters?: SourceFilterPolicy;
+        schedule?: SourceSchedulePolicy;
+        state?: 'enabled' | 'paused';
+      },
+    ) => {
       const response = await withConflictRefresh(() =>
         api.patch(
           `/api/destinations/${mapping.id}/sources/${encodeURIComponent(username)}`,
