@@ -1,5 +1,6 @@
 import type { Tweet as ScraperTweet } from '@the-convocation/twitter-scraper';
 import type { TweetCard, TweetEntities } from './tweet-cards.js';
+import type { QuotedPostSnapshot } from './quote-embed.js';
 
 export interface LocalTweet {
   id?: string;
@@ -27,6 +28,7 @@ export interface LocalTweet {
   card?: TweetCard | null;
   permanentUrl?: string;
   repostContentSource?: 'nested' | 'wrapper';
+  quotedPost?: QuotedPostSnapshot;
 }
 
 interface RawExtras {
@@ -58,6 +60,28 @@ const fallbackPermanentUrl = (tweet: ScraperTweet): string | undefined => {
 const scraperLanguage = (tweet: ScraperTweet | undefined): string | undefined => {
   const language = (tweet as unknown as { language?: unknown } | undefined)?.language;
   return typeof language === 'string' ? language : undefined;
+};
+
+const parsedTweetText = (tweet: ScraperTweet | undefined): string | undefined => {
+  const rawText = tweet?.__raw_UNSTABLE?.full_text;
+  if (typeof rawText === 'string' && rawText.trim()) return rawText;
+  return typeof tweet?.text === 'string' && tweet.text.trim() ? tweet.text : undefined;
+};
+
+const quotedPostSnapshot = (tweet: ScraperTweet | undefined): QuotedPostSnapshot | undefined => {
+  const quoted = tweet?.quotedStatus;
+  const id = tweet?.quotedStatusId ?? tweet?.__raw_UNSTABLE?.quoted_status_id_str ?? quoted?.id;
+  if (!id) return undefined;
+  const snapshot: QuotedPostSnapshot = {
+    id,
+    username: quoted?.username,
+    text: parsedTweetText(quoted),
+    permanentUrl: normalizeXStatusUrl(quoted?.permanentUrl) ??
+      (quoted?.username ? `https://x.com/${quoted.username}/status/${id}` : `https://x.com/i/status/${id}`),
+    thumbnailUrl: quoted?.photos?.[0]?.url ?? quoted?.videos?.[0]?.preview,
+    sensitive: quoted?.sensitiveContent,
+  };
+  return snapshot;
 };
 
 const fallbackEntities = (tweet: ScraperTweet): TweetEntities => ({
@@ -111,6 +135,8 @@ export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTw
   const nestedRaw = nested?.__raw_UNSTABLE;
   const nestedExtras = nestedRaw as (typeof nestedRaw & RawExtras) | undefined;
   const wrapperText = wrapperRaw?.full_text ?? scraperTweet.text ?? '';
+  const contentTweet = nested ?? scraperTweet;
+  const quotedPost = quotedPostSnapshot(contentTweet);
   const contentText = nested && recoveredNestedText
     ? repostText(wrapperText, nested, recoveredNestedText)
     : wrapperText;
@@ -151,10 +177,15 @@ export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTw
     extended_entities: nested
       ? contentExtendedEntities ?? synthesizedNestedEntities
       : (wrapperRaw?.extended_entities as unknown as TweetEntities | undefined),
-    quoted_status_id_str: nested ? nestedRaw?.quoted_status_id_str : wrapperRaw?.quoted_status_id_str,
+    quoted_status_id_str:
+      quotedPost?.id ??
+      (nested ? nestedRaw?.quoted_status_id_str ?? nested?.quotedStatusId : wrapperRaw?.quoted_status_id_str ?? scraperTweet.quotedStatusId),
     retweeted_status_id_str:
       wrapperRaw?.retweeted_status_id_str ?? scraperTweet.retweetedStatusId ?? nestedCandidate?.id,
-    is_quote_status: nested ? Boolean(nestedRaw?.quoted_status_id_str) : Boolean(wrapperRaw?.quoted_status_id_str),
+    is_quote_status: Boolean(
+      quotedPost ||
+      (nested ? nestedRaw?.quoted_status_id_str ?? nested?.quotedStatusId : wrapperRaw?.quoted_status_id_str ?? scraperTweet.quotedStatusId),
+    ),
     in_reply_to_status_id_str: nested ? nestedRaw?.in_reply_to_status_id_str : wrapperRaw?.in_reply_to_status_id_str,
     in_reply_to_user_id_str: nested ? nestedExtras?.in_reply_to_user_id_str : wrapperExtras?.in_reply_to_user_id_str,
     card: nested
@@ -166,6 +197,7 @@ export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTw
       : scraperTweet.isRetweet || nestedCandidate || scraperTweet.retweetedStatusId || wrapperRaw?.retweeted_status_id_str
         ? 'wrapper'
         : undefined,
+    quotedPost,
     user: {
       screen_name: scraperTweet.username,
       id_str: scraperTweet.userId,

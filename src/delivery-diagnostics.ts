@@ -1,5 +1,6 @@
 export type DeliveryFallbackKind =
   | 'quote-screenshot'
+  | 'quote-card'
   | 'quote-link'
   | 'video-link'
   | 'poll-note'
@@ -36,6 +37,8 @@ export function describeDeliveryFallback(event: DeliveryFallbackEvent): string {
   switch (event.kind) {
     case 'quote-screenshot':
       return 'Quote screenshot attached';
+    case 'quote-card':
+      return 'Quoted X post card attached';
     case 'quote-link':
       return 'Quote link fallback';
     case 'video-link':

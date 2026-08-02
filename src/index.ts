@@ -82,6 +82,14 @@ import {
 } from './tweet-cards.js';
 import type { MediaEntity } from './tweet-cards.js';
 import { mapScraperTweetToLocalTweet, type LocalTweet as Tweet } from './x-tweet-mapping.js';
+import {
+  buildQuoteCardMetadata,
+  canonicalQuotedPostUrl,
+  quoteFallbackOrder,
+  removeEmbeddedQuoteUrl,
+  resolveQuoteStrongRef,
+  type QuoteCardMetadata,
+} from './quote-embed.js';
 
 // ESM __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -147,7 +155,7 @@ interface ExternalEmbedCard extends PostEmbed {
     uri: string;
     title: string;
     description: string;
-    thumb?: BlobRef;
+    thumb?: EmbedBlobRef;
   };
 }
 
@@ -1128,6 +1136,27 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<Externa
   }
 }
 
+async function buildSynthesizedQuoteCard(
+  agent: BskyAgent,
+  metadata: QuoteCardMetadata,
+  dryRun: boolean,
+): Promise<ExternalEmbedCard> {
+  const external: ExternalEmbedCard['external'] = {
+    uri: metadata.uri,
+    title: metadata.title,
+    description: metadata.description,
+  };
+  if (metadata.thumbnailUrl && !dryRun) {
+    try {
+      const { buffer, mimeType } = await downloadMedia(metadata.thumbnailUrl, 30_000);
+      external.thumb = await uploadToBluesky(agent, buffer, mimeType);
+    } catch (error) {
+      console.warn(`Could not attach quoted-post card thumbnail: ${describeError(error)}`);
+    }
+  }
+  return { $type: 'app.bsky.embed.external', external };
+}
+
 async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: string): Promise<BlobRef> {
   const sanitizedFilename = filename.split('?')[0] || 'video.mp4';
   console.log(
@@ -1917,57 +1946,96 @@ async function processTweets(
 
     if (tweet.is_quote_status && tweet.quoted_status_id_str) {
       const quoteId = tweet.quoted_status_id_str;
-      const quoteRef = localProcessedMap[quoteId];
-      if (quoteRef?.uri && quoteRef.cid) {
-        console.log(`[${twitterUsername}] 🔄 Found quoted tweet in local history. Natively embedding.`);
-        quoteEmbed = { $type: 'app.bsky.embed.record', record: { uri: quoteRef.uri, cid: quoteRef.cid } };
+      const localQuoteRef = localProcessedMap[quoteId];
+      const crossDestinationQuote = localQuoteRef?.uri && localQuoteRef.cid
+        ? null
+        : dbService.findMigratedXPost(quoteId);
+      const quoteRef = resolveQuoteStrongRef(
+        localQuoteRef,
+        crossDestinationQuote
+          ? { uri: crossDestinationQuote.bsky_uri, cid: crossDestinationQuote.bsky_cid }
+          : null,
+      );
+      if (quoteRef) {
+        console.log(
+          `[${twitterUsername}] 🔄 Found quoted tweet in ${localQuoteRef?.uri ? 'destination' : 'cross-destination'} history. Natively embedding.`,
+        );
+        quoteEmbed = { $type: 'app.bsky.embed.record', record: quoteRef };
       } else {
         const quoteUrlEntity = urls.find((u) => u.expanded_url?.includes(quoteId));
-        const qUrl = quoteUrlEntity?.expanded_url || `https://twitter.com/i/status/${quoteId}`;
+        externalQuoteUrl = canonicalQuotedPostUrl(tweet.quotedPost, quoteId);
+        if (quoteUrlEntity?.expanded_url && !tweet.quotedPost?.username) {
+          externalQuoteUrl = quoteUrlEntity.expanded_url.replace('twitter.com', 'x.com');
+        }
+        console.log(`[${twitterUsername}] 🔗 Quoted tweet has no local Bluesky record: ${externalQuoteUrl}`);
 
-        // Check if it's a self-quote (same user)
-        const isSelfQuote =
-          qUrl.toLowerCase().includes(`twitter.com/${twitterUsername.toLowerCase()}/`) ||
-          qUrl.toLowerCase().includes(`x.com/${twitterUsername.toLowerCase()}/`);
+        // External cards cannot be combined with an image/video embed. When the
+        // quote is the only embed, prefer a deterministic card built from the
+        // scraper payload and only then try X/Open Graph metadata.
+        const synthesized = buildQuoteCardMetadata(tweet.quotedPost, quoteId);
+        const fallbackOrder = quoteFallbackOrder({
+          hasSynthesizedMetadata: Boolean(synthesized),
+          canUseExternalCard: images.length === 0 && !videoBlob,
+          canUseScreenshot: images.length < 4 && !videoBlob,
+        });
+        if (fallbackOrder[0] === 'synthesized-card' && synthesized) {
+          linkCard = await buildSynthesizedQuoteCard(agent, synthesized, dryRun);
+          text = removeEmbeddedQuoteUrl(
+            text,
+            externalQuoteUrl,
+            quoteUrlEntity?.expanded_url ? [quoteUrlEntity.expanded_url] : [],
+          );
+          deliveryFallbacks.push({
+            kind: 'quote-card',
+            reason: 'Quoted X post card synthesized from scraper metadata',
+          });
+        } else if (fallbackOrder[0] === 'open-graph-card') {
+          linkCard = await fetchEmbedUrlCard(agent, externalQuoteUrl);
+          if (linkCard) {
+            text = removeEmbeddedQuoteUrl(
+              text,
+              externalQuoteUrl,
+              quoteUrlEntity?.expanded_url ? [quoteUrlEntity.expanded_url] : [],
+            );
+            deliveryFallbacks.push({
+              kind: 'quote-card',
+              reason: 'Quoted X post Open Graph card attached',
+            });
+          }
+        }
 
-        if (!isSelfQuote) {
-          externalQuoteUrl = qUrl;
-          console.log(`[${twitterUsername}] 🔗 Quoted tweet is external: ${externalQuoteUrl}`);
-
-          // Try to capture screenshot for external QTs if we have space for images
-          if (images.length < 4 && !videoBlob) {
-            const ssResult = await captureTweetScreenshot(externalQuoteUrl);
-            if (ssResult) {
-              try {
-                let blob: EmbedBlobRef;
-                if (dryRun) {
-                  console.log(
-                    `[${twitterUsername}] 🧪 [DRY RUN] Would upload screenshot for quote (${(ssResult.buffer.length / 1024).toFixed(2)} KB)`,
-                  );
-                  blob = {
-                    ref: { toString: () => 'mock-ss-blob' },
-                    mimeType: 'image/png',
-                    size: ssResult.buffer.length,
-                  };
-                } else {
-                  blob = await uploadToBluesky(agent, ssResult.buffer, 'image/png');
-                }
-                images.push({
-                  alt: `Quote Tweet: ${externalQuoteUrl}`,
-                  image: blob,
-                  aspectRatio: { width: ssResult.width, height: ssResult.height },
-                });
-                deliveryFallbacks.push({
-                  kind: 'quote-screenshot',
-                  reason: 'External quote screenshot attached',
-                });
-              } catch {
-                console.warn(`[${twitterUsername}] ⚠️ Failed to upload screenshot blob.`);
+        // Screenshots remain a visual fallback when no native/card embed was
+        // possible and an image slot is available.
+        if (!linkCard && fallbackOrder.includes('screenshot')) {
+          const ssResult = await captureTweetScreenshot(externalQuoteUrl);
+          if (ssResult) {
+            try {
+              let blob: EmbedBlobRef;
+              if (dryRun) {
+                console.log(
+                  `[${twitterUsername}] 🧪 [DRY RUN] Would upload screenshot for quote (${(ssResult.buffer.length / 1024).toFixed(2)} KB)`,
+                );
+                blob = {
+                  ref: { toString: () => 'mock-ss-blob' },
+                  mimeType: 'image/png',
+                  size: ssResult.buffer.length,
+                };
+              } else {
+                blob = await uploadToBluesky(agent, ssResult.buffer, 'image/png');
               }
+              images.push({
+                alt: `Quote Tweet: ${externalQuoteUrl}`,
+                image: blob,
+                aspectRatio: { width: ssResult.width, height: ssResult.height },
+              });
+              deliveryFallbacks.push({
+                kind: 'quote-screenshot',
+                reason: 'External quote screenshot attached',
+              });
+            } catch {
+              console.warn(`[${twitterUsername}] ⚠️ Failed to upload screenshot blob.`);
             }
           }
-        } else {
-          console.log(`[${twitterUsername}] 🔁 Quoted tweet is a self-quote, skipping link.`);
         }
       }
     } else if ((images.length === 0 && !videoBlob) || isSponsoredCard) {
@@ -2001,9 +2069,9 @@ async function processTweets(
       }
     }
 
-    // Only append link for external quotes IF we couldn't natively embed it OR screenshot it
+    // Only append a raw link when native, card, and screenshot embeds all failed.
     const hasScreenshot = images.some((img) => img.alt.startsWith('Quote Tweet:'));
-    if (externalQuoteUrl && !quoteEmbed && !hasScreenshot && !text.includes(externalQuoteUrl)) {
+    if (externalQuoteUrl && !quoteEmbed && !linkCard && !hasScreenshot && !text.includes(externalQuoteUrl)) {
       text += `\n\nQT: ${externalQuoteUrl}`;
       deliveryFallbacks.push({
         kind: 'quote-link',

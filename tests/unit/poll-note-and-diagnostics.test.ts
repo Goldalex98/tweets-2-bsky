@@ -45,14 +45,16 @@ describe('delivery diagnostics helpers', () => {
     const raw = serializeDeliveryDiagnostics([
       { kind: 'video-link', reason: 'Video too long (200.0s)' },
       { kind: 'poll-note', reason: 'Poll mirrored as text note with X link' },
+      { kind: 'quote-card', reason: 'Quoted X post card synthesized from scraper metadata' },
       { kind: 'repost-wrapper-fallback', reason: 'Nested content missing' },
     ]);
     expect(raw).toBeTruthy();
     const parsed = parseDeliveryDiagnostics(raw);
-    expect(parsed).toHaveLength(3);
+    expect(parsed).toHaveLength(4);
     const first = parsed[0];
     expect(first).toBeDefined();
     expect(describeDeliveryFallback(first)).toBe('Video link fallback');
-    expect(describeDeliveryFallback(parsed[2])).toBe('Repost content unavailable; linked to X fallback');
+    expect(describeDeliveryFallback(parsed[2])).toBe('Quoted X post card attached');
+    expect(describeDeliveryFallback(parsed[3])).toBe('Repost content unavailable; linked to X fallback');
   });
 });

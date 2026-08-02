@@ -451,6 +451,22 @@ export const dbService = {
     return rowToProcessedTweet(row);
   },
 
+  findMigratedXPost(externalPostId: string): ProcessedTweet | null {
+    const row = db
+      .prepare(
+        `SELECT * FROM processed_tweets
+         WHERE source_type = 'x'
+           AND (external_post_id = ? OR twitter_id = ?)
+           AND status = 'migrated'
+           AND bsky_uri IS NOT NULL
+           AND bsky_cid IS NOT NULL
+         ORDER BY COALESCE(posted_at, 0) ASC, rowid ASC
+         LIMIT 1`,
+      )
+      .get(externalPostId, externalPostId) as ProcessedTweetRow | undefined;
+    return row ? rowToProcessedTweet(row) : null;
+  },
+
   saveTweet(tweet: ProcessedTweet) {
     // Preserve created_at on REPLACE when the caller still has it (e.g. restoring
     // a skip after a colliding override-requeue). Dropping it would stamp

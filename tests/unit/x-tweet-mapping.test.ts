@@ -167,6 +167,96 @@ describe('X scraper tweet mapping', () => {
     expect(mapped.extended_entities?.media?.map((media) => media.type)).toEqual(['photo', 'video']);
   });
 
+  test('retains complete quoted-post metadata from inside a repost', () => {
+    const mapped = mapScraperTweetToLocalTweet(
+      scraperTweet({
+        id: 'wrapper-quote',
+        username: 'source',
+        isRetweet: true,
+        text: 'RT @author: Commentary on a quoted post…',
+        urls: [],
+        photos: [],
+        videos: [],
+        hashtags: [],
+        mentions: [],
+        thread: [],
+        retweetedStatus: {
+          id: 'repost-body',
+          username: 'author',
+          text: 'Commentary on a quoted post',
+          quotedStatusId: 'quoted-99',
+          urls: [],
+          photos: [],
+          videos: [],
+          hashtags: [],
+          mentions: [],
+          thread: [],
+          quotedStatus: {
+            id: 'quoted-99',
+            username: 'quoted_author',
+            text: 'Fallback parsed text',
+            permanentUrl: 'https://twitter.com/quoted_author/status/quoted-99',
+            sensitiveContent: false,
+            urls: [],
+            photos: [{ id: 'photo-1', url: 'https://cdn.example.invalid/quoted.jpg', alt_text: 'Quoted image' }],
+            videos: [],
+            hashtags: [],
+            mentions: [],
+            thread: [],
+            __raw_UNSTABLE: { full_text: 'Complete quoted post text from raw data.' },
+          },
+        },
+      }),
+    );
+
+    expect(mapped.quoted_status_id_str).toBe('quoted-99');
+    expect(mapped.is_quote_status).toBe(true);
+    expect(mapped.quotedPost).toEqual({
+      id: 'quoted-99',
+      username: 'quoted_author',
+      text: 'Complete quoted post text from raw data.',
+      permanentUrl: 'https://x.com/quoted_author/status/quoted-99',
+      thumbnailUrl: 'https://cdn.example.invalid/quoted.jpg',
+      sensitive: false,
+    });
+  });
+
+  test('retains parsed quoted-post metadata without unstable raw data', () => {
+    const mapped = mapScraperTweetToLocalTweet(
+      scraperTweet({
+        id: 'direct-quote',
+        username: 'source',
+        text: 'Direct quote commentary',
+        quotedStatusId: 'quoted-parsed',
+        urls: [],
+        photos: [],
+        videos: [],
+        hashtags: [],
+        mentions: [],
+        thread: [],
+        quotedStatus: {
+          id: 'quoted-parsed',
+          username: 'parsed_author',
+          text: 'Complete parsed quote text.',
+          urls: [],
+          photos: [],
+          videos: [{ id: 'video-1', preview: 'https://cdn.example.invalid/preview.jpg', url: 'https://cdn.example.invalid/video.mp4' }],
+          hashtags: [],
+          mentions: [],
+          thread: [],
+        },
+      }),
+    );
+
+    expect(mapped.quotedPost).toMatchObject({
+      id: 'quoted-parsed',
+      username: 'parsed_author',
+      text: 'Complete parsed quote text.',
+      permanentUrl: 'https://x.com/parsed_author/status/quoted-parsed',
+      thumbnailUrl: 'https://cdn.example.invalid/preview.jpg',
+    });
+  });
+
   test('keeps the wrapper text when nested repost data is missing', () => {
     const mapped = mapScraperTweetToLocalTweet(
       scraperTweet({

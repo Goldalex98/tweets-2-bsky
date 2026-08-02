@@ -146,7 +146,7 @@ Each cycle splits discovery from delivery so posting never delays detection:
 1. **Fetch sweep** — enabled sources become eligible according to inherited, fixed, or adaptive polling policies and are checked on scheduler wakes through a global X rate limiter. Per-source policies and runtime backoff state are managed from the destination editor or Settings → Scheduler. New posts are written to `post_queue` in SQLite under the data directory.
 2. **Post workers** — destination-locked workers drain the queue in parallel. A slow upload on one destination does not block others.
 
-The queue and processed history survive restarts. Repeated failures are parked (dashboard Retry/Clear) instead of retrying forever. Long threads checkpoint after each Bluesky chunk and resume after crash or retry.
+The queue and processed history survive restarts. Repeated failures are parked (dashboard Retry/Clear) instead of retrying forever. Long threads checkpoint after each Bluesky chunk and resume after crash or retry. Quoted X posts prefer native Bluesky record embeds; otherwise retained scraper metadata produces an external quote card before screenshot or plain-link fallbacks.
 
 Operational endpoints:
 

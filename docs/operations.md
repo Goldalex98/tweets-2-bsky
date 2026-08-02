@@ -36,6 +36,8 @@ Posting attribution is `never`, `multiple-sources`, or `always`. Preview uses th
 
 X polls are not Bluesky polls: the mirror appends a text note with choices and the original X link, and attaches an external URL card when the post has no other embed. Quote, video, and repost-wrapper fallbacks are recorded in `delivery_diagnostics` on queue/history rows and shown in the Activity dashboard. Reposts retain the wrapper status identity and always keep an X status link; when nested original content is unavailable, wrapper text is retained instead of silently dropping the repost.
 
+Quoted X posts use the most native representation available. A quoted status already mirrored anywhere by this installation is embedded as its Bluesky record, including across destinations. Otherwise, when the quote is the only embed, the scraper's retained quoted-post author, complete text, canonical X URL, and safe thumbnail produce an external card without a secondary X fetch. Open Graph metadata, a screenshot, and finally a plain `QT:` link are attempted in that order when richer data is unavailable. Existing published records are not rewritten automatically.
+
 Profile mutations require both `allowProfileMutation` and the specific profile, label, suffix, or pin policy. Preview and credential validation are read-only. Aggregate destinations do not infer a profile source.
 
 Routing filters run before moderation and duplicate suppression. Destination and route moderation support keywords, domains, source blocks, sensitive-content behavior, and dry-run traces. AI image alt text and each text capability are independent opt-ins; previews disclose what is sent.

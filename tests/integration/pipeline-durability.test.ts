@@ -435,3 +435,33 @@ test('a queue claim takes a destination lease and every row keeps a stable queue
   expect(result.itemFoundByQueueId).toBe('1');
   expect(result.remainingCount).toBe(2);
 });
+
+test('native quote lookup can reuse a migrated X record from another destination', async () => {
+  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+    const { dbService } = await import(${dbModule});
+    dbService.saveTweet({
+      twitter_id: 'quoted-1', twitter_username: 'source', bsky_identifier: 'failed.example',
+      source_type: 'x', external_post_id: 'quoted-1', destination_id: 'failed-destination',
+      status: 'failed', bsky_uri: 'at://failed/app.bsky.feed.post/one', bsky_cid: 'failed-cid',
+    });
+    dbService.saveTweet({
+      twitter_id: 'api:quoted-1', twitter_username: 'api-source', bsky_identifier: 'api.example',
+      source_type: 'api', external_post_id: 'quoted-1', destination_id: 'api-destination',
+      status: 'migrated', bsky_uri: 'at://api/app.bsky.feed.post/one', bsky_cid: 'api-cid',
+    });
+    dbService.saveTweet({
+      twitter_id: 'quoted-1', twitter_username: 'source', bsky_identifier: 'mirror.example',
+      source_type: 'x', external_post_id: 'quoted-1', destination_id: 'mirror-destination',
+      status: 'migrated', bsky_uri: 'at://mirror/app.bsky.feed.post/one', bsky_cid: 'mirror-cid',
+    });
+    const found = dbService.findMigratedXPost('quoted-1');
+    await Bun.write(${resultPath}, JSON.stringify(found));
+  `);
+
+  expect(result).toMatchObject({
+    destination_id: 'mirror-destination',
+    bsky_uri: 'at://mirror/app.bsky.feed.post/one',
+    bsky_cid: 'mirror-cid',
+    status: 'migrated',
+  });
+});
