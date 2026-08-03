@@ -65,6 +65,15 @@ describe('provider-neutral normalized posts', () => {
     ).toThrow('sizeBytes');
   });
 
+  test('treats blank optional media alt text as absent', () => {
+    const normalized = validateNormalizedPost({
+      ...post,
+      media: [{ ...post.media[0], suppliedAlt: '', alt: '' }],
+    });
+    expect(normalized.media[0]?.alt).toBeUndefined();
+    expect(normalized.media[0]?.suppliedAlt).toBeUndefined();
+  });
+
   test('adapts X replies, quotes, media, and URLs once at the boundary', () => {
     const normalized = normalizeXPost(
       {
@@ -92,6 +101,26 @@ describe('provider-neutral normalized posts', () => {
       quotedPost: { externalId: '30' },
       media: [{ type: 'image', mimeType: 'image/jpeg' }],
     });
+  });
+
+  test('drops blank X media alt text instead of aborting the sweep', () => {
+    const normalized = normalizeXPost(
+      {
+        id_str: '43',
+        full_text: 'photo without alt text',
+        created_at: '2026-07-24T12:00:00Z',
+        extended_entities: {
+          media: [
+            { type: 'photo', media_url_https: 'https://cdn.example.com/image.jpg', ext_alt_text: '' },
+          ],
+        },
+      },
+      'source-x',
+      'Example',
+    );
+    expect(normalized.media).toEqual([
+      expect.objectContaining({ type: 'image', alt: undefined, suppliedAlt: undefined }),
+    ]);
   });
 
   test('carries the author and reply-target identity X supplies', () => {

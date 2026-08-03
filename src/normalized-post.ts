@@ -193,7 +193,9 @@ function normalizeMedia(
   };
   const suppliedAltValue = record.alt ?? record.suppliedAlt;
   const suppliedAlt =
-    suppliedAltValue === undefined
+    suppliedAltValue === undefined ||
+    suppliedAltValue === null ||
+    (typeof suppliedAltValue === 'string' && suppliedAltValue.trim() === '')
       ? undefined
       : requiredString(suppliedAltValue, `media[${index}].alt`, 10_000);
   if (suppliedAlt && graphemeCount(suppliedAlt) > limits.maxAltGraphemes) {
@@ -292,6 +294,7 @@ function xMediaDescriptor(value: Record<string, unknown>): NormalizedMediaDescri
     value.mime_type ??
     (type === 'image' ? 'image/jpeg' : type === 'gif' ? 'image/gif' : 'video/mp4');
   const sizeBytes = value.sizeBytes;
+  const suppliedAlt = typeof value.ext_alt_text === 'string' ? value.ext_alt_text.trim() || undefined : undefined;
   return {
     type,
     url: normalizePublicHttpUrl(url),
@@ -302,8 +305,8 @@ function xMediaDescriptor(value: Record<string, unknown>): NormalizedMediaDescri
       typeof sizeBytes === 'number' && Number.isSafeInteger(sizeBytes) && sizeBytes > 0 ? sizeBytes : 1,
     width: Number.isInteger(value.width) ? (value.width as number) : undefined,
     height: Number.isInteger(value.height) ? (value.height as number) : undefined,
-    alt: typeof value.ext_alt_text === 'string' ? value.ext_alt_text : undefined,
-    suppliedAlt: typeof value.ext_alt_text === 'string' ? value.ext_alt_text : undefined,
+    alt: suppliedAlt,
+    suppliedAlt,
   };
 }
 
