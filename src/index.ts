@@ -2596,6 +2596,12 @@ async function executeCanonicalXSourceSweep(
       rawTweetByPost.set(`${source.id}\0${normalized.externalId}`, tweet);
       return normalized;
     },
+    onNormalizeError: (_tweet, error, source) => {
+      logPipeline('Sweep', `Skipped an invalid post from @${source.username}: ${describeError(error)}`, true, {
+        sweepId,
+        sourceId: source.id,
+      });
+    },
     identify: (post) => post.externalId,
     prepareRouteCandidates: (posts, { source, route }) =>
       prepareRouteInitialImportCandidates({

@@ -19,6 +19,7 @@ export interface CanonicalSweepConfig {
 export interface SourceSweepDependencies<Raw, Normalized> {
   fetch(source: Source): Promise<Raw[]>;
   normalize(raw: Raw, source: Source): Normalized;
+  onNormalizeError?(raw: Raw, error: unknown, source: Source): void | Promise<void>;
   identify(candidate: Normalized): string;
   prepareRouteCandidates?(
     candidates: readonly Normalized[],
@@ -87,7 +88,15 @@ export class CanonicalSourceSweepService<Raw, Normalized> {
       result.fetchedSources += 1;
       result.fetchedPosts += raw.length;
       result.fetchesBySource[source.id] = (result.fetchesBySource[source.id] ?? 0) + 1;
-      const normalized = raw.map((item) => this.dependencies.normalize(item, source));
+      const normalized: Normalized[] = [];
+      for (const item of raw) {
+        try {
+          normalized.push(this.dependencies.normalize(item, source));
+        } catch (error) {
+          result.filteredPosts += 1;
+          await this.dependencies.onNormalizeError?.(item, error, source);
+        }
+      }
 
       for (const route of routes) {
         const destination = destinationById.get(route.destinationId);

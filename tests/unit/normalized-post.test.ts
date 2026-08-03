@@ -123,6 +123,30 @@ describe('provider-neutral normalized posts', () => {
     ]);
   });
 
+  test('drops invalid X media alt text instead of aborting the sweep', () => {
+    const normalized = normalizeXPost(
+      {
+        id_str: '44',
+        full_text: 'photo with malformed alt text',
+        created_at: '2026-07-24T12:00:00Z',
+        extended_entities: {
+          media: [
+            {
+              type: 'photo',
+              media_url_https: 'https://cdn.example.com/image.jpg',
+              ext_alt_text: 'first line\nsecond line',
+            },
+          ],
+        },
+      },
+      'source-x',
+      'Example',
+    );
+    expect(normalized.media).toEqual([
+      expect.objectContaining({ type: 'image', alt: undefined, suppliedAlt: undefined }),
+    ]);
+  });
+
   test('carries the author and reply-target identity X supplies', () => {
     const normalized = normalizeXPost(
       {

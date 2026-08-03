@@ -158,4 +158,31 @@ describe('canonical source sweep', () => {
     expect(fetches).toBe(1);
     expect(enqueued).toEqual({ a: 0, b: 1 });
   });
+
+  test('isolates a malformed post instead of aborting the source sweep', async () => {
+    const normalizationErrors: number[] = [];
+    const service = new CanonicalSourceSweepService<number, number>({
+      fetch: async () => [100, 101, 102],
+      normalize: (value) => {
+        if (value === 101) throw new Error('malformed post');
+        return value;
+      },
+      onNormalizeError: (value) => {
+        normalizationErrors.push(value);
+      },
+      identify: String,
+      applySourcePolicy: () => ({ allowed: true, reason: 'allowed', policyVersion: 2 }),
+      isDestinationDuplicate: () => false,
+      enqueue: (values) => values.length,
+    });
+
+    const result = await service.execute({
+      sources: [source],
+      destinations: [destination('a')],
+      routes: [route('a')],
+    });
+
+    expect(normalizationErrors).toEqual([101]);
+    expect(result).toMatchObject({ fetchedPosts: 3, filteredPosts: 1, enqueuedPosts: 2 });
+  });
 });

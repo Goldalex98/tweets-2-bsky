@@ -294,7 +294,20 @@ function xMediaDescriptor(value: Record<string, unknown>): NormalizedMediaDescri
     value.mime_type ??
     (type === 'image' ? 'image/jpeg' : type === 'gif' ? 'image/gif' : 'video/mp4');
   const sizeBytes = value.sizeBytes;
-  const suppliedAlt = typeof value.ext_alt_text === 'string' ? value.ext_alt_text.trim() || undefined : undefined;
+  const rawAlt = typeof value.ext_alt_text === 'string' ? value.ext_alt_text.trim() : '';
+  // X alt text is optional and comes from an untrusted scraper payload. Drop
+  // values that cannot satisfy the canonical contract instead of allowing one
+  // malformed media descriptor to abort the daemon's entire sweep.
+  const suppliedAlt =
+    rawAlt &&
+    rawAlt.length <= 10_000 &&
+    graphemeCount(rawAlt) <= DEFAULT_NORMALIZED_POST_LIMITS.maxAltGraphemes &&
+    ![...rawAlt].some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    })
+      ? rawAlt
+      : undefined;
   return {
     type,
     url: normalizePublicHttpUrl(url),
