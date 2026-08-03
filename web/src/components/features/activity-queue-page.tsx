@@ -82,7 +82,9 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Durable Queue</CardTitle>
-          <CardDescription>Pending, active, and parked deliveries. Active items are protected from deletion.</CardDescription>
+          <CardDescription>
+            Pending, active, and parked deliveries. Active items are protected from deletion.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 pt-0" aria-live="polite">
           {props.queueItems.map((item) => {
@@ -96,18 +98,31 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={item.status === 'failed' ? 'danger' : item.status === 'processing' ? 'warning' : 'outline'}>
+                      <Badge
+                        variant={
+                          item.status === 'failed' ? 'danger' : item.status === 'processing' ? 'warning' : 'outline'
+                        }
+                      >
                         {item.status}
                       </Badge>
-                      <span className="text-xs text-muted-foreground">queued {ageMinutes}m · {item.attempts} attempt(s)</span>
+                      <span className="text-xs text-muted-foreground">
+                        queued {ageMinutes}m · {item.attempts} attempt(s)
+                      </span>
                       {item.error_category ? <Badge variant="outline">{item.error_category}</Badge> : null}
                     </div>
-                    <p className="truncate font-medium">@{item.twitter_username}: {item.tweet_text || item.twitter_id}</p>
-                    <p className="text-xs text-muted-foreground">
-                      Policy v{item.policy_version} · {item.policy_snapshot ? 'snapshotted behavior' : 'current destination behavior'} ·{' '}
-                      {item.policyDifference?.changed ? describePolicyDifference(item.policyDifference.fields) : 'matches current policy'}
+                    <p className="truncate font-medium">
+                      @{item.twitter_username}: {item.tweet_text || item.twitter_id}
                     </p>
-                    {item.error_message ? <p className="max-w-3xl text-xs text-red-600 dark:text-red-400">{item.error_message}</p> : null}
+                    <p className="text-xs text-muted-foreground">
+                      Policy v{item.policy_version} ·{' '}
+                      {item.policy_snapshot ? 'snapshotted behavior' : 'current destination behavior'} ·{' '}
+                      {item.policyDifference?.changed
+                        ? describePolicyDifference(item.policyDifference.fields)
+                        : 'matches current policy'}
+                    </p>
+                    {item.error_message ? (
+                      <p className="max-w-3xl text-xs text-red-600 dark:text-red-400">{item.error_message}</p>
+                    ) : null}
                     {parseDiagnostics(item.delivery_diagnostics).length > 0 ? (
                       <div className="flex flex-wrap gap-1 pt-1" data-testid="queue-delivery-fallbacks">
                         {parseDiagnostics(item.delivery_diagnostics).map((event) => (
@@ -119,19 +134,42 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                     ) : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {sourceUrl ? <a className={buttonVariants({ size: 'sm', variant: 'outline' })} href={sourceUrl} target="_blank" rel="noreferrer">Source</a> : null}
-                    <Button size="sm" variant="outline" onClick={() => void props.copyDiagnostic(item)}>Copy diagnostic</Button>
-                    {props.canReevaluateQueue && item.status !== 'processing' && item.policyDifference?.changed ? (
-                      <Button size="sm" variant="outline" onClick={() => void props.reevaluatePolicy(item)}>Use current policy</Button>
+                    {sourceUrl ? (
+                      <a
+                        className={buttonVariants({ size: 'sm', variant: 'outline' })}
+                        href={sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Source
+                      </a>
                     ) : null}
-                    {item.status === 'failed' ? <Button size="sm" onClick={() => void props.operateItem(item, 'retry')}>Retry</Button> : null}
-                    {item.status === 'pending' ? <Button size="sm" variant="destructive" onClick={() => void props.operateItem(item, 'cancel')}>Cancel</Button> : null}
+                    <Button size="sm" variant="outline" onClick={() => void props.copyDiagnostic(item)}>
+                      Copy diagnostic
+                    </Button>
+                    {props.canReevaluateQueue && item.status !== 'processing' && item.policyDifference?.changed ? (
+                      <Button size="sm" variant="outline" onClick={() => void props.reevaluatePolicy(item)}>
+                        Use current policy
+                      </Button>
+                    ) : null}
+                    {item.status === 'failed' ? (
+                      <Button size="sm" onClick={() => void props.operateItem(item, 'retry')}>
+                        Retry
+                      </Button>
+                    ) : null}
+                    {item.status === 'pending' ? (
+                      <Button size="sm" variant="destructive" onClick={() => void props.operateItem(item, 'cancel')}>
+                        Cancel
+                      </Button>
+                    ) : null}
                   </div>
                 </div>
               </article>
             );
           })}
-          {props.queueItems.length === 0 ? <p className="text-sm text-muted-foreground">The durable queue is empty.</p> : null}
+          {props.queueItems.length === 0 ? (
+            <p className="text-sm text-muted-foreground">The durable queue is empty.</p>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -139,14 +177,26 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
         <CardHeader className="pb-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
-              <CardTitle className="flex items-center gap-2"><History className="h-4 w-4" />Recent Activity</CardTitle>
-              <CardDescription>Latest migration outcomes from the processing database.</CardDescription>
+              <CardTitle className="flex items-center gap-2">
+                <History className="h-4 w-4" />
+                Recent Activity
+              </CardTitle>
+              <CardDescription>Latest delivery outcomes from the processing database.</CardDescription>
             </div>
             <div className="w-full max-w-xs">
               <Label htmlFor="activity-group-filter">Filter group</Label>
-              <select id="activity-group-filter" className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={props.groupFilter} onChange={(event) => props.setGroupFilter(event.target.value)}>
+              <select
+                id="activity-group-filter"
+                className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={props.groupFilter}
+                onChange={(event) => props.setGroupFilter(event.target.value)}
+              >
                 <option value="all">All folders</option>
-                {props.groupOptions.map((group) => <option key={group.key} value={group.key}>{group.emoji} {group.name}</option>)}
+                {props.groupOptions.map((group) => (
+                  <option key={group.key} value={group.key}>
+                    {group.emoji} {group.name}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
@@ -155,29 +205,72 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
           <div className="overflow-x-auto">
             <table className="min-w-full text-left text-sm">
               <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                <tr><th className="px-2 py-3">Time</th><th className="px-2 py-3">Twitter User</th><th className="px-2 py-3">Group</th><th className="px-2 py-3">Status</th><th className="px-2 py-3">Details</th><th className="px-2 py-3 text-right">Links</th></tr>
+                <tr>
+                  <th className="px-2 py-3">Time</th>
+                  <th className="px-2 py-3">Twitter User</th>
+                  <th className="px-2 py-3">Group</th>
+                  <th className="px-2 py-3">Status</th>
+                  <th className="px-2 py-3">Details</th>
+                  <th className="px-2 py-3 text-right">Links</th>
+                </tr>
               </thead>
               <tbody>
                 {props.recentActivity.map((activity, index) => {
                   const destinationUrl = props.getDestinationUrl(activity);
                   const sourceUrl = props.getSourceUrl(activity.twitter_username, activity.twitter_id);
                   const group = props.getActivityGroup(activity);
-                  const canOverride = activity.status === 'skipped' && activity.destination_id && activity.retained_until && activity.retained_until > Date.now() && !activity.override_requeued_at && props.canOverrideSkipped;
+                  const canOverride =
+                    activity.status === 'skipped' &&
+                    activity.destination_id &&
+                    activity.retained_until &&
+                    activity.retained_until > Date.now() &&
+                    !activity.override_requeued_at &&
+                    props.canOverrideSkipped;
                   return (
-                    <tr key={`${activity.twitter_id}-${activity.created_at || index}`} className="interactive-row border-b border-border/60 last:border-0">
-                      <td className="px-2 py-3 align-top text-xs text-muted-foreground">{formatLocalTime(activity.created_at)}</td>
-                      <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
-                      <td className="px-2 py-3 align-top"><Badge variant="outline">{group.emoji} {group.name}</Badge></td>
-                      <td className="px-2 py-3 align-top"><Badge variant={activity.status === 'migrated' ? 'success' : activity.status === 'failed' ? 'danger' : 'outline'}>{activity.status}</Badge></td>
+                    <tr
+                      key={`${activity.twitter_id}-${activity.created_at || index}`}
+                      className="interactive-row border-b border-border/60 last:border-0"
+                    >
                       <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                        <div className="max-w-[340px] truncate">{activity.tweet_text || `Tweet ID: ${activity.twitter_id}`}</div>
+                        {formatLocalTime(activity.created_at)}
+                      </td>
+                      <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
+                      <td className="px-2 py-3 align-top">
+                        <Badge variant="outline">
+                          {group.emoji} {group.name}
+                        </Badge>
+                      </td>
+                      <td className="px-2 py-3 align-top">
+                        <Badge
+                          variant={
+                            activity.status === 'migrated'
+                              ? 'success'
+                              : activity.status === 'failed'
+                                ? 'danger'
+                                : 'outline'
+                          }
+                        >
+                          {activity.status}
+                        </Badge>
+                      </td>
+                      <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                        <div className="max-w-[340px] truncate">
+                          {activity.tweet_text || `Tweet ID: ${activity.twitter_id}`}
+                        </div>
                         {activity.skip_reason ? <div>Reason: {activity.skip_reason}</div> : null}
                         {activity.error_category ? <div>Category: {activity.error_category}</div> : null}
-                        <div>Policy v{activity.policy_version ?? 1} · {activity.policy_snapshot ? 'snapshotted behavior' : 'current behavior'}</div>
+                        <div>
+                          Policy v{activity.policy_version ?? 1} ·{' '}
+                          {activity.policy_snapshot ? 'snapshotted behavior' : 'current behavior'}
+                        </div>
                         {parseDiagnostics(activity.delivery_diagnostics).length > 0 ? (
                           <div className="mt-1 flex flex-wrap gap-1">
                             {parseDiagnostics(activity.delivery_diagnostics).map((event) => (
-                              <Badge key={`${activity.twitter_id}-${event.kind}`} variant="outline" title={event.reason}>
+                              <Badge
+                                key={`${activity.twitter_id}-${event.kind}`}
+                                variant="outline"
+                                title={event.reason}
+                              >
                                 {event.kind}
                               </Badge>
                             ))}
@@ -186,15 +279,47 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                       </td>
                       <td className="px-2 py-3 align-top text-right">
                         <div className="flex flex-col items-end gap-1">
-                          {sourceUrl ? <a className="inline-flex items-center text-xs underline-offset-4 hover:underline" href={sourceUrl} target="_blank" rel="noreferrer">Source<ArrowUpRight className="ml-1 h-3 w-3" /></a> : null}
-                          {destinationUrl ? <a className="inline-flex items-center text-xs underline-offset-4 hover:underline" href={destinationUrl} target="_blank" rel="noreferrer">Bluesky<ArrowUpRight className="ml-1 h-3 w-3" /></a> : <span className="text-xs text-muted-foreground">--</span>}
-                          {canOverride ? <Button size="sm" variant="outline" onClick={() => void props.overrideSkipped(activity)}>Override &amp; requeue</Button> : null}
+                          {sourceUrl ? (
+                            <a
+                              className="inline-flex items-center text-xs underline-offset-4 hover:underline"
+                              href={sourceUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Source
+                              <ArrowUpRight className="ml-1 h-3 w-3" />
+                            </a>
+                          ) : null}
+                          {destinationUrl ? (
+                            <a
+                              className="inline-flex items-center text-xs underline-offset-4 hover:underline"
+                              href={destinationUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Bluesky
+                              <ArrowUpRight className="ml-1 h-3 w-3" />
+                            </a>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">--</span>
+                          )}
+                          {canOverride ? (
+                            <Button size="sm" variant="outline" onClick={() => void props.overrideSkipped(activity)}>
+                              Override &amp; requeue
+                            </Button>
+                          ) : null}
                         </div>
                       </td>
                     </tr>
                   );
                 })}
-                {props.recentActivity.length === 0 ? <tr><td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={6}>No activity for this filter.</td></tr> : null}
+                {props.recentActivity.length === 0 ? (
+                  <tr>
+                    <td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={6}>
+                      No activity for this filter.
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>

@@ -1,13 +1,5 @@
-import {
-  Bot,
-  ClipboardList,
-  Filter,
-  Shield,
-  Truck,
-  UserRound,
-  X,
-} from 'lucide-react';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { Bot, ClipboardList, Filter, Shield, Truck, UserRound, X } from 'lucide-react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { Dialog } from '../../components/ui/dialog';
@@ -20,7 +12,7 @@ import { ConnectionList } from './connection-list';
 import { ContentPolicyPanel } from './content-policy-panel';
 import { DestinationAccountCard } from './destination-account-card';
 import { HEALTH_BADGE_VARIANT, summarizeDestinationHealth } from './destination-health';
-import { MigrationReviewPanel } from './migration-review-panel';
+import { InitialImportModeControl } from './initial-import-mode-control';
 import {
   AttributionPolicyFields,
   DestinationAiOverridesFields,
@@ -33,6 +25,8 @@ import { SourceFiltersPanel } from './source-filters-panel';
 import { SourcePollingPanel } from './source-polling-panel';
 import type {
   AccountMapping,
+  DefaultInitialImportMode,
+  InitialImportMode,
   MappingFormState,
   SourceFilterPolicy,
   SourceParseSummary,
@@ -51,9 +45,7 @@ export const DESTINATION_SECTION_IDS = [
 export type DestinationSectionId = (typeof DESTINATION_SECTION_IDS)[number];
 
 export function resolveDestinationSection(value: string | undefined): DestinationSectionId {
-  return DESTINATION_SECTION_IDS.includes(value as DestinationSectionId)
-    ? (value as DestinationSectionId)
-    : 'overview';
+  return DESTINATION_SECTION_IDS.includes(value as DestinationSectionId) ? (value as DestinationSectionId) : 'overview';
 }
 
 interface EditDestinationDialogProps {
@@ -64,7 +56,8 @@ interface EditDestinationDialogProps {
   parseSummary: SourceParseSummary;
   busy: boolean;
   schedulerIntervalMinutes?: number;
-  canReviewMigration: boolean;
+  globalInitialImportDefault: DefaultInitialImportMode;
+  addSourcesInitialImportMode: InitialImportMode;
   /** Managed accounts that are unlinked, plus this destination's own account. */
   blueskyAccounts?: readonly BlueskyAccountView[];
   canChangeAccount?: boolean;
@@ -73,14 +66,15 @@ interface EditDestinationDialogProps {
   onSubmit(event: FormEvent<HTMLFormElement>): void;
   onFormChange(update: (current: MappingFormState) => MappingFormState): void;
   onSourceInputChange(value: string): void;
+  onAddSourcesInitialImportModeChange(value: InitialImportMode): void;
   /** Returns the first newly added username when sources were persisted. */
   onAddSources(): Promise<string | undefined>;
   onRemoveSource(username: string): void;
   onManageAccount(): void;
   onSectionChange?(section: DestinationSectionId): void;
-  onDismissMigrationReview(): void;
   onSaveSourceFilters(username: string, filters: SourceFilterPolicy): Promise<void>;
   onSaveSourceSchedule?(username: string, schedule: SourceSchedulePolicy): Promise<void>;
+  onSaveSourceInitialImportMode?(username: string, mode: InitialImportMode): Promise<void>;
   onPreviewSourceFilter(
     username: string,
     filters: SourceFilterPolicy,
@@ -194,20 +188,14 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
   };
 
   const requestClose = () => {
-    if (
-      !confirmDiscardIfDirty('You have unsaved destination settings. Close without saving?')
-    ) {
+    if (!confirmDiscardIfDirty('You have unsaved destination settings. Close without saving?')) {
       return;
     }
     props.onClose();
   };
 
   const requestManageAccount = () => {
-    if (
-      !confirmDiscardIfDirty(
-        'You have unsaved destination settings. Leave for Settings without saving?',
-      )
-    ) {
+    if (!confirmDiscardIfDirty('You have unsaved destination settings. Leave for Settings without saving?')) {
       return;
     }
     props.onManageAccount();
@@ -276,9 +264,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                       id="edit-owner"
                       data-autofocus
                       value={props.form.owner}
-                      onChange={(event) =>
-                        props.onFormChange((current) => ({ ...current, owner: event.target.value }))
-                      }
+                      onChange={(event) => props.onFormChange((current) => ({ ...current, owner: event.target.value }))}
                     />
                   </div>
                   <div>
@@ -338,7 +324,10 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {props.sources.map((username) => (
-                      <span key={username} className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm">
+                      <span
+                        key={username}
+                        className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm"
+                      >
                         @{username}
                         <button
                           type="button"
@@ -361,6 +350,13 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                     Source add/remove applies immediately. Filters and polling have their own save actions; owner,
                     folder, attribution, AI, and profile changes use Save Destination.
                   </p>
+                  <InitialImportModeControl
+                    id="edit-add-sources-initial-import-mode"
+                    value={props.addSourcesInitialImportMode}
+                    globalDefault={props.globalInitialImportDefault}
+                    onChange={props.onAddSourcesInitialImportModeChange}
+                    disabled={props.busy}
+                  />
                 </div>
                 <SourceFiltersPanel
                   mapping={props.mapping}
@@ -377,12 +373,23 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                       username: source.username,
                       schedule: source.schedule,
                       runtime: source.runtime,
+                      initialImportMode:
+                        source.initialImportMode ?? props.mapping?.initialImportModesByUsername?.[source.username],
                     }))}
                     globalIntervalMinutes={props.schedulerIntervalMinutes ?? 5}
                     busy={props.busy}
                     selectedUsername={focusedSourceUsername}
                     onSelectedUsernameChange={setFocusedSourceUsername}
-                    onSave={(_option, schedule) => props.onSaveSourceSchedule?.(_option.username, schedule) ?? Promise.resolve()}
+                    onSave={(_option, schedule) =>
+                      props.onSaveSourceSchedule?.(_option.username, schedule) ?? Promise.resolve()
+                    }
+                    globalInitialImportDefault={props.globalInitialImportDefault}
+                    onSaveInitialImportMode={
+                      props.onSaveSourceInitialImportMode
+                        ? (_option, mode) =>
+                            props.onSaveSourceInitialImportMode?.(_option.username, mode) ?? Promise.resolve()
+                        : undefined
+                    }
                   />
                 ) : null}
                 <ConnectionList
@@ -465,12 +472,6 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
 
             {props.mapping && activeSection === 'operations' ? (
               <div className="space-y-5">
-                <MigrationReviewPanel
-                  mapping={props.mapping}
-                  canReview={props.canReviewMigration}
-                  busy={props.busy}
-                  onDismiss={props.onDismissMigrationReview}
-                />
                 <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
                   Backfill and delete remain on the destinations list row actions for this destination.
                 </div>

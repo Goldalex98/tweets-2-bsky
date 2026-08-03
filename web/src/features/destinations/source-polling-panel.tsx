@@ -3,8 +3,15 @@ import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { formatLocalDateTime, selectClassName } from '../../lib/dashboard-utils';
+import { InitialImportModeControl } from './initial-import-mode-control';
 import { pickSelectedUsername } from './source-selection';
-import type { AccountMapping, SourceRuntimeState, SourceSchedulePolicy } from './types';
+import type {
+  AccountMapping,
+  DefaultInitialImportMode,
+  InitialImportMode,
+  SourceRuntimeState,
+  SourceSchedulePolicy,
+} from './types';
 
 const DEFAULT_SCHEDULE: SourceSchedulePolicy = {
   mode: 'inherit',
@@ -19,6 +26,7 @@ export interface SourcePollingOption {
   username: string;
   schedule?: SourceSchedulePolicy;
   runtime?: SourceRuntimeState | null;
+  initialImportMode?: InitialImportMode;
   destinationLabel?: string;
 }
 
@@ -29,6 +37,8 @@ interface SourcePollingPanelProps {
   selectedUsername?: string;
   onSelectedUsernameChange?(username: string): void;
   onSave(option: SourcePollingOption, schedule: SourceSchedulePolicy): Promise<void>;
+  globalInitialImportDefault?: DefaultInitialImportMode;
+  onSaveInitialImportMode?(option: SourcePollingOption, mode: InitialImportMode): Promise<void>;
   title?: string;
   description?: string;
 }
@@ -94,6 +104,8 @@ export function SourcePollingPanel({
   selectedUsername: preferredUsername,
   onSelectedUsernameChange,
   onSave,
+  globalInitialImportDefault = 'new-only',
+  onSaveInitialImportMode,
   title = 'X source polling',
   description = 'Choose how frequently each X source becomes eligible for a timeline fetch.',
 }: SourcePollingPanelProps) {
@@ -102,6 +114,9 @@ export function SourcePollingPanel({
   const selectedUsername = pickSelectedUsername(usernames, selected, preferredUsername);
   const activeOption = options.find((option) => option.username === selectedUsername) ?? options[0];
   const [draft, setDraft] = useState<SourceSchedulePolicy>(() => scheduleFromOption(activeOption));
+  const [initialImportMode, setInitialImportMode] = useState<InitialImportMode>(
+    activeOption?.initialImportMode ?? 'inherit',
+  );
   const [loadedKey, setLoadedKey] = useState(
     () => `${activeOption?.mapping.revision ?? 0}\0${selectedUsername}\0${scheduleFingerprint(activeOption)}`,
   );
@@ -110,6 +125,7 @@ export function SourcePollingPanel({
   const loadOption = (option: SourcePollingOption) => {
     setSelected(option.username);
     setDraft(scheduleFromOption(option));
+    setInitialImportMode(option.initialImportMode ?? 'inherit');
     setMessage(null);
     setLoadedKey(`${option.mapping.revision}\0${option.username}\0${scheduleFingerprint(option)}`);
   };
@@ -119,7 +135,11 @@ export function SourcePollingPanel({
     if (!activeOption) return;
     const nextKey = `${activeOption.mapping.revision}\0${activeOption.username}\0${scheduleFingerprint(activeOption)}`;
     if (activeOption.username !== selected || nextKey !== loadedKey) loadOption(activeOption);
-  }, [preferredUsername, selectedUsername, options.map((option) => `${option.username}:${option.mapping.revision}:${scheduleFingerprint(option)}`).join('\0')]);
+  }, [
+    preferredUsername,
+    selectedUsername,
+    options.map((option) => `${option.username}:${option.mapping.revision}:${scheduleFingerprint(option)}`).join('\0'),
+  ]);
 
   if (!activeOption) {
     return (
@@ -155,11 +175,38 @@ export function SourcePollingPanel({
         >
           {options.map((option) => (
             <option key={`${option.mapping.id}-${option.username}`} value={option.username}>
-              @{option.username}{option.destinationLabel ? ` — ${option.destinationLabel}` : ''}
+              @{option.username}
+              {option.destinationLabel ? ` — ${option.destinationLabel}` : ''}
             </option>
           ))}
         </select>
       </div>
+
+      {onSaveInitialImportMode ? (
+        <div className="space-y-2 rounded-md border border-dashed p-3">
+          <InitialImportModeControl
+            id="source-initial-import-mode"
+            value={initialImportMode}
+            globalDefault={globalInitialImportDefault}
+            onChange={setInitialImportMode}
+            disabled={busy}
+          />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => {
+              setMessage(null);
+              void onSaveInitialImportMode(activeOption, initialImportMode)
+                .then(() => setMessage(`Initial import setting saved for @${activeOption.username}.`))
+                .catch(() => setMessage(null));
+            }}
+          >
+            Save initial import setting
+          </Button>
+        </div>
+      ) : null}
 
       <div className="space-y-1">
         <Label htmlFor="source-polling-mode">Polling policy</Label>
@@ -240,7 +287,11 @@ export function SourcePollingPanel({
           every {requestedFastest} minute{requestedFastest === 1 ? '' : 's'} until the global interval is lowered.
         </p>
       ) : null}
-      {error ? <p className="text-xs text-destructive" role="alert">{error}</p> : null}
+      {error ? (
+        <p className="text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      ) : null}
 
       <Button
         type="button"
@@ -289,6 +340,7 @@ export function uniquePollingOptions(mappings: readonly AccountMapping[]): Sourc
         username: source.username,
         schedule: source.schedule,
         runtime: source.runtime,
+        initialImportMode: source.initialImportMode ?? mapping.initialImportModesByUsername?.[source.username],
         destinationLabel: `@${mapping.bskyCanonicalHandle || mapping.bskyIdentifier}`,
       });
     }

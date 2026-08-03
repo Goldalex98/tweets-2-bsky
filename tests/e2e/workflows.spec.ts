@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { type Page, type Route, expect, test } from '@playwright/test';
 
 type Mutation = { path: string; body: unknown };
 
@@ -17,12 +17,13 @@ async function installWorkflowApi(page: Page): Promise<Mutation[]> {
       return fulfill(route, { revision: 8, updatedAt: new Date().toISOString(), ...(body as object) }, 201);
     }
     if (path === '/api/settings/scheduler') return fulfill(route, { revision: 8, ...(body as object) });
+    if (path === '/api/settings/source-defaults') {
+      return fulfill(route, { revision: 8, defaultInitialImportMode: 'new-only', ...(body as object) });
+    }
     if (/\/posting\/preview$/.test(path)) {
       const input = body as { text?: string; postingPolicy?: { attribution?: { mode?: string } } };
       const text =
-        input.postingPolicy?.attribution?.mode === 'never'
-          ? input.text
-          : `Source: @alpha on X\n\n${input.text ?? ''}`;
+        input.postingPolicy?.attribution?.mode === 'never' ? input.text : `Source: @alpha on X\n\n${input.text ?? ''}`;
       return fulfill(route, { text, chunks: [text], policy: input.postingPolicy });
     }
     if (/\/filter-preview$/.test(path)) {
@@ -34,9 +35,6 @@ async function installWorkflowApi(page: Page): Promise<Mutation[]> {
     if (/\/queue\/items\/[^/]+\/[^/]+\/retry$/.test(path)) return fulfill(route, { affected: 1 });
     if (/\/queue\/items\/[^/]+\/[^/]+$/.test(path) && method === 'DELETE') {
       return fulfill(route, { affected: 1 });
-    }
-    if (/\/migration-review$/.test(path)) {
-      return fulfill(route, { revision: 8, migrationReview: { needsAdminReview: false } });
     }
     if (path === '/api/health/details') {
       return fulfill(route, { status: 'ok', database: 'ok', scheduler: 'running', queue: { depth: 0 } });
@@ -154,11 +152,22 @@ test('scheduler reschedule and disable never trigger a run', async ({ page }) =>
   const mutations = await installWorkflowApi(page);
   await api(page, '/api/settings/scheduler', {
     method: 'PATCH',
-    body: { enabled: true, intervalMinutes: 15, runOnStartup: false, ...{ revision: 7, updatedAt: '2026-07-24T20:00:00.000Z' } },
+    body: {
+      enabled: true,
+      intervalMinutes: 15,
+      runOnStartup: false,
+      ...{ revision: 7, updatedAt: '2026-07-24T20:00:00.000Z' },
+    },
   });
   await api(page, '/api/settings/scheduler', {
     method: 'PATCH',
-    body: { enabled: false, intervalMinutes: 15, runOnStartup: false, revision: 7, updatedAt: '2026-07-24T20:00:00.000Z' },
+    body: {
+      enabled: false,
+      intervalMinutes: 15,
+      runOnStartup: false,
+      revision: 7,
+      updatedAt: '2026-07-24T20:00:00.000Z',
+    },
   });
   expect(mutations.filter((entry) => entry.path === '/api/run-now')).toHaveLength(0);
 });
@@ -196,18 +205,6 @@ test('queue retry and cancel are item scoped', async ({ page }) => {
   });
   expect(retry.body.affected).toBe(1);
   expect(cancel.body.affected).toBe(1);
-});
-
-test('migration review keeps explicit revision semantics', async ({ page }) => {
-  const response = await api<{ migrationReview: { needsAdminReview: boolean } }>(
-    page,
-    '/api/mappings/destination-1/migration-review',
-    {
-      method: 'PATCH',
-      body: { revision: 7, updatedAt: '2026-07-24T20:00:00.000Z' },
-    },
-  );
-  expect(response.body.migrationReview.needsAdminReview).toBe(false);
 });
 
 test('health and metrics responses contain no credential material', async ({ page }) => {

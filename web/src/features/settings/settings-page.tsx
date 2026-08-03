@@ -6,10 +6,10 @@ import { Card, CardContent } from '../../components/ui/card';
 import { NavList } from '../../components/ui/nav-list';
 import { BlueskyAccountsSection } from '../bluesky-accounts/bluesky-accounts-section';
 import type { BlueskyAccountFormState, BlueskyAccountView } from '../bluesky-accounts/types';
+import type { AccountMapping, InitialImportMode, SourceSchedulePolicy } from '../destinations/types';
 import { IngestionDigestsPage } from '../ingestion/ingestion-digests-page';
 import type { DigestAdminView, IngestionCredentialView, IngestionSourceView } from '../ingestion/types';
 import type { SchedulerSettings } from '../status/types';
-import type { AccountMapping, SourceSchedulePolicy } from '../destinations/types';
 import {
   AccessScopeSection,
   AccountSecuritySection,
@@ -22,9 +22,9 @@ import {
   UsersSection,
 } from './settings-sections';
 import type {
+  AIConfig,
   AccountSecurityEmailState,
   AccountSecurityPasswordState,
-  AIConfig,
   AuthUser,
   CookieHealthStatus,
   ManagedUser,
@@ -35,6 +35,7 @@ import type {
   UserFormState,
   UserPermissions,
 } from './types';
+import type { SourceDefaultsSettings } from './use-source-defaults';
 
 interface SettingsPageProps {
   section: SettingsSection;
@@ -61,6 +62,9 @@ interface SettingsPageProps {
   update: UpdateStatusInfo | null;
   busy: boolean;
   schedulerSaving: boolean;
+  sourceDefaults: SourceDefaultsSettings | null;
+  setSourceDefaults: Dispatch<SetStateAction<SourceDefaultsSettings | null>>;
+  sourceDefaultsSaving: boolean;
   mappings: AccountMapping[];
   updateBusy: boolean;
   editingUserId: string | null;
@@ -97,6 +101,8 @@ interface SettingsPageProps {
   onSavePassword(event: FormEvent<HTMLFormElement>): void;
   onSaveScheduler(event: FormEvent<HTMLFormElement>): void;
   onSaveSourceSchedule(mapping: AccountMapping, username: string, schedule: SourceSchedulePolicy): Promise<void>;
+  onSaveSourceInitialImportMode(mapping: AccountMapping, username: string, mode: InitialImportMode): Promise<void>;
+  onSaveSourceDefaults(): void;
   onSaveTwitter(event: FormEvent<HTMLFormElement>): void;
   onSaveAi(event: FormEvent<HTMLFormElement>): void;
   onPreviewAiText(
@@ -144,14 +150,12 @@ export function SettingsPage(props: SettingsPageProps) {
             badge: (
               <Badge
                 variant={
-                  props.ai.enabled ||
-                  Object.values(props.ai.textCapabilities).some((capability) => capability.enabled)
+                  props.ai.enabled || Object.values(props.ai.textCapabilities).some((capability) => capability.enabled)
                     ? 'success'
                     : 'outline'
                 }
               >
-                {props.ai.enabled ||
-                Object.values(props.ai.textCapabilities).some((capability) => capability.enabled)
+                {props.ai.enabled || Object.values(props.ai.textCapabilities).some((capability) => capability.enabled)
                   ? 'On'
                   : 'Off'}
               </Badge>
@@ -166,12 +170,32 @@ export function SettingsPage(props: SettingsPageProps) {
 
   return (
     <section className="grid gap-6 lg:grid-cols-[240px_1fr] animate-fade-in" aria-labelledby="settings-title">
-      <h2 id="settings-title" className="sr-only">Settings</h2>
-      <Card className="h-fit"><CardContent className="p-2"><NavList items={nav} activeId={props.section} onSelect={(id) => props.onSectionChange(id as SettingsSection)} ariaLabel="Settings sections" /></CardContent></Card>
+      <h2 id="settings-title" className="sr-only">
+        Settings
+      </h2>
+      <Card className="h-fit">
+        <CardContent className="p-2">
+          <NavList
+            items={nav}
+            activeId={props.section}
+            onSelect={(id) => props.onSectionChange(id as SettingsSection)}
+            ariaLabel="Settings sections"
+          />
+        </CardContent>
+      </Card>
       <div className="min-w-0 space-y-4">
         {props.section === 'account' ? (
           <>
-            <AccountSecuritySection user={props.user} email={props.email} setEmail={props.setEmail} password={props.password} setPassword={props.setPassword} busy={props.busy} onSaveEmail={props.onSaveEmail} onSavePassword={props.onSavePassword} />
+            <AccountSecuritySection
+              user={props.user}
+              email={props.email}
+              setEmail={props.setEmail}
+              password={props.password}
+              setPassword={props.setPassword}
+              busy={props.busy}
+              onSaveEmail={props.onSaveEmail}
+              onSavePassword={props.onSavePassword}
+            />
             {!isAdmin ? <AccessScopeSection permissions={props.permissions} /> : null}
           </>
         ) : null}
@@ -188,9 +212,43 @@ export function SettingsPage(props: SettingsPageProps) {
             onManageDestination={props.blueskyAccounts.onManageDestination}
           />
         ) : null}
-        {props.section === 'system' && isAdmin ? <SystemSection runtime={props.runtime} update={props.update} updating={props.updateBusy} canCreate={props.canCreateMappings} onUpdate={props.onRunUpdate} onAdd={props.onAddDestination} /> : null}
-        {props.section === 'scheduler' && isAdmin && props.scheduler ? <SchedulerSection value={props.scheduler} setValue={props.setScheduler} saving={props.schedulerSaving || props.busy} onSubmit={props.onSaveScheduler} mappings={props.mappings} onSaveSourceSchedule={props.onSaveSourceSchedule} /> : null}
-        {props.section === 'users' && isAdmin ? <UsersSection users={props.users} form={props.newUser} setForm={props.setNewUser} editingId={props.editingUserId} busy={props.busy} onCreate={props.onCreateUser} onEdit={props.onEditUser} onDelete={props.onDeleteUser} /> : null}
+        {props.section === 'system' && isAdmin ? (
+          <SystemSection
+            runtime={props.runtime}
+            update={props.update}
+            updating={props.updateBusy}
+            canCreate={props.canCreateMappings}
+            onUpdate={props.onRunUpdate}
+            onAdd={props.onAddDestination}
+          />
+        ) : null}
+        {props.section === 'scheduler' && isAdmin && props.scheduler ? (
+          <SchedulerSection
+            value={props.scheduler}
+            setValue={props.setScheduler}
+            saving={props.schedulerSaving || props.busy}
+            onSubmit={props.onSaveScheduler}
+            mappings={props.mappings}
+            onSaveSourceSchedule={props.onSaveSourceSchedule}
+            sourceDefaults={props.sourceDefaults}
+            setSourceDefaults={props.setSourceDefaults}
+            sourceDefaultsSaving={props.sourceDefaultsSaving}
+            onSaveSourceDefaults={props.onSaveSourceDefaults}
+            onSaveSourceInitialImportMode={props.onSaveSourceInitialImportMode}
+          />
+        ) : null}
+        {props.section === 'users' && isAdmin ? (
+          <UsersSection
+            users={props.users}
+            form={props.newUser}
+            setForm={props.setNewUser}
+            editingId={props.editingUserId}
+            busy={props.busy}
+            onCreate={props.onCreateUser}
+            onEdit={props.onEditUser}
+            onDelete={props.onDeleteUser}
+          />
+        ) : null}
         {props.section === 'twitter' && isAdmin ? (
           <TwitterSettingsSection
             value={props.twitter}
@@ -218,8 +276,33 @@ export function SettingsPage(props: SettingsPageProps) {
             onTest={props.onTestNotifications}
           />
         ) : null}
-        {props.section === 'ingestion' && isAdmin ? <IngestionDigestsPage sources={props.ingestion.sources} credentials={props.ingestion.credentials} digests={props.ingestion.digests} oneTimeSecret={props.ingestion.oneTimeSecret} loading={props.ingestion.loading} error={props.ingestion.error} onCreateSource={props.ingestion.createSource} onSetRouteDelivery={props.ingestion.setRouteDelivery} onCreateCredential={props.ingestion.createCredential} onRevokeCredential={props.ingestion.revokeCredential} onPreviewDigest={props.ingestion.previewDigest} onPublishDigest={props.ingestion.publishDigest} onRetryDigest={props.ingestion.retryDigest} onCancelDigest={props.ingestion.cancelDigest} /> : null}
-        {props.section === 'data' && isAdmin ? <DataManagementSection busy={props.busy} onExport={props.onExport} onImport={props.onImport} onBackup={props.onBackup} onRestore={props.onRestore} /> : null}
+        {props.section === 'ingestion' && isAdmin ? (
+          <IngestionDigestsPage
+            sources={props.ingestion.sources}
+            credentials={props.ingestion.credentials}
+            digests={props.ingestion.digests}
+            oneTimeSecret={props.ingestion.oneTimeSecret}
+            loading={props.ingestion.loading}
+            error={props.ingestion.error}
+            onCreateSource={props.ingestion.createSource}
+            onSetRouteDelivery={props.ingestion.setRouteDelivery}
+            onCreateCredential={props.ingestion.createCredential}
+            onRevokeCredential={props.ingestion.revokeCredential}
+            onPreviewDigest={props.ingestion.previewDigest}
+            onPublishDigest={props.ingestion.publishDigest}
+            onRetryDigest={props.ingestion.retryDigest}
+            onCancelDigest={props.ingestion.cancelDigest}
+          />
+        ) : null}
+        {props.section === 'data' && isAdmin ? (
+          <DataManagementSection
+            busy={props.busy}
+            onExport={props.onExport}
+            onImport={props.onImport}
+            onBackup={props.onBackup}
+            onRestore={props.onRestore}
+          />
+        ) : null}
       </div>
     </section>
   );

@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 8,
+  "revision": 4,
+  "updatedAt": "2026-07-24T20:00:00.000Z",
+  "twitter": {
+    "authToken": "<redacted>",
+    "ct0": "<redacted>"
+  },
+  "defaultInitialImportMode": "new-only",
+  "blueskyAccounts": [],
+  "sources": [],
+  "destinations": [],
+  "routes": [],
+  "groups": [],
+  "users": [],
+  "scheduler": {
+    "enabled": true,
+    "intervalMinutes": 5,
+    "runOnStartup": false
+  },
+  "notifications": {
+    "enabled": false,
+    "allowPrivate": false,
+    "events": {
+      "twitter-auth-failure": true,
+      "bsky-auth-failure": true,
+      "queue-parked": true,
+      "queue-age": false,
+      "update-failure": true
+    },
+    "maxAttempts": 3,
+    "backoffMs": 1000,
+    "timeoutMs": 10000
+  },
+  "ai": {
+    "enabled": false,
+    "purpose": "image-alt-text",
+    "provider": "gemini",
+    "maxAltTextChars": 1000,
+    "privacyDescription": "Disabled fixture provider.",
+    "textCapabilities": {
+      "translation": {
+        "enabled": false,
+        "purpose": "translation",
+        "privacyDescription": "Disabled fixture capability."
+      },
+      "summarization": {
+        "enabled": false,
+        "purpose": "summarization",
+        "privacyDescription": "Disabled fixture capability."
+      },
+      "cleanup": {
+        "enabled": false,
+        "purpose": "cleanup",
+        "privacyDescription": "Disabled fixture capability."
+      },
+      "hashtags": {
+        "enabled": false,
+        "purpose": "hashtags",
+        "privacyDescription": "Disabled fixture capability."
+      }
+    }
+  }
+}

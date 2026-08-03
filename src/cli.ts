@@ -32,7 +32,6 @@ import {
   addMapping,
   createConfigExport,
   getConfig,
-  getConfigMigrationReport,
   mergeImportedConfig,
   normalizeSourceFilters,
   normalizeSourceSchedule,
@@ -99,7 +98,9 @@ const requireCliAdminReauthentication = async (): Promise<void> => {
       mask: '*',
     },
   ]);
-  const identifier = String(answers.identifier || '').trim().toLowerCase();
+  const identifier = String(answers.identifier || '')
+    .trim()
+    .toLowerCase();
   const admin = admins.find(
     (user) => user.username?.toLowerCase() === identifier || user.email?.toLowerCase() === identifier,
   );
@@ -247,7 +248,10 @@ const importConfig = (inputFile: string) => {
 
 const program = new Command();
 
-program.name('tweets-2-bsky-cli').description('CLI for full Tweets -> Bluesky dashboard workflows').version(getCliVersion());
+program
+  .name('tweets-2-bsky-cli')
+  .description('CLI for full Tweets -> Bluesky dashboard workflows')
+  .version(getCliVersion());
 
 program
   .command('setup-ai')
@@ -839,11 +843,7 @@ program
   .option('--cancel-pending-queue', 'Delete pending queue items for these sources', false)
   .option('--delete-history', 'Delete processed history for these sources and destination', false)
   .action(
-    async (
-      mappingRef: string,
-      sources: string[],
-      options: { cancelPendingQueue: boolean; deleteHistory: boolean },
-    ) => {
+    async (mappingRef: string, sources: string[], options: { cancelPendingQueue: boolean; deleteHistory: boolean }) => {
       const selected = await ensureMapping(mappingRef);
       if (!selected) return;
       const config = getConfig();
@@ -1037,21 +1037,16 @@ program
   .option('--identifier <identifier>', 'Candidate handle or email')
   .option('--password <password>', 'Candidate app password')
   .option('--service <url>', 'Candidate Bluesky service URL')
-  .action(
-    async (
-      mappingRef: string,
-      options: { identifier?: string; password?: string; service?: string },
-    ) => {
-      const mapping = await ensureMapping(mappingRef);
-      if (!mapping) return;
-      const validation = await validateBlueskyCredentials({
-        bskyIdentifier: options.identifier || mapping.bskyIdentifier,
-        bskyPassword: options.password || mapping.bskyPassword,
-        bskyServiceUrl: options.service || mapping.bskyServiceUrl,
-      });
-      console.log(JSON.stringify({ ...validation, readOnly: true }, null, 2));
-    },
-  );
+  .action(async (mappingRef: string, options: { identifier?: string; password?: string; service?: string }) => {
+    const mapping = await ensureMapping(mappingRef);
+    if (!mapping) return;
+    const validation = await validateBlueskyCredentials({
+      bskyIdentifier: options.identifier || mapping.bskyIdentifier,
+      bskyPassword: options.password || mapping.bskyPassword,
+      bskyServiceUrl: options.service || mapping.bskyServiceUrl,
+    });
+    console.log(JSON.stringify({ ...validation, readOnly: true }, null, 2));
+  });
 
 program
   .command('destination-credentials-update <mapping>')
@@ -1059,63 +1054,58 @@ program
   .option('--identifier <identifier>', 'Candidate handle or email')
   .option('--password <password>', 'Candidate app password')
   .option('--service <url>', 'Candidate Bluesky service URL')
-  .action(
-    async (
-      mappingRef: string,
-      options: { identifier?: string; password?: string; service?: string },
-    ) => {
-      const selected = await ensureMapping(mappingRef);
-      if (!selected) return;
-      const config = getConfig();
-      const mapping = config.mappings.find((entry) => entry.id === selected.id);
-      if (!mapping) return;
-      const password = options.password || mapping.bskyPassword;
-      const validation = await validateBlueskyCredentials({
-        bskyIdentifier: options.identifier || mapping.bskyIdentifier,
-        bskyPassword: password,
-        bskyServiceUrl: options.service || mapping.bskyServiceUrl,
-      });
-      const candidate = applyValidatedDestinationIdentity({ ...mapping, bskyPassword: password }, validation);
-      const duplicate = findDuplicateActiveDestination(config.mappings, candidate, mapping.id);
-      if (duplicate) {
-        throw new Error(
-          `Destination conflicts with active mapping ${duplicate.id}. Add sources there or resolve ownership and credentials explicitly.`,
-        );
-      }
-      const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
-      const nextStorageKey = resolveDestinationStorageKey(candidate);
-      clearCachedAgent(mapping);
-      clearCachedAgent(candidate);
-      config.mappings[index] = candidate;
-      saveConfig(config);
-      let rekeyed = { processed: 0, queued: 0 };
-      for (const previousStorageKey of historyIdentityKeys(mapping)) {
-        if (previousStorageKey !== nextStorageKey) {
-          const result = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
-          rekeyed = {
-            processed: rekeyed.processed + result.processed,
-            queued: rekeyed.queued + result.queued,
-          };
-        }
-      }
-      console.log(
-        JSON.stringify(
-          {
-            updated: true,
-            did: validation.did,
-            handle: validation.handle,
-            serviceUrl: validation.serviceUrl,
-            profileChanged: false,
-            policiesChanged: false,
-            sourcesChanged: false,
-            rekeyed,
-          },
-          null,
-          2,
-        ),
+  .action(async (mappingRef: string, options: { identifier?: string; password?: string; service?: string }) => {
+    const selected = await ensureMapping(mappingRef);
+    if (!selected) return;
+    const config = getConfig();
+    const mapping = config.mappings.find((entry) => entry.id === selected.id);
+    if (!mapping) return;
+    const password = options.password || mapping.bskyPassword;
+    const validation = await validateBlueskyCredentials({
+      bskyIdentifier: options.identifier || mapping.bskyIdentifier,
+      bskyPassword: password,
+      bskyServiceUrl: options.service || mapping.bskyServiceUrl,
+    });
+    const candidate = applyValidatedDestinationIdentity({ ...mapping, bskyPassword: password }, validation);
+    const duplicate = findDuplicateActiveDestination(config.mappings, candidate, mapping.id);
+    if (duplicate) {
+      throw new Error(
+        `Destination conflicts with active mapping ${duplicate.id}. Add sources there or resolve ownership and credentials explicitly.`,
       );
-    },
-  );
+    }
+    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+    const nextStorageKey = resolveDestinationStorageKey(candidate);
+    clearCachedAgent(mapping);
+    clearCachedAgent(candidate);
+    config.mappings[index] = candidate;
+    saveConfig(config);
+    let rekeyed = { processed: 0, queued: 0 };
+    for (const previousStorageKey of historyIdentityKeys(mapping)) {
+      if (previousStorageKey !== nextStorageKey) {
+        const result = dbService.rekeyDestinationIdentity(previousStorageKey, nextStorageKey);
+        rekeyed = {
+          processed: rekeyed.processed + result.processed,
+          queued: rekeyed.queued + result.queued,
+        };
+      }
+    }
+    console.log(
+      JSON.stringify(
+        {
+          updated: true,
+          did: validation.did,
+          handle: validation.handle,
+          serviceUrl: validation.serviceUrl,
+          profileChanged: false,
+          policiesChanged: false,
+          sourcesChanged: false,
+          rekeyed,
+        },
+        null,
+        2,
+      ),
+    );
+  });
 
 program
   .command('remove [mapping]')
@@ -1277,10 +1267,7 @@ program
         rootPostsOnly: parseBoolean(options.rootPostsOnly, mapping.postingPolicy.attribution.rootPostsOnly),
         linkSource: parseBoolean(options.linkSource, mapping.postingPolicy.attribution.linkSource),
       },
-      appendOriginalPostLink: parseBoolean(
-        options.appendOriginalLink,
-        mapping.postingPolicy.appendOriginalPostLink,
-      ),
+      appendOriginalPostLink: parseBoolean(options.appendOriginalLink, mapping.postingPolicy.appendOriginalPostLink),
     };
     if (
       options.mode !== undefined ||
@@ -1308,9 +1295,7 @@ program
       console.log(preview.text);
     } else {
       console.log(JSON.stringify(mapping.postingPolicy, null, 2));
-      console.log(
-        describeAttributionState(mapping.postingPolicy.attribution.mode, mapping.twitterUsernames.length),
-      );
+      console.log(describeAttributionState(mapping.postingPolicy.attribution.mode, mapping.twitterUsernames.length));
     }
   });
 
@@ -1362,7 +1347,11 @@ program
     };
     const profileFields = { ...mapping.profileManagement.profileSync.fields };
     if (options.profileFields !== undefined) {
-      const selected = new Set(String(options.profileFields).split(',').map((field) => field.trim()));
+      const selected = new Set(
+        String(options.profileFields)
+          .split(',')
+          .map((field) => field.trim()),
+      );
       const unknown = [...selected].filter(
         (field) => !['displayName', 'description', 'avatar', 'banner'].includes(field),
       );
@@ -1373,10 +1362,7 @@ program
       profileFields.banner = selected.has('banner');
     }
     const updatedPolicy = {
-      allowProfileMutation: parseBoolean(
-        options.allowMutation,
-        mapping.profileManagement.allowProfileMutation,
-      ),
+      allowProfileMutation: parseBoolean(options.allowMutation, mapping.profileManagement.allowProfileMutation),
       ensureBotLabel: parseBoolean(options.botLabel, mapping.profileManagement.ensureBotLabel),
       ensureDisplayNameBotSuffix: parseBoolean(
         options.displaySuffix,
@@ -1384,14 +1370,8 @@ program
       ),
       profileSync: {
         mode: parseMode(options.profileMode, mapping.profileManagement.profileSync.mode),
-        sourceUsername: parseSource(
-          options.profileSource,
-          mapping.profileManagement.profileSync.sourceUsername,
-        ),
-        intervalHours: parseHours(
-          options.profileInterval,
-          mapping.profileManagement.profileSync.intervalHours,
-        ),
+        sourceUsername: parseSource(options.profileSource, mapping.profileManagement.profileSync.sourceUsername),
+        intervalHours: parseHours(options.profileInterval, mapping.profileManagement.profileSync.intervalHours),
         fields: profileFields,
       },
       pinSync: {
@@ -1560,16 +1540,6 @@ program
         text: row.tweet_text ? row.tweet_text.slice(0, 80) : row.twitter_id,
       })),
     );
-  });
-
-program
-  .command('config-migration-report [file]')
-  .description('Dry-run a config schema migration without writing files or exposing secrets')
-  .action((file?: string) => {
-    const raw = file
-      ? JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'))
-      : undefined;
-    console.log(JSON.stringify(getConfigMigrationReport(raw), null, 2));
   });
 
 program
@@ -1804,8 +1774,16 @@ program
       const webhookUrl = options.url ?? current.webhookUrl;
       if (webhookUrl) await validateWebhookTarget(webhookUrl, Boolean(options.allowPrivate));
       const selected = options.events
-        ? new Set(String(options.events).split(',').map((event) => event.trim()))
-        : new Set(Object.entries(current.events).filter(([, value]) => value).map(([event]) => event));
+        ? new Set(
+            String(options.events)
+              .split(',')
+              .map((event) => event.trim()),
+          )
+        : new Set(
+            Object.entries(current.events)
+              .filter(([, value]) => value)
+              .map(([event]) => event),
+          );
       config.notifications = {
         ...current,
         enabled,
@@ -1889,11 +1867,7 @@ program
   .description('List digest jobs and pending entries')
   .action(() =>
     console.log(
-      JSON.stringify(
-        { jobs: digestJobService.list(), entries: digestEntryService.list({ limit: 500 }) },
-        null,
-        2,
-      ),
+      JSON.stringify({ jobs: digestJobService.list(), entries: digestEntryService.list({ limit: 500 }) }, null, 2),
     ),
   );
 

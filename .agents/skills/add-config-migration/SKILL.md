@@ -9,8 +9,7 @@ description: Add an idempotent JSON config schema migration and wire backups, no
 
 - Bump `CURRENT_CONFIG_SCHEMA_VERSION` only for a real migration.
 - Implement the next `migrateV{N-1}ToV{N}` and wire
-  `applyMigrationsFromV3`, `migrateConfigWithMetadata`, and
-  `planConfigMigration`.
+  `applyMigrationsFromV3` and `migrateConfigWithMetadata`.
 - Update `ROLLBACK_BACKUP_SUFFIX`, `ConfigMigrationReport`, and
   `ensurePreV{N}Backup` plus recovery/get-config paths.
 - Normalize, project affected mappings, and call `assertValidAppConfig`.

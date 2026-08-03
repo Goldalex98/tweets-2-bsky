@@ -8,6 +8,7 @@ import { normalizedIngestionDigestsMigration } from './007-normalized-ingestion-
 import { canonicalQueueIdentityMigration } from './008-canonical-queue-identity.js';
 import { deliveryDiagnosticsMigration } from './009-delivery-diagnostics.js';
 import { blueskyAccountRuntimeMigration } from './010-bluesky-account-runtime.js';
+import { routeInitialImportMigration } from './011-route-initial-import.js';
 import type { DatabaseMigration, MigrationClock, MigrationDatabase } from './types.js';
 
 export type {
@@ -27,6 +28,7 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
   canonicalQueueIdentityMigration,
   deliveryDiagnosticsMigration,
   blueskyAccountRuntimeMigration,
+  routeInitialImportMigration,
 ];
 
 const systemMigrationClock: MigrationClock = {

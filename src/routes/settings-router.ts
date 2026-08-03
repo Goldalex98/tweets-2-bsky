@@ -54,9 +54,7 @@ export function buildSchedulerSettingsResponse(dependencies: SettingsRouterDepen
     nextCheckTime: config.scheduler.enabled ? runtime.nextCheckTime : null,
     restartRequired: dependencies.isRestoreRestartRequired?.() ?? false,
     enabledSourceCount,
-    estimatedChecksPerHour: config.scheduler.enabled
-      ? Math.round((enabledSourceCount * 60) / intervalMinutes)
-      : 0,
+    estimatedChecksPerHour: config.scheduler.enabled ? Math.round((enabledSourceCount * 60) / intervalMinutes) : 0,
     diagnostics: {
       scraperMinGapMs: envDiagnostic('SCRAPER_MIN_GAP_MS', 800, 0, 60_000),
       scraperJitterMs: envDiagnostic('SCRAPER_JITTER_MS', 400, 0, 60_000),
@@ -79,6 +77,32 @@ export function buildSchedulerSettingsResponse(dependencies: SettingsRouterDepen
 export function createSettingsRouter(dependencies: SettingsRouterDependencies): Router {
   const router = Router();
   const admin = [dependencies.authenticateToken, dependencies.requireAdmin];
+
+  // Creators need the effective default to explain `inherit`, even when they
+  // are not administrators and cannot change the global setting.
+  router.get('/source-defaults', dependencies.authenticateToken, (_request, response) => {
+    const config = dependencies.getConfig();
+    response.json({
+      ...dependencies.getConfigVersion(config),
+      defaultInitialImportMode: config.defaultInitialImportMode,
+    });
+  });
+
+  router.patch('/source-defaults', ...admin, (request, response) => {
+    const config = dependencies.getConfig();
+    if (dependencies.rejectStaleConfigMutation(config, request.body, response)) return;
+    const mode = request.body?.defaultInitialImportMode;
+    if (mode !== 'recent' && mode !== 'new-only') {
+      response.status(400).json({ error: 'defaultInitialImportMode must be recent or new-only.' });
+      return;
+    }
+    config.defaultInitialImportMode = mode;
+    dependencies.saveConfig(config);
+    response.json({
+      ...dependencies.getConfigVersion(config),
+      defaultInitialImportMode: config.defaultInitialImportMode,
+    });
+  });
 
   router.get('/scheduler', ...admin, (_request, response) => {
     response.json(buildSchedulerSettingsResponse(dependencies, dependencies.getConfig()));
@@ -184,20 +208,15 @@ export function createSettingsRouter(dependencies: SettingsRouterDependencies): 
     });
   });
 
-  router.post(
-    '/notifications/test',
-    dependencies.webhookRateLimiter,
-    ...admin,
-    (_request, response) => {
-      dependencies.notifyOperationsEvent({
-        event: 'queue-age',
-        occurredAt: new Date().toISOString(),
-        message: 'Test operations notification.',
-        details: { test: true },
-      });
-      response.status(202).json({ success: true, message: 'Notification delivery queued.' });
-    },
-  );
+  router.post('/notifications/test', dependencies.webhookRateLimiter, ...admin, (_request, response) => {
+    dependencies.notifyOperationsEvent({
+      event: 'queue-age',
+      occurredAt: new Date().toISOString(),
+      message: 'Test operations notification.',
+      details: { test: true },
+    });
+    response.status(202).json({ success: true, message: 'Notification delivery queued.' });
+  });
 
   return router;
 }

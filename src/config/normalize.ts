@@ -13,12 +13,13 @@ import {
   DEFAULT_AI_CONFIG,
   DEFAULT_ATTRIBUTION_TEMPLATE,
   DEFAULT_DUPLICATE_SUPPRESSION,
+  DEFAULT_INITIAL_IMPORT_MODE,
   DEFAULT_MODERATION_POLICY,
   DEFAULT_NOTIFICATION_CONFIG,
+  DEFAULT_ROUTE_DELIVERY,
+  DEFAULT_ROUTING_POLICY,
   DEFAULT_SCHEDULER_CONFIG,
   DEFAULT_SOURCE_FILTERS,
-  DEFAULT_ROUTING_POLICY,
-  DEFAULT_ROUTE_DELIVERY,
   DEFAULT_SOURCE_SCHEDULE,
   DEFAULT_USER_PERMISSIONS,
   defaultPostingPolicy,
@@ -40,13 +41,15 @@ import {
   type AccountMapping,
   type AppConfig,
   type AttributionMode,
+  type BlueskyAccount,
   CURRENT_CONFIG_SCHEMA_VERSION,
   type ConfigMigrationMetadata,
-  type BlueskyAccount,
+  type DefaultInitialImportMode,
   type Destination,
-  type DestinationMetadata,
   type DestinationAIOverrides,
+  type DestinationMetadata,
   type DuplicateSuppressionPolicy,
+  type InitialImportMode,
   type MappingMigrationReview,
   type ModerationPolicy,
   type NotificationConfig,
@@ -140,10 +143,7 @@ const normalizeUserPermissions = (value: unknown, role: UserRole): UserPermissio
     manageGroups: normalizeBoolean(value.manageGroups, defaults.manageGroups),
     queueBackfills: normalizeBoolean(value.queueBackfills, defaults.queueBackfills),
     runNow: normalizeBoolean(value.runNow, defaults.runNow),
-    reevaluateQueuePolicies: normalizeBoolean(
-      value.reevaluateQueuePolicies,
-      defaults.reevaluateQueuePolicies,
-    ),
+    reevaluateQueuePolicies: normalizeBoolean(value.reevaluateQueuePolicies, defaults.reevaluateQueuePolicies),
   };
 };
 
@@ -471,11 +471,11 @@ const normalizeAiConfig = (rawAi: unknown, legacyGeminiApiKey?: string): AIConfi
 
 export const normalizeRoutingPolicy = (value: unknown): RoutingPolicy => {
   const record = isConfigRecord(value) ? value : {};
-  const contentTypes = normalizeLowercaseStringArray(record.contentTypes).filter(
-    (entry): entry is RoutingContentType => ['original', 'reply', 'quote', 'repost'].includes(entry),
+  const contentTypes = normalizeLowercaseStringArray(record.contentTypes).filter((entry): entry is RoutingContentType =>
+    ['original', 'reply', 'quote', 'repost'].includes(entry),
   );
-  const mediaTypes = normalizeLowercaseStringArray(record.mediaTypes).filter(
-    (entry): entry is RoutingMediaType => ['none', 'image', 'video', 'gif'].includes(entry),
+  const mediaTypes = normalizeLowercaseStringArray(record.mediaTypes).filter((entry): entry is RoutingMediaType =>
+    ['none', 'image', 'video', 'gif'].includes(entry),
   );
   const allowedHours = Array.isArray(record.allowedHours)
     ? [...new Set(record.allowedHours.map(Number).filter((hour) => Number.isInteger(hour) && hour >= 0 && hour <= 23))]
@@ -551,9 +551,7 @@ const normalizeNotificationConfig = (value: unknown): NotificationConfig => {
   };
   return {
     enabled: normalizeBoolean(record.enabled, DEFAULT_NOTIFICATION_CONFIG.enabled),
-    ...(normalizeSecret(record.webhookUrl) !== undefined
-      ? { webhookUrl: normalizeSecret(record.webhookUrl) }
-      : {}),
+    ...(normalizeSecret(record.webhookUrl) !== undefined ? { webhookUrl: normalizeSecret(record.webhookUrl) } : {}),
     ...(normalizeSecret(record.webhookSecret) !== undefined
       ? { webhookSecret: normalizeSecret(record.webhookSecret) }
       : {}),
@@ -693,6 +691,12 @@ export const normalizeSourceSchedule = (value: unknown): SourceSchedulePolicy =>
   };
 };
 
+export const normalizeDefaultInitialImportMode = (value: unknown): DefaultInitialImportMode =>
+  value === 'recent' || value === 'new-only' ? value : DEFAULT_INITIAL_IMPORT_MODE;
+
+export const normalizeInitialImportMode = (value: unknown): InitialImportMode =>
+  value === 'inherit' || value === 'recent' || value === 'new-only' ? value : 'inherit';
+
 const normalizeDestinationMetadata = (value: unknown, destinationId: string): DestinationMetadata => {
   const record = isConfigRecord(value) ? value : {};
   const legacyMappingIds = normalizeStringArray(record.legacyMappingIds);
@@ -717,7 +721,9 @@ const normalizeSource = (value: unknown): Source | null => {
   const username =
     type === 'x'
       ? normalizeTwitterUsername(value.username)
-      : normalizeString(value.name ?? value.username)?.toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+      : normalizeString(value.name ?? value.username)
+          ?.toLowerCase()
+          .replace(/[^a-z0-9._-]+/g, '-');
   if (!username) {
     return null;
   }
@@ -765,21 +771,14 @@ export const normalizeRouteDelivery = (value: unknown): RouteDeliveryPolicy => {
       timezone: normalizeString(digest.timezone) ?? DEFAULT_ROUTE_DELIVERY.digest.timezone,
       hour: integer(digest.hour, DEFAULT_ROUTE_DELIVERY.digest.hour, 0, 23),
       minute: integer(digest.minute, DEFAULT_ROUTE_DELIVERY.digest.minute, 0, 59),
-      ...(digest.dayOfWeek === undefined
-        ? {}
-        : { dayOfWeek: integer(digest.dayOfWeek, 1, 0, 6) }),
+      ...(digest.dayOfWeek === undefined ? {} : { dayOfWeek: integer(digest.dayOfWeek, 1, 0, 6) }),
       grouping:
         digest.grouping === 'none' || digest.grouping === 'source' || digest.grouping === 'day'
           ? digest.grouping
           : DEFAULT_ROUTE_DELIVERY.digest.grouping,
       template: normalizeString(digest.template) ?? DEFAULT_ROUTE_DELIVERY.digest.template,
       maxEntries: integer(digest.maxEntries, DEFAULT_ROUTE_DELIVERY.digest.maxEntries, 1, 200),
-      maxGraphemes: integer(
-        digest.maxGraphemes,
-        DEFAULT_ROUTE_DELIVERY.digest.maxGraphemes,
-        100,
-        20_000,
-      ),
+      maxGraphemes: integer(digest.maxGraphemes, DEFAULT_ROUTE_DELIVERY.digest.maxGraphemes, 100, 20_000),
       includeSourceAttribution: normalizeBoolean(
         digest.includeSourceAttribution,
         DEFAULT_ROUTE_DELIVERY.digest.includeSourceAttribution,
@@ -846,9 +845,7 @@ const normalizeBlueskyAccount = (value: unknown): BlueskyAccount | null => {
       ? value.createdAt
       : new Date(0).toISOString();
   const updatedAt =
-    typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt))
-      ? value.updatedAt
-      : createdAt;
+    typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt)) ? value.updatedAt : createdAt;
   const legacyDestinationIds = Array.isArray(value.metadata)
     ? undefined
     : isConfigRecord(value.metadata) && Array.isArray(value.metadata.legacyDestinationIds)
@@ -864,8 +861,7 @@ const normalizeBlueskyAccount = (value: unknown): BlueskyAccount | null => {
     ...(normalizeTwitterUsername(value.canonicalHandle) || normalizeString(value.canonicalHandle)
       ? {
           canonicalHandle:
-            normalizeTwitterUsername(value.canonicalHandle) ??
-            normalizeString(value.canonicalHandle)?.toLowerCase(),
+            normalizeTwitterUsername(value.canonicalHandle) ?? normalizeString(value.canonicalHandle)?.toLowerCase(),
         }
       : {}),
     ...(normalizeString(value.createdByUserId) ? { createdByUserId: normalizeString(value.createdByUserId) } : {}),
@@ -892,6 +888,7 @@ const normalizeRoute = (value: unknown): Route | null => {
     sourceId,
     destinationId,
     enabled: normalizeBoolean(value.enabled, true),
+    initialImportMode: normalizeInitialImportMode(value.initialImportMode),
     filters: normalizeSourceFilters(value.filters),
     routingPolicy: normalizeRoutingPolicy(value.routingPolicy),
     moderationPolicy: normalizeModerationPolicy(value.moderationPolicy),
@@ -920,15 +917,17 @@ const normalizeMigrationMetadata = (value: unknown): ConfigMigrationMetadata | u
     migratedAt: normalizeIsoDateString(value.migratedAt) ?? new Date(0).toISOString(),
     rollback: {
       backupSuffix:
-        rollback.backupSuffix === '.pre-v7-backup'
-          ? '.pre-v7-backup'
-          : rollback.backupSuffix === '.pre-v6-backup'
-            ? '.pre-v6-backup'
-            : rollback.backupSuffix === '.pre-v5-backup'
-              ? '.pre-v5-backup'
-              : rollback.backupSuffix === '.pre-v4-backup'
-                ? '.pre-v4-backup'
-                : '.pre-v3-backup',
+        rollback.backupSuffix === '.pre-v8-backup'
+          ? '.pre-v8-backup'
+          : rollback.backupSuffix === '.pre-v7-backup'
+            ? '.pre-v7-backup'
+            : rollback.backupSuffix === '.pre-v6-backup'
+              ? '.pre-v6-backup'
+              : rollback.backupSuffix === '.pre-v5-backup'
+                ? '.pre-v5-backup'
+                : rollback.backupSuffix === '.pre-v4-backup'
+                  ? '.pre-v4-backup'
+                  : '.pre-v3-backup',
       instructions:
         instructions.length > 0
           ? instructions
@@ -982,9 +981,7 @@ export function normalizeConfigV3(rawConfig: unknown): AppConfig {
   const canonical = {
     schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION,
     revision:
-      Number.isSafeInteger(rawConfig.revision) && Number(rawConfig.revision) >= 0
-        ? Number(rawConfig.revision)
-        : 0,
+      Number.isSafeInteger(rawConfig.revision) && Number(rawConfig.revision) >= 0 ? Number(rawConfig.revision) : 0,
     updatedAt:
       typeof rawConfig.updatedAt === 'string' && Number.isFinite(Date.parse(rawConfig.updatedAt))
         ? rawConfig.updatedAt
@@ -999,6 +996,7 @@ export function normalizeConfigV3(rawConfig: unknown): AppConfig {
         ? { backupCt0: normalizeSecret(rawTwitter.backupCt0) }
         : {}),
     },
+    defaultInitialImportMode: normalizeDefaultInitialImportMode(rawConfig.defaultInitialImportMode),
     sources,
     destinations,
     routes,
@@ -1082,6 +1080,9 @@ export function assertValidAppConfig(config: AppConfig): void {
   ) {
     throw new Error('Scheduler interval must be a whole number between 1 and 1440.');
   }
+  if (!['new-only', 'recent'].includes(config.defaultInitialImportMode)) {
+    throw new Error('Default initial import mode must be new-only or recent.');
+  }
 
   const sourceIds = new Set<string>();
   const sourceIdentities = new Set<string>();
@@ -1108,6 +1109,12 @@ export function assertValidAppConfig(config: AppConfig): void {
       source.schedule.fixedIntervalMinutes > source.schedule.maxIntervalMinutes
     ) {
       throw new Error(`Source ${source.id} contains an invalid schedule.`);
+    }
+  }
+
+  for (const route of config.routes) {
+    if (!['inherit', 'new-only', 'recent'].includes(route.initialImportMode)) {
+      throw new Error(`Route ${route.id} contains an invalid initial import mode.`);
     }
   }
 
@@ -1139,9 +1146,7 @@ export function assertValidAppConfig(config: AppConfig): void {
       throw new Error('A destination is missing required identity fields.');
     }
     if (!destination.bskyAccountId && typeof destination.bskyPassword !== 'string') {
-      throw new Error(
-        `Destination ${destination.id} has neither a linked Bluesky account nor legacy credentials.`,
-      );
+      throw new Error(`Destination ${destination.id} has neither a linked Bluesky account nor legacy credentials.`);
     }
     if (destination.bskyAccountId) {
       if (!accountIds.has(destination.bskyAccountId)) {
@@ -1150,9 +1155,7 @@ export function assertValidAppConfig(config: AppConfig): void {
         );
       }
       if (linkedAccountIds.has(destination.bskyAccountId)) {
-        throw new Error(
-          `Bluesky account ${destination.bskyAccountId} is linked to more than one destination.`,
-        );
+        throw new Error(`Bluesky account ${destination.bskyAccountId} is linked to more than one destination.`);
       }
       linkedAccountIds.add(destination.bskyAccountId);
     }

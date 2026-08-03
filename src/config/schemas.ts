@@ -1,4 +1,7 @@
-export const CURRENT_CONFIG_SCHEMA_VERSION = 7;
+export const CURRENT_CONFIG_SCHEMA_VERSION = 8;
+
+export type DefaultInitialImportMode = 'new-only' | 'recent';
+export type InitialImportMode = 'inherit' | DefaultInitialImportMode;
 
 export interface TwitterConfig {
   authToken: string;
@@ -191,6 +194,12 @@ export interface AccountMapping {
    * projected separately to keep the two distinct across round-trips.
    */
   routePausedUsernames?: string[];
+
+  /**
+   * Runtime-only compatibility data used to seed newly projected routes.
+   * Existing canonical routes always retain their persisted mode.
+   */
+  initialImportModesByUsername?: Record<string, InitialImportMode>;
 }
 
 export interface AccountGroup {
@@ -386,6 +395,7 @@ export interface Route {
   sourceId: string;
   destinationId: string;
   enabled: boolean;
+  initialImportMode: InitialImportMode;
   filters: SourceFilterPolicy;
   routingPolicy: RoutingPolicy;
   moderationPolicy: ModerationPolicy;
@@ -397,7 +407,13 @@ export interface Route {
 }
 
 export interface ConfigRollbackMetadata {
-  backupSuffix: '.pre-v3-backup' | '.pre-v4-backup' | '.pre-v5-backup' | '.pre-v6-backup' | '.pre-v7-backup';
+  backupSuffix:
+    | '.pre-v3-backup'
+    | '.pre-v4-backup'
+    | '.pre-v5-backup'
+    | '.pre-v6-backup'
+    | '.pre-v7-backup'
+    | '.pre-v8-backup';
   instructions: string[];
 }
 
@@ -417,6 +433,7 @@ export interface AppConfig {
   /** ISO timestamp of the most recent successful configuration write. */
   updatedAt: string;
   twitter: TwitterConfig;
+  defaultInitialImportMode: DefaultInitialImportMode;
   sources: Source[];
   destinations: Destination[];
   routes: Route[];

@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { EditDestinationDialog } from '../../web/src/features/destinations/edit-destination-dialog';
 import { SourceFiltersPanel } from '../../web/src/features/destinations/source-filters-panel';
 import { pickSelectedUsername } from '../../web/src/features/destinations/source-selection';
 import type { AccountMapping, SourceFilterPolicy } from '../../web/src/features/destinations/types';
-import { EditDestinationDialog } from '../../web/src/features/destinations/edit-destination-dialog';
 import { defaultMappingForm } from '../../web/src/lib/dashboard-utils';
 
 const DEFAULT_FILTERS: SourceFilterPolicy = {
@@ -120,15 +120,16 @@ describe('edit destination sources copy', () => {
         sourceInput=""
         parseSummary={{ duplicates: [], invalid: [] }}
         busy={false}
-        canReviewMigration={false}
+        globalInitialImportDefault="new-only"
+        addSourcesInitialImportMode="inherit"
         onClose={() => undefined}
         onSubmit={() => undefined}
         onFormChange={() => undefined}
         onSourceInputChange={() => undefined}
+        onAddSourcesInitialImportModeChange={() => undefined}
         onAddSources={async () => undefined}
         onRemoveSource={() => undefined}
         onManageAccount={() => undefined}
-        onDismissMigrationReview={() => undefined}
         onSaveSourceFilters={async () => undefined}
         onPreviewSourceFilter={async () => ({ allowed: true, reason: 'allowed' })}
         onPreviewPosting={async () => ({ text: 'preview', attributionApplied: false, originalLinkApplied: false })}

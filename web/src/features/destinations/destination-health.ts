@@ -44,9 +44,7 @@ export function summarizeDestinationHealth(mapping: AccountMapping): Destination
   }
   if (mapping.blueskyAccount?.health?.lastErrorCategory === 'did-mismatch') {
     const handle =
-      mapping.blueskyAccount.canonicalHandle ||
-      mapping.blueskyAccount.loginIdentifier ||
-      mapping.bskyIdentifier;
+      mapping.blueskyAccount.canonicalHandle || mapping.blueskyAccount.loginIdentifier || mapping.bskyIdentifier;
     return {
       severity: 'danger',
       label: 'DID mismatch',
@@ -59,13 +57,6 @@ export function summarizeDestinationHealth(mapping: AccountMapping): Destination
       severity: 'warning',
       label: 'Source issue',
       detail: `@${sourceIssue.username}: ${sourceIssue.runtime.lastErrorMessage || sourceIssue.runtime.lastErrorCategory}`,
-    };
-  }
-  if (mapping.migrationReview?.needsAdminReview) {
-    return {
-      severity: 'neutral',
-      label: 'Migrated — review',
-      detail: "Migrated from legacy configuration. Open the destination's Operations tab to review and dismiss.",
     };
   }
   if (mapping.queue?.pending) {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { normalizeConfig } from '../../src/config-manager.js';
-import type { AccountMapping, AppConfig } from '../../src/config/schemas.js';
 import { applyMappingProjection, projectAccountMappings } from '../../src/config/projection.js';
+import type { AccountMapping, AppConfig } from '../../src/config/schemas.js';
 
 function createConfig(): AppConfig {
   return normalizeConfig({
@@ -99,5 +99,28 @@ describe('legacy mapping projection state', () => {
 
     const saved = applyMappingProjection(config, [legacyMapping]);
     expect(routeFor(saved, 'alpha').relationship.sourcePaused).toBe(true);
+  });
+
+  test('a compatibility mode map seeds only newly projected routes', () => {
+    const config = createConfig();
+    const mapping = projectAccountMappings(config)[0] as AccountMapping;
+    mapping.twitterUsernames = [...mapping.twitterUsernames, 'delta', 'gamma'];
+    mapping.initialImportModesByUsername = {
+      ...mapping.initialImportModesByUsername,
+      alpha: 'new-only',
+      gamma: 'new-only',
+    };
+
+    const saved = applyMappingProjection(config, [mapping]);
+    expect(routeFor(saved, 'alpha').initialImportMode).toBe('recent');
+    expect(routeFor(saved, 'delta').initialImportMode).toBe('inherit');
+    expect(routeFor(saved, 'gamma').initialImportMode).toBe('new-only');
+
+    const projected = projectAccountMappings(saved)[0];
+    expect(projected?.initialImportModesByUsername).toMatchObject({
+      alpha: 'recent',
+      delta: 'inherit',
+      gamma: 'new-only',
+    });
   });
 });

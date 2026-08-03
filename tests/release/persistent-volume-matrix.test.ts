@@ -18,6 +18,7 @@ for (const scenario of [
       '.pre-v5-backup',
       '.pre-v6-backup',
       '.pre-v7-backup',
+      '.pre-v8-backup',
     ],
   },
   {
@@ -31,17 +32,24 @@ for (const scenario of [
       '.pre-v5-backup',
       '.pre-v6-backup',
       '.pre-v7-backup',
+      '.pre-v8-backup',
     ],
   },
   {
     name: 'legacy v6',
     fixture: 'config-v6-current.json',
     expectedSources: 0,
-    expectedBackups: ['.pre-v3-backup', '.pre-v7-backup'],
+    expectedBackups: ['.pre-v3-backup', '.pre-v7-backup', '.pre-v8-backup'],
   },
   {
-    name: 'current v7',
+    name: 'legacy v7',
     fixture: 'config-v7-current.json',
+    expectedSources: 0,
+    expectedBackups: ['.pre-v3-backup', '.pre-v8-backup'],
+  },
+  {
+    name: 'current v8',
+    fixture: 'config-v8-current.json',
     expectedSources: 0,
     expectedBackups: [],
   },
@@ -59,6 +67,7 @@ for (const scenario of [
         '.pre-v5-backup',
         '.pre-v6-backup',
         '.pre-v7-backup',
+        '.pre-v8-backup',
       ]);
       const subprocess = Bun.spawn(
         [
@@ -73,7 +82,7 @@ for (const scenario of [
             const secondBytes = fs.readFileSync(${JSON.stringify(configPath)}, 'utf8');
             if (firstBytes !== secondBytes) throw new Error('Second migration changed persisted bytes.');
             if (JSON.stringify(first) !== JSON.stringify(second)) throw new Error('Second migration changed config.');
-            if (first.schemaVersion !== 7) throw new Error('Expected current schema v7.');
+            if (first.schemaVersion !== 8) throw new Error('Expected current schema v8.');
             if (first.sources.length !== ${scenario.expectedSources}) throw new Error('Unexpected source count.');
             const expected = new Set(${expectedBackupsJson});
             for (const suffix of ${allBackupSuffixesJson}) {
@@ -139,7 +148,7 @@ test('fresh copied volume supports one-to-one, aggregate, and source fanout', as
     expect(exitCode, stderr).toBe(0);
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
     expect(result).toEqual({
-      schemaVersion: 7,
+      schemaVersion: 8,
       sourceCounts: [1, 1, 2],
       oneSourceRouteCount: 2,
       idempotent: true,

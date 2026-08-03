@@ -51,15 +51,19 @@ export interface ConfigMigrationReport {
   deduplicatedDestinations: number;
   deduplicatedRoutes: number;
   conflicts: ConfigMigrationConflict[];
-  backupSuffix: '.pre-v3-backup' | '.pre-v4-backup' | '.pre-v5-backup' | '.pre-v6-backup' | '.pre-v7-backup';
+  backupSuffix:
+    | '.pre-v3-backup'
+    | '.pre-v4-backup'
+    | '.pre-v5-backup'
+    | '.pre-v6-backup'
+    | '.pre-v7-backup'
+    | '.pre-v8-backup';
   rollback: string[];
 }
 
 export class ConfigMigrationConflictError extends Error {
   constructor(public readonly report: ConfigMigrationReport) {
-    super(
-      `Config migration found ${report.conflicts.length} conflicting legacy destination or route definition(s).`,
-    );
+    super(`Config migration found ${report.conflicts.length} conflicting legacy destination or route definition(s).`);
     this.name = 'ConfigMigrationConflictError';
   }
 }
@@ -226,7 +230,7 @@ export function migrateV1ToV2(
 
 // Every upgrade to the current schema writes the newest suffix, so reports name
 // it rather than an older one an operator may not have on disk.
-const ROLLBACK_BACKUP_SUFFIX = '.pre-v7-backup' as const;
+const ROLLBACK_BACKUP_SUFFIX = '.pre-v8-backup' as const;
 
 const ROLLBACK_INSTRUCTIONS = [
   'Stop the application.',
@@ -488,97 +492,20 @@ export function migrateV6ToV7(rawConfig: Record<string, unknown>): AppConfig {
   return normalized;
 }
 
-function applyMigrationsFromV3(working: Record<string, unknown>, fromVersion: number): AppConfig {
-  let current = working;
-  let config: AppConfig;
-  if (fromVersion <= 3) {
-    config = migrateV3ToV4(current);
-    current = toCanonicalConfig(config) as unknown as Record<string, unknown>;
+/**
+ * Explicit, idempotent v7 -> v8 migration for route-scoped initial imports.
+ * Existing routes opt into the legacy recent-post behavior; routes created
+ * after the upgrade use `inherit` and therefore follow the new global default.
+ */
+export function migrateV7ToV8(rawConfig: Record<string, unknown>): AppConfig {
+  const config = normalizeConfigV3({ ...rawConfig, schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION });
+  for (const route of config.routes) {
+    route.initialImportMode = 'recent';
   }
-  if (fromVersion <= 4) {
-    config = migrateV4ToV5(current);
-    current = toCanonicalConfig(config) as unknown as Record<string, unknown>;
-  }
-  if (fromVersion <= 5) {
-    config = migrateV5ToV6(current);
-    current = toCanonicalConfig(config) as unknown as Record<string, unknown>;
-  }
-  return migrateV6ToV7(current);
-}
-
-export function planConfigMigration(rawConfig: unknown): ConfigMigrationReport {
-  if (!isConfigRecord(rawConfig)) {
-    throw new Error('Configuration root must be a JSON object.');
-  }
-  const fromVersion = normalizeSchemaVersion(rawConfig.schemaVersion);
-  if (fromVersion > CURRENT_CONFIG_SCHEMA_VERSION) {
-    throw new Error(
-      `Config schema version ${fromVersion} is newer than supported version ${CURRENT_CONFIG_SCHEMA_VERSION}.`,
-    );
-  }
-  if (fromVersion === CURRENT_CONFIG_SCHEMA_VERSION) {
-    const config = normalizeConfigV3(rawConfig);
-    if (
-      !Array.isArray(rawConfig.sources) ||
-      !Array.isArray(rawConfig.destinations) ||
-      !Array.isArray(rawConfig.routes) ||
-      config.sources.length !== rawConfig.sources.length ||
-      config.destinations.length !== rawConfig.destinations.length ||
-      config.routes.length !== rawConfig.routes.length
-    ) {
-      throw new Error('Configuration normalization would discard one or more canonical entities.');
-    }
-    assertValidAppConfig(config);
-    return {
-      fromVersion,
-      toVersion: CURRENT_CONFIG_SCHEMA_VERSION,
-      dryRun: true,
-      wouldMigrate: false,
-      sourceCount: config.sources.length,
-      destinationCount: config.destinations.length,
-      routeCount: config.routes.length,
-      deduplicatedSources: 0,
-      deduplicatedDestinations: 0,
-      deduplicatedRoutes: 0,
-      conflicts: [],
-      backupSuffix: ROLLBACK_BACKUP_SUFFIX,
-      rollback: [...ROLLBACK_INSTRUCTIONS],
-    };
-  }
-
-  let version = fromVersion;
-  let working = { ...rawConfig };
-  if (version < 1) {
-    working = migrateV0ToV1(working);
-    version = 1;
-  }
-  if (version < 2) {
-    working = migrateV1ToV2(working, fromVersion);
-  }
-  if (version >= 3) {
-    const config = applyMigrationsFromV3(working, version);
-    assertValidAppConfig(config);
-    return {
-      fromVersion,
-      toVersion: CURRENT_CONFIG_SCHEMA_VERSION,
-      dryRun: true,
-      wouldMigrate: true,
-      sourceCount: config.sources.length,
-      destinationCount: config.destinations.length,
-      routeCount: config.routes.length,
-      deduplicatedSources: 0,
-      deduplicatedDestinations: 0,
-      deduplicatedRoutes: 0,
-      conflicts: [],
-      backupSuffix: ROLLBACK_BACKUP_SUFFIX,
-      rollback: [...ROLLBACK_INSTRUCTIONS],
-    };
-  }
-  return migrateV2ToV3(working, {
-    dryRun: true,
-    migratedFromVersion: fromVersion,
-    now: new Date(0),
-  }).report;
+  const normalized = normalizeConfigV3(toCanonicalConfig(config));
+  normalized.mappings = projectAccountMappings(normalized);
+  assertValidAppConfig(normalized);
+  return normalized;
 }
 
 export function migrateConfigWithMetadata(rawConfig: unknown): ConfigMigrationResult {
@@ -696,6 +623,26 @@ export function migrateConfigWithMetadata(rawConfig: unknown): ConfigMigrationRe
       rollback: [...ROLLBACK_INSTRUCTIONS],
     };
     version = 7;
+    working = toCanonicalConfig(config) as unknown as Record<string, unknown>;
+  }
+  if (version < 8) {
+    config = migrateV7ToV8(working);
+    report ??= {
+      fromVersion,
+      toVersion: CURRENT_CONFIG_SCHEMA_VERSION,
+      dryRun: false,
+      wouldMigrate: true,
+      sourceCount: config.sources.length,
+      destinationCount: config.destinations.length,
+      routeCount: config.routes.length,
+      deduplicatedSources: 0,
+      deduplicatedDestinations: 0,
+      deduplicatedRoutes: 0,
+      conflicts: [],
+      backupSuffix: ROLLBACK_BACKUP_SUFFIX,
+      rollback: [...ROLLBACK_INSTRUCTIONS],
+    };
+    version = 8;
   } else {
     config = normalizeConfigV3(working);
     report = {

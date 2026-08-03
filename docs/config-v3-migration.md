@@ -1,20 +1,17 @@
 # Config schema migration and rollback
 
-Before upgrading, run a read-only report:
-
-```sh
-bun src/cli.ts config-migration-report /path/to/config.json
-```
-
-The report contains entity counts, deduplication counts, conflicting field
-names, and legacy mapping IDs. It never contains credential values. Any
-duplicate Bluesky identity with conflicting credentials, ownership, policy, or
-route state blocks the migration.
-
 On the first successful legacy load, the application writes the original bytes
 to applicable `config.json.pre-vN-backup` files before replacing `config.json`.
 Backups are created once and are not refreshed. Loading the migrated file again
 is byte-stable.
+
+## Schema v8: initial import policy
+
+`migrateV7ToV8` adds a global `defaultInitialImportMode` and a route-scoped
+`initialImportMode`. The fresh global default is `new-only`; newly created
+routes use `inherit`. Existing routes are migrated to explicit `recent` mode
+so an upgrade preserves their prior first-fetch behavior. The migration is
+idempotent and retains `config.json.pre-v8-backup` for rollback.
 
 ## Schema v7: managed Bluesky accounts
 
@@ -30,17 +27,18 @@ is byte-stable.
 - The migration is idempotent; reloading a v7 config does not create duplicate
   accounts. A `.pre-v7-backup` file is retained for rollback.
 
-Canonical v7 shape (sanitized and abbreviated only where arrays are empty):
+Canonical v8 shape (sanitized and abbreviated only where arrays are empty):
 
 ```json
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "revision": 14,
   "updatedAt": "2026-07-25T14:00:00.000Z",
   "twitter": {
     "authToken": "<encrypted-or-redacted>",
     "ct0": "<encrypted-or-redacted>"
   },
+  "defaultInitialImportMode": "new-only",
   "blueskyAccounts": [
     {
       "id": "00000000-0000-4000-8000-0000000000aa",
@@ -97,6 +95,7 @@ Canonical v7 shape (sanitized and abbreviated only where arrays are empty):
       "sourceId": "00000000-0000-4000-8000-000000000001",
       "destinationId": "00000000-0000-4000-8000-000000000002",
       "enabled": true,
+      "initialImportMode": "inherit",
       "delivery": {"mode": "immediate"}
     }
   ],
@@ -116,7 +115,7 @@ To roll back:
 1. Stop the application.
 2. Preserve the current data directory as an additional backup.
 3. Copy the backup matching the previous release's maximum readable schema over `config.json`
-   (for v7 upgrades, typically `config.json.pre-v7-backup`).
+   (for v8 upgrades, typically `config.json.pre-v8-backup`).
 4. Start the previous release.
 5. Verify destination ownership, source routes, queue depth, and recent
    delivery history.
@@ -126,3 +125,5 @@ so restoring the database is normally unnecessary. Restore the pre-upgrade
 database backup only if the older release cannot tolerate the added columns.
 Migration `010-bluesky-account-runtime` adds `bluesky_account_runtime_state` for
 per-account auth health; it is safe to leave in place when rolling config back.
+Migration `011-route-initial-import-state` adds the route-scoped first-scan
+baseline table; it is also safe to leave in place during a config rollback.

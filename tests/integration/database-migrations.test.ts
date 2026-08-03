@@ -52,7 +52,20 @@ test('upgrades a representative legacy database twice idempotently', async () =>
             );
           \`);
           database.close();
-          await import(${JSON.stringify(dbModuleUrl)});
+          const { routeInitialImportStateService } = await import(${JSON.stringify(dbModuleUrl)});
+          routeInitialImportStateService.initialize({
+            routeId: 'route-1',
+            appliedMode: 'new-only',
+            baselinePostId: 'tweet-9',
+            baselinePostCreatedAt: 9000,
+            initializedAt: 9100,
+          });
+          // A retry cannot replace the durable first-success decision.
+          routeInitialImportStateService.initialize({
+            routeId: 'route-1',
+            appliedMode: 'recent',
+            initializedAt: 9200,
+          });
           const inspected = new Database(${JSON.stringify(databasePath)}, { readonly: true });
           const result = {
             history: inspected.query(
@@ -64,6 +77,7 @@ test('upgrades a representative legacy database twice idempotently', async () =>
             migrations: inspected.query(
               'SELECT version, name, applied_at FROM schema_migrations ORDER BY version'
             ).all(),
+            initialImportState: routeInitialImportStateService.get('route-1'),
           };
           inspected.close();
           await Bun.write(${JSON.stringify(firstResultPath)}, JSON.stringify(result));
@@ -82,14 +96,17 @@ test('upgrades a representative legacy database twice idempotently', async () =>
         process.execPath,
         '--eval',
         `
-          await import(${JSON.stringify(dbModuleUrl)});
+          const { routeInitialImportStateService } = await import(${JSON.stringify(dbModuleUrl)});
           const { Database } = await import('bun:sqlite');
           const inspected = new Database(${JSON.stringify(databasePath)}, { readonly: true });
           const migrations = inspected.query(
             'SELECT version, name, applied_at FROM schema_migrations ORDER BY version'
           ).all();
           inspected.close();
-          await Bun.write(${JSON.stringify(secondResultPath)}, JSON.stringify(migrations));
+          await Bun.write(${JSON.stringify(secondResultPath)}, JSON.stringify({
+            migrations,
+            initialImportState: routeInitialImportStateService.get('route-1'),
+          }));
         `,
       ],
       { env: temporary.env, stdout: 'pipe', stderr: 'pipe' },
@@ -104,10 +121,12 @@ test('upgrades a representative legacy database twice idempotently', async () =>
       history: Record<string, unknown>;
       queued: Record<string, unknown>;
       migrations: Array<Record<string, unknown>>;
+      initialImportState: Record<string, unknown>;
     };
-    const secondMigrations = JSON.parse(fs.readFileSync(secondResultPath, 'utf8')) as Array<
-      Record<string, unknown>
-    >;
+    const second = JSON.parse(fs.readFileSync(secondResultPath, 'utf8')) as {
+      migrations: Array<Record<string, unknown>>;
+      initialImportState: Record<string, unknown>;
+    };
     const migrations = first.migrations;
 
     expect(migrations).toEqual([
@@ -121,8 +140,18 @@ test('upgrades a representative legacy database twice idempotently', async () =>
       { version: 8, name: 'canonical-queue-identity', applied_at: expect.any(Number) },
       { version: 9, name: 'delivery-diagnostics', applied_at: expect.any(Number) },
       { version: 10, name: 'bluesky-account-runtime-state', applied_at: expect.any(Number) },
+      { version: 11, name: 'route-initial-import-state', applied_at: expect.any(Number) },
     ]);
-    expect(secondMigrations).toEqual(migrations);
+    expect(second.migrations).toEqual(migrations);
+    expect(first.initialImportState).toEqual({
+      routeId: 'route-1',
+      status: 'initialized',
+      appliedMode: 'new-only',
+      baselinePostId: 'tweet-9',
+      baselinePostCreatedAt: 9000,
+      initializedAt: 9100,
+    });
+    expect(second.initialImportState).toEqual(first.initialImportState);
     expect(first.history).toMatchObject({
       twitter_id: 'tweet-1',
       external_post_id: 'tweet-1',
@@ -255,11 +284,7 @@ test('migration 008 rekeys a populated legacy queue without orphaning rows', asy
     expect(result.newTables).toEqual(['backfill_jobs', 'destination_leases']);
 
     // The canonical duplicate collapses to the oldest row; every other row survives.
-    expect(result.queued.map((row) => row.tweet_json)).toEqual([
-      '{"id":"q1"}',
-      '{"id":"q2"}',
-      '{"id":"q3"}',
-    ]);
+    expect(result.queued.map((row) => row.tweet_json)).toEqual(['{"id":"q1"}', '{"id":"q2"}', '{"id":"q3"}']);
     expect(new Set(result.queued.map((row) => row.queue_id)).size).toBe(3);
     expect(result.queued[0]).toMatchObject({
       twitter_id: 'q1',
@@ -357,6 +382,56 @@ test('queue keeps destination idempotency and destination locking after upgrade'
   }
 });
 
+test('a new-only route baseline does not block an explicit backfill queue item', async () => {
+  const temporary = createTemporaryDataDir();
+  const resultPath = path.join(temporary.path, 'initial-import-backfill.json');
+  const dbModuleUrl = new URL('../../src/db.ts', import.meta.url).href;
+  try {
+    const subprocess = Bun.spawn(
+      [
+        process.execPath,
+        '--eval',
+        `
+          const { postQueueService, routeInitialImportStateService } = await import(${JSON.stringify(dbModuleUrl)});
+          routeInitialImportStateService.initialize({
+            routeId: 'route-new-only',
+            appliedMode: 'new-only',
+            baselinePostId: '200',
+            baselinePostCreatedAt: 2000,
+          });
+          const enqueued = postQueueService.enqueue([{
+            source_type: 'x',
+            destination_id: 'destination',
+            twitter_username: 'source',
+            kind: 'backfill',
+            request_id: 'backfill-1',
+            tweet_json: '{}',
+            policy_version: 1,
+            twitter_id: '100',
+            external_post_id: '100',
+            bsky_identifier: 'destination.example',
+            mapping_id: 'destination',
+            route_id: 'route-new-only',
+          }]);
+          const queued = postQueueService.getItem({
+            twitterId: '100',
+            destinationId: 'destination',
+          });
+          await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({ enqueued, queued }));
+        `,
+      ],
+      { env: temporary.env, stdout: 'pipe', stderr: 'pipe' },
+    );
+    const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()]);
+    expect(exitCode, stderr).toBe(0);
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>;
+    expect(result.enqueued).toBe(1);
+    expect(result.queued).toMatchObject({ kind: 'backfill', external_post_id: '100' });
+  } finally {
+    temporary.cleanup();
+  }
+});
+
 test('persists source runtime state and resets failures on success', async () => {
   const temporary = createTemporaryDataDir();
   const resultPath = path.join(temporary.path, 'runtime-state.json');
@@ -403,6 +478,62 @@ test('persists source runtime state and resets failures on success', async () =>
       nextEligibleCheckAt: 400,
     });
     expect(result.recovered.lastErrorMessage).toBeUndefined();
+  } finally {
+    temporary.cleanup();
+  }
+});
+
+test('persists route initial-import state once across restarts and retries', async () => {
+  const temporary = createTemporaryDataDir();
+  const resultPath = path.join(temporary.path, 'route-initial-import.json');
+  const dbModuleUrl = new URL('../../src/db.ts', import.meta.url).href;
+  try {
+    const subprocess = Bun.spawn(
+      [
+        process.execPath,
+        '--eval',
+        `
+          const { routeInitialImportStateService } = await import(${JSON.stringify(dbModuleUrl)});
+          const first = routeInitialImportStateService.initialize({
+            routeId: 'route-1',
+            appliedMode: 'new-only',
+            baselinePostId: '200',
+            baselinePostCreatedAt: 2000,
+            initializedAt: 3000,
+          });
+          const retry = routeInitialImportStateService.initialize({
+            routeId: 'route-1',
+            appliedMode: 'recent',
+            baselinePostId: '999',
+            baselinePostCreatedAt: 9999,
+            initializedAt: 9999,
+          });
+          await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({ first, retry }));
+        `,
+      ],
+      { env: temporary.env, stdout: 'pipe', stderr: 'pipe' },
+    );
+    const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()]);
+    expect(exitCode, stderr).toBe(0);
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>;
+    expect(result).toEqual({
+      first: {
+        routeId: 'route-1',
+        status: 'initialized',
+        appliedMode: 'new-only',
+        baselinePostId: '200',
+        baselinePostCreatedAt: 2000,
+        initializedAt: 3000,
+      },
+      retry: {
+        routeId: 'route-1',
+        status: 'initialized',
+        appliedMode: 'new-only',
+        baselinePostId: '200',
+        baselinePostCreatedAt: 2000,
+        initializedAt: 3000,
+      },
+    });
   } finally {
     temporary.cleanup();
   }

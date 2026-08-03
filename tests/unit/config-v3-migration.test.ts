@@ -5,7 +5,6 @@ import {
   applyMappingProjection,
   migrateConfig,
   migrateConfigWithMetadata,
-  planConfigMigration,
   toCanonicalConfig,
 } from '../../src/config-manager.js';
 
@@ -108,15 +107,19 @@ describe('canonical config v3 migration', () => {
       owner: 'different-owner',
     };
     const raw = v2Config([legacyMapping, conflicting]);
-    const report = planConfigMigration(raw);
-    const serialized = JSON.stringify(report);
-
-    expect(report.conflicts).toHaveLength(1);
-    expect(report.conflicts[0]?.conflictingFields).toContain('bskyPassword');
-    expect(report.conflicts[0]?.conflictingFields).toContain('owner');
+    let conflict: ConfigMigrationConflictError | undefined;
+    try {
+      migrateConfig(raw);
+    } catch (error) {
+      if (error instanceof ConfigMigrationConflictError) conflict = error;
+    }
+    expect(conflict).toBeDefined();
+    const serialized = JSON.stringify(conflict?.report);
+    expect(conflict?.report.conflicts).toHaveLength(1);
+    expect(conflict?.report.conflicts[0]?.conflictingFields).toContain('bskyPassword');
+    expect(conflict?.report.conflicts[0]?.conflictingFields).toContain('owner');
     expect(serialized).not.toContain('secret-one');
     expect(serialized).not.toContain('different-super-secret');
-    expect(() => migrateConfig(raw)).toThrow(ConfigMigrationConflictError);
   });
 
   test('translates compatibility projection mutations into canonical entities', () => {

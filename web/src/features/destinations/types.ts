@@ -11,6 +11,8 @@ export type BulkAccountsAction =
 export type AttributionMode = 'never' | 'multiple-sources' | 'always';
 export type SyncMode = 'off' | 'manual' | 'scheduled';
 export type AIOverrideMode = 'inherit' | 'enabled' | 'disabled';
+export type DefaultInitialImportMode = 'new-only' | 'recent';
+export type InitialImportMode = 'inherit' | DefaultInitialImportMode;
 
 export interface SourceFilterPolicy {
   originalPosts: boolean;
@@ -186,6 +188,7 @@ export interface AccountMapping extends ConfigVersion {
     moderationPolicy?: ModerationPolicy;
     duplicateSuppression?: DuplicateSuppressionPolicy;
     delivery?: RouteDeliveryPolicy;
+    initialImportMode?: InitialImportMode;
     schedule?: SourceSchedulePolicy;
     runtime?: SourceRuntimeState | null;
   }>;
@@ -217,12 +220,7 @@ export interface AccountMapping extends ConfigVersion {
   moderationPolicy: ModerationPolicy;
   duplicateSuppression: DuplicateSuppressionPolicy;
   profileManagement: ProfileManagementPolicy;
-  migrationReview?: {
-    needsAdminReview: boolean;
-    migratedFromSchemaVersion: number;
-    notices: string[];
-    reviewedAt?: string;
-  };
+  initialImportModesByUsername?: Record<string, InitialImportMode>;
   createdByUser?: {
     id: string;
     username?: string;

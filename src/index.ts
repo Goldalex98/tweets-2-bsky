@@ -21,20 +21,11 @@ import { createBlueskyDigestDeliveryAdapter } from './adapters/bluesky-digest-de
 import { createBlueskyNormalizedDeliveryAdapter } from './adapters/bluesky-normalized-delivery.js';
 import { contentSha256 } from './content-dedup.js';
 import { evaluateContentPolicy } from './content-policy.js';
-import {
-  type DeliveryFallbackEvent,
-  serializeDeliveryDiagnostics,
-} from './delivery-diagnostics.js';
+import { type DeliveryFallbackEvent, serializeDeliveryDiagnostics } from './delivery-diagnostics.js';
 import { combinePerceptualHashes, computePerceptualHashes } from './media-dedup.js';
 import { createRetainedCandidate, serializeRetainedCandidate } from './retained-candidate.js';
 
-import {
-  type AccountMapping,
-  type AIConfig,
-  type AppConfig,
-  getConfig,
-  saveConfig,
-} from './config-manager.js';
+import { type AccountMapping, type AIConfig, type AppConfig, getConfig, saveConfig } from './config-manager.js';
 import {
   getActiveTwitterUsernames,
   getCanonicalDestinationKey,
@@ -42,20 +33,12 @@ import {
   historyIdentityKeys,
   resolveDestinationStorageKey,
 } from './mapping-helpers.js';
-import {
-  applyPostingPolicy,
-  facetsForFirstChunk,
-  splitPostText,
-} from './post-transform.js';
+import { applyPostingPolicy, facetsForFirstChunk, splitPostText } from './post-transform.js';
 import { assertProfileMutationAllowed, evaluateProfileMutation } from './profile-policy.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
 import { parseRuntimeOptions } from './runtime-options.js';
 import { CanonicalSourceSweepService } from './pipeline/source-sweep.js';
-import {
-  PipelineRunService,
-  type EnqueueResult,
-  type PolicyDecision,
-} from './pipeline/run-service.js';
+import { PipelineRunService, type EnqueueResult, type PolicyDecision } from './pipeline/run-service.js';
 import { isBackfillStillRequested } from './pipeline/backfill-cancellation.js';
 import {
   LEGACY_DELIVERY_POLICY,
@@ -67,12 +50,7 @@ import {
 import { evaluateSourceFilter, SOURCE_FILTER_POLICY_VERSION } from './source-filter.js';
 import type { SourceFilterDecision } from './source-filter.js';
 import { getSchedulerIntervalMinutes } from './scheduler-timing.js';
-import {
-  XRateGovernor,
-  isAuthError,
-  isRateLimitError,
-  parseRateLimitResetMs,
-} from './x-rate-limit.js';
+import { XRateGovernor, isAuthError, isRateLimitError, parseRateLimitResetMs } from './x-rate-limit.js';
 import {
   buildPollNote,
   detectCardMedia,
@@ -225,6 +203,7 @@ import {
   backfillJobService,
   parseSqliteUtcTimestampMs,
   postQueueService,
+  routeInitialImportStateService,
   runtimeStateService,
 } from './db.js';
 import {
@@ -234,11 +213,9 @@ import {
   serializePolicySnapshot,
 } from './policy-snapshot.js';
 import type { BackfillJob, ProcessedTweetLookupEntry, QueueBatch } from './db.js';
+import { prepareRouteInitialImportCandidates } from './pipeline/route-initial-import.js';
 import { metricsService } from './metrics.js';
-import {
-  normalizeXPost,
-  type NormalizedPost,
-} from './normalized-post.js';
+import { normalizeXPost, type NormalizedPost } from './normalized-post.js';
 import { notifyOperationsEvent } from './notification-service.js';
 import { buildDigestPreview, nextDigestRun } from './digest.js';
 import {
@@ -247,9 +224,7 @@ import {
   createStructuredLogger,
   sanitizedErrorMessage,
 } from './observability.js';
-import {
-  DigestWorkerService,
-} from './services/digest-worker-service.js';
+import { DigestWorkerService } from './services/digest-worker-service.js';
 import { NormalizedDeliveryService } from './services/normalized-delivery-service.js';
 import {
   DestinationQueueWorkerService,
@@ -319,10 +294,7 @@ function loadProcessedTweets(bskyIdentifier: string): ProcessedTweetsMap {
   const entries = dbService.getTweetsByBskyIdentifier(bskyIdentifier);
   return Object.fromEntries(
     Object.entries(entries).map(([twitterId, entry]: [string, ProcessedTweetLookupEntry]) => {
-      const root =
-        entry.root?.uri && entry.root.cid
-          ? { uri: entry.root.uri, cid: entry.root.cid }
-          : undefined;
+      const root = entry.root?.uri && entry.root.cid ? { uri: entry.root.uri, cid: entry.root.cid } : undefined;
       if (entry.root?.uri && !entry.root.cid) {
         console.warn(
           `[${bskyIdentifier}] Skipping incomplete thread root for ${twitterId}: root URI present without CID.`,
@@ -378,7 +350,7 @@ function saveProcessedTweet(
     source_id: source?.id,
     source_created_at: sourceCreatedAt,
     posted_at: entry.migrated ? Date.now() : undefined,
-    skip_reason: entry.skipped ? skipReason ?? 'policy' : undefined,
+    skip_reason: entry.skipped ? (skipReason ?? 'policy') : undefined,
     policy_version: SOURCE_FILTER_POLICY_VERSION,
     policy_snapshot: route ? JSON.stringify(route.filters) : undefined,
     tweet_text: entry.text,
@@ -666,9 +638,7 @@ async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<P
       if (!node || typeof node !== 'object') return undefined;
       const record = node as Record<string, unknown>;
       const legacy =
-        record.legacy && typeof record.legacy === 'object'
-          ? (record.legacy as Record<string, unknown>)
-          : undefined;
+        record.legacy && typeof record.legacy === 'object' ? (record.legacy as Record<string, unknown>) : undefined;
       if (record.rest_id === userId && legacy && Array.isArray(legacy.pinned_tweet_ids_str)) {
         const pinnedId = legacy.pinned_tweet_ids_str[0];
         if (typeof pinnedId === 'string') return pinnedId;
@@ -1405,13 +1375,10 @@ async function fetchUserTweets(
         const transient =
           errorMessage.includes('ServiceUnavailable') ||
           errorMessage.includes('Timeout') ||
-          (responseStatus === 400 &&
-            JSON.stringify(responseData ?? {}).includes('InternalServerError'));
+          (responseStatus === 400 && JSON.stringify(responseData ?? {}).includes('InternalServerError'));
         if (transient && retries > 0) {
           const waitMs = 5000 * 2 ** (2 - retries);
-          console.warn(
-            `⚠️ [${username}] Transient X error (${errorMessage}). Retrying in ${formatDurationMs(waitMs)}.`,
-          );
+          console.warn(`⚠️ [${username}] Transient X error (${errorMessage}). Retrying in ${formatDurationMs(waitMs)}.`);
           await new Promise((r) => setTimeout(r, waitMs));
           continue;
         }
@@ -1446,8 +1413,7 @@ async function fetchUserTweets(
 // Main Processing Logic
 // ============================================================================
 
-const checkpointContentHash = (text: string): string =>
-  createHash('sha256').update(text).digest('hex');
+const checkpointContentHash = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 async function postWithDeterministicRkey(
   agent: BskyAgent,
@@ -1462,10 +1428,12 @@ async function postWithDeterministicRkey(
     .digest('hex')
     .slice(0, 24);
   try {
-    return await (agent.post as unknown as (
-      post: Record<string, unknown>,
-      options: { rkey: string },
-    ) => Promise<{ uri: string; cid: string }>)(record, { rkey });
+    return await (
+      agent.post as unknown as (
+        post: Record<string, unknown>,
+        options: { rkey: string },
+      ) => Promise<{ uri: string; cid: string }>
+    )(record, { rkey });
   } catch (error) {
     const message = sanitizedErrorMessage(error).toLowerCase();
     if (!message.includes('already') && !message.includes('exists')) throw error;
@@ -1519,8 +1487,7 @@ async function processTweets(
   addTweetsToMap(tweetMap, filteredTweets);
 
   // Maintain a local map that updates in real-time for intra-batch replies
-  const localProcessedMap: ProcessedTweetsMap =
-    sharedProcessedMap ?? { ...loadProcessedTweetsForDestination(mapping) };
+  const localProcessedMap: ProcessedTweetsMap = sharedProcessedMap ?? { ...loadProcessedTweetsForDestination(mapping) };
 
   const toProcess = filteredTweets.filter((t) => !localProcessedMap[t.id_str || t.id || '']);
 
@@ -1544,11 +1511,7 @@ async function processTweets(
     if (localProcessedMap[tweetId]) continue;
 
     // Fallback to DB in case a nested backfill already saved this tweet.
-    const dbRecord = findProcessedTweetDual(
-      (twitterId, key) => dbService.getTweet(twitterId, key),
-      tweetId,
-      mapping,
-    );
+    const dbRecord = findProcessedTweetDual((twitterId, key) => dbService.getTweet(twitterId, key), tweetId, mapping);
     if (dbRecord) {
       localProcessedMap[tweetId] = {
         uri: dbRecord.bsky_uri,
@@ -1916,7 +1879,10 @@ async function processTweets(
               if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
               deliveryFallbacks.push({
                 kind: 'video-link',
-                reason: errMsg === 'VIDEO_FALLBACK_503' ? 'Video processing unavailable (503)' : `Video upload failed: ${errMsg}`,
+                reason:
+                  errMsg === 'VIDEO_FALLBACK_503'
+                    ? 'Video processing unavailable (503)'
+                    : `Video upload failed: ${errMsg}`,
               });
             }
           }
@@ -1947,14 +1913,11 @@ async function processTweets(
     if (tweet.is_quote_status && tweet.quoted_status_id_str) {
       const quoteId = tweet.quoted_status_id_str;
       const localQuoteRef = localProcessedMap[quoteId];
-      const crossDestinationQuote = localQuoteRef?.uri && localQuoteRef.cid
-        ? null
-        : dbService.findMigratedXPost(quoteId);
+      const crossDestinationQuote =
+        localQuoteRef?.uri && localQuoteRef.cid ? null : dbService.findMigratedXPost(quoteId);
       const quoteRef = resolveQuoteStrongRef(
         localQuoteRef,
-        crossDestinationQuote
-          ? { uri: crossDestinationQuote.bsky_uri, cid: crossDestinationQuote.bsky_cid }
-          : null,
+        crossDestinationQuote ? { uri: crossDestinationQuote.bsky_uri, cid: crossDestinationQuote.bsky_cid } : null,
       );
       if (quoteRef) {
         console.log(
@@ -2075,11 +2038,12 @@ async function processTweets(
       text += `\n\nQT: ${externalQuoteUrl}`;
       deliveryFallbacks.push({
         kind: 'quote-link',
-        reason: images.length >= 4
-          ? 'No image slots for quote screenshot'
-          : videoBlob
-            ? 'Quote screenshot skipped because video embed is present'
-            : 'Quote screenshot unavailable; appended QT link',
+        reason:
+          images.length >= 4
+            ? 'No image slots for quote screenshot'
+            : videoBlob
+              ? 'Quote screenshot skipped because video embed is present'
+              : 'Quote screenshot unavailable; appended QT link',
       });
     }
 
@@ -2155,9 +2119,7 @@ async function processTweets(
             createdAt: getUniqueCreatedAtIso(bskyIdentifier, baseCreatedAtMs + index * 1000),
           })),
         );
-    const firstMissingChunk = dryRun
-      ? 0
-      : deliveryCheckpointService.firstMissing(mapping.id, tweetId);
+    const firstMissingChunk = dryRun ? 0 : deliveryCheckpointService.firstMissing(mapping.id, tweetId);
 
     let lastPostInfo: ProcessedTweetEntry | null = replyParentInfo;
 
@@ -2222,9 +2184,7 @@ async function processTweets(
         langs: detectedLangs,
         // CID is generated by the PDS from record content; unique createdAt keeps
         // near-simultaneous self-thread posts from colliding on identical payloads.
-        createdAt:
-          checkpoints[i]?.createdAt ??
-          getUniqueCreatedAtIso(bskyIdentifier, baseCreatedAtMs + i * 1000),
+        createdAt: checkpoints[i]?.createdAt ?? getUniqueCreatedAtIso(bskyIdentifier, baseCreatedAtMs + i * 1000),
       };
 
       if (i === 0) {
@@ -2455,9 +2415,7 @@ function contentPolicyMetadataForTweet(tweet: Tweet, sourceUsername: string) {
   const media = tweet.extended_entities?.media || tweet.entities?.media || [];
   const mediaTypes = [
     ...new Set(
-      media.map((entry) =>
-        entry.type === 'photo' ? 'image' : entry.type === 'animated_gif' ? 'gif' : 'video',
-      ),
+      media.map((entry) => (entry.type === 'photo' ? 'image' : entry.type === 'animated_gif' ? 'gif' : 'video')),
     ),
   ] as Array<'image' | 'gif' | 'video'>;
   const isRepost = Boolean(tweet.isRetweet || tweet.retweeted_status_id_str || (tweet.text || '').startsWith('RT @'));
@@ -2592,6 +2550,7 @@ async function executeCanonicalXSourceSweep(
   const mediaHashByTweet = new Map<string, Promise<string | undefined>>();
   const rawTweetByPost = new Map<string, Tweet>();
   const mappingByDestination = new Map(config.mappings.map((mapping) => [mapping.id, mapping]));
+
   const service = new CanonicalSourceSweepService<Tweet, NormalizedPost>({
     fetch: async (source) => {
       const checkJobId = `check:${source.id}`;
@@ -2638,13 +2597,21 @@ async function executeCanonicalXSourceSweep(
       return normalized;
     },
     identify: (post) => post.externalId,
+    prepareRouteCandidates: (posts, { source, route }) =>
+      prepareRouteInitialImportCandidates({
+        routeId: route.id,
+        configuredMode: route.initialImportMode,
+        globalDefault: config.defaultInitialImportMode,
+        posts,
+        fetchSucceeded: !errorsBySource.has(source.id),
+        store: routeInitialImportStateService,
+      }),
     applySourcePolicy: (post, { source, route }) =>
       evaluateSourceFilter(route.filters, post, {
         sourceEnabled: source.enabled,
         expectedSourceUsername: source.username,
       }),
-    applyRoutePolicy: (post, { destination, route }) =>
-      evaluateContentPolicy(destination, route, post),
+    applyRoutePolicy: (post, { destination, route }) => evaluateContentPolicy(destination, route, post),
     isDestinationDuplicate: async (post, destination, route) => {
       const tweetId = post.externalId;
       let queued = queuedIdsByDestination.get(destination.id);
@@ -2665,9 +2632,7 @@ async function executeCanonicalXSourceSweep(
           pending = computePerceptualHashes(
             post.media.filter((media) => media.type === 'image').map((media) => media.url),
             { enabled: true },
-          ).then((result) =>
-            combinePerceptualHashes(result.hashes),
-          );
+          ).then((result) => combinePerceptualHashes(result.hashes));
           mediaHashByTweet.set(tweetId, pending);
         }
         imageHash = await pending;
@@ -2828,8 +2793,7 @@ const xSourceSweepService = new XSourceSweepService({
       message: 'The oldest queue item exceeded the configured age threshold.',
       details: { ageMs, depth },
     }),
-  log: (message, isError, sweepId) =>
-    logPipeline('Sweep', message, isError, { sweepId }),
+  log: (message, isError, sweepId) => logPipeline('Sweep', message, isError, { sweepId }),
   formatDuration: formatDurationMs,
   createSweepId: () => `sweep-${randomUUID()}`,
 });
@@ -2880,14 +2844,7 @@ async function fetchAndEnqueueBackfill(
   const runService = new PipelineRunService<Tweet, Tweet>({
     clock: { now: () => Date.now() },
     fetch: (request) =>
-      fetchBackfillTimeline(
-        mapping,
-        twitterUsername,
-        request.limit ?? 100,
-        ignoreCancellation,
-        requestId,
-        sessionKey,
-      ),
+      fetchBackfillTimeline(mapping, twitterUsername, request.limit ?? 100, ignoreCancellation, requestId, sessionKey),
     normalize: (raw) => raw,
     applyPolicy: (candidates) => applyBackfillPolicy(mapping, twitterUsername, candidates, mediaHashes),
     enqueue: async (candidates) =>
@@ -2959,100 +2916,94 @@ async function applyBackfillPolicy(
   const config = getConfig();
   const source = config.sources.find((candidate) => candidate.username === twitterUsername.toLowerCase());
   const route = source
-    ? config.routes.find(
-        (candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping.id,
-      )
+    ? config.routes.find((candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping.id)
     : undefined;
   const destination = config.destinations.find((candidate) => candidate.id === mapping.id);
   const accepted: Tweet[] = [];
   const skipped: Array<{ candidate: Tweet; reason: string }> = [];
   for (const tweet of found) {
-      const filterDecision = source
-        ? filterTweetForSource(tweet, source, route?.filters ?? source.filters)
-        : ({ allowed: false, reason: 'source-disabled', policyVersion: SOURCE_FILTER_POLICY_VERSION } as const);
-      const tweetId = String(tweet.id_str || tweet.id || '');
-      const contentDecision =
-        filterDecision.allowed && destination && route
-          ? evaluateContentPolicy(
-              destination,
-              route,
-              contentPolicyMetadataForTweet(tweet, twitterUsername),
+    const filterDecision = source
+      ? filterTweetForSource(tweet, source, route?.filters ?? source.filters)
+      : ({ allowed: false, reason: 'source-disabled', policyVersion: SOURCE_FILTER_POLICY_VERSION } as const);
+    const tweetId = String(tweet.id_str || tweet.id || '');
+    const contentDecision =
+      filterDecision.allowed && destination && route
+        ? evaluateContentPolicy(destination, route, contentPolicyMetadataForTweet(tweet, twitterUsername))
+        : undefined;
+    const effectiveDecision = filterDecision.allowed ? contentDecision : filterDecision;
+    if (filterDecision.allowed && !contentDecision) {
+      accepted.push(tweet);
+      continue;
+    }
+    if (effectiveDecision?.allowed) {
+      const routePolicy = route?.duplicateSuppression;
+      const destinationPolicy = destination?.duplicateSuppression;
+      const dedupPolicy = routePolicy?.enabled ? routePolicy : destinationPolicy;
+      const metadata = contentPolicyMetadataForTweet(tweet, twitterUsername);
+      const imageHash =
+        dedupPolicy?.enabled && dedupPolicy.perceptualImageHash
+          ? combinePerceptualHashes(
+              (await computePerceptualHashes(imageMediaUrlsForTweet(tweet), { enabled: true })).hashes,
             )
           : undefined;
-      const effectiveDecision = filterDecision.allowed ? contentDecision : filterDecision;
-      if (filterDecision.allowed && !contentDecision) {
+      mediaHashByTweet.set(tweetId, imageHash);
+      const duplicate =
+        dedupPolicy?.enabled && destination && route
+          ? Boolean(
+              duplicateFingerprintService.findRecent({
+                destinationId: destination.id,
+                routeId: route.id,
+                routeScoped: routePolicy?.enabled,
+                textUrlHash: contentSha256(metadata.text, metadata.urls),
+                imageHash,
+                since: Date.now() - dedupPolicy.windowHours * 60 * 60 * 1000,
+              }),
+            )
+          : false;
+      if (!duplicate) {
         accepted.push(tweet);
         continue;
       }
-      if (effectiveDecision?.allowed) {
-        const routePolicy = route?.duplicateSuppression;
-        const destinationPolicy = destination?.duplicateSuppression;
-        const dedupPolicy = routePolicy?.enabled ? routePolicy : destinationPolicy;
-        const metadata = contentPolicyMetadataForTweet(tweet, twitterUsername);
-        const imageHash =
-          dedupPolicy?.enabled && dedupPolicy.perceptualImageHash
-            ? combinePerceptualHashes(
-                (await computePerceptualHashes(imageMediaUrlsForTweet(tweet), { enabled: true })).hashes,
-              )
-            : undefined;
-        mediaHashByTweet.set(tweetId, imageHash);
-        const duplicate =
-          dedupPolicy?.enabled && destination && route
-            ? Boolean(
-                duplicateFingerprintService.findRecent({
-                  destinationId: destination.id,
-                  routeId: route.id,
-                  routeScoped: routePolicy?.enabled,
-                  textUrlHash: contentSha256(metadata.text, metadata.urls),
-                  imageHash,
-                  since: Date.now() - dedupPolicy.windowHours * 60 * 60 * 1000,
-                }),
-              )
-            : false;
-        if (!duplicate) {
-          accepted.push(tweet);
-          continue;
-        }
-      }
-      if (tweetId && destination && route) {
-        const metadata = contentPolicyMetadataForTweet(tweet, twitterUsername);
-        const retained = createRetainedCandidate({
-          externalPostId: tweetId,
-          metadata,
-          mediaUrls: imageMediaUrlsForTweet(tweet),
-          sourcePayload: tweet,
-        });
-        dbService.saveTweet({
-          twitter_id: tweetId,
-          twitter_username: twitterUsername,
-          bsky_identifier: destinationStorageKey,
-          source_type: 'x',
-          external_post_id: tweetId,
-          destination_id: destination.id,
-          route_id: route.id,
-          source_id: source?.id,
-          source_created_at: getTweetSourceCreatedAt(tweet),
-          skip_reason: effectiveDecision?.allowed ? 'duplicate-suppressed' : effectiveDecision?.reason,
-          policy_version: POLICY_SNAPSHOT_VERSION,
-          policy_snapshot: serializePolicySnapshot(createPolicySnapshot({ destination, route, ai: config.ai })),
-          decision_version:
-            'decisionVersion' in (effectiveDecision ?? {})
-              ? (effectiveDecision as { decisionVersion?: number }).decisionVersion
-              : filterDecision.policyVersion,
-          decision_trace:
-            effectiveDecision && 'trace' in effectiveDecision
-              ? JSON.stringify((effectiveDecision as { trace?: unknown[] }).trace)
-              : undefined,
-          retained_candidate_json: serializeRetainedCandidate(retained),
-          retained_until: retained.expiresAt,
-          tweet_text: (tweet.full_text || tweet.text || '').slice(0, 300),
-          status: 'skipped',
-        });
-      }
-      skipped.push({
-        candidate: tweet,
-        reason: effectiveDecision?.allowed ? 'duplicate-suppressed' : (effectiveDecision?.reason ?? 'skipped'),
+    }
+    if (tweetId && destination && route) {
+      const metadata = contentPolicyMetadataForTweet(tweet, twitterUsername);
+      const retained = createRetainedCandidate({
+        externalPostId: tweetId,
+        metadata,
+        mediaUrls: imageMediaUrlsForTweet(tweet),
+        sourcePayload: tweet,
       });
+      dbService.saveTweet({
+        twitter_id: tweetId,
+        twitter_username: twitterUsername,
+        bsky_identifier: destinationStorageKey,
+        source_type: 'x',
+        external_post_id: tweetId,
+        destination_id: destination.id,
+        route_id: route.id,
+        source_id: source?.id,
+        source_created_at: getTweetSourceCreatedAt(tweet),
+        skip_reason: effectiveDecision?.allowed ? 'duplicate-suppressed' : effectiveDecision?.reason,
+        policy_version: POLICY_SNAPSHOT_VERSION,
+        policy_snapshot: serializePolicySnapshot(createPolicySnapshot({ destination, route, ai: config.ai })),
+        decision_version:
+          'decisionVersion' in (effectiveDecision ?? {})
+            ? (effectiveDecision as { decisionVersion?: number }).decisionVersion
+            : filterDecision.policyVersion,
+        decision_trace:
+          effectiveDecision && 'trace' in effectiveDecision
+            ? JSON.stringify((effectiveDecision as { trace?: unknown[] }).trace)
+            : undefined,
+        retained_candidate_json: serializeRetainedCandidate(retained),
+        retained_until: retained.expiresAt,
+        tweet_text: (tweet.full_text || tweet.text || '').slice(0, 300),
+        status: 'skipped',
+      });
+    }
+    skipped.push({
+      candidate: tweet,
+      reason: effectiveDecision?.allowed ? 'duplicate-suppressed' : (effectiveDecision?.reason ?? 'skipped'),
+    });
   }
   return { accepted, skipped };
 }
@@ -3067,19 +3018,10 @@ async function enqueueBackfillCandidates(
   const config = getConfig();
   const source = config.sources.find((candidate) => candidate.username === twitterUsername.toLowerCase());
   const route = source
-    ? config.routes.find(
-        (candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping.id,
-      )
+    ? config.routes.find((candidate) => candidate.sourceId === source.id && candidate.destinationId === mapping.id)
     : undefined;
   const destination = config.destinations.find((candidate) => candidate.id === mapping.id);
-  const queued = enqueueTweetsForMapping(
-    mapping,
-    twitterUsername,
-    [...accepted],
-    'backfill',
-    requestId,
-    true,
-  );
+  const queued = enqueueTweetsForMapping(mapping, twitterUsername, [...accepted], 'backfill', requestId, true);
   const routeDedup = route?.duplicateSuppression;
   const destinationDedup = destination?.duplicateSuppression;
   if (queued > 0 && destination && route && (routeDedup?.enabled || destinationDedup?.enabled)) {
@@ -3147,14 +3089,7 @@ async function deliverNormalizedQueueItems(
       uploadImage: (buffer, mimeType) => uploadToBluesky(agent, buffer, mimeType),
       uploadVideo: (buffer, filename) => uploadVideoToBluesky(agent, buffer, filename),
       publish: ({ destinationId, externalPostId, chunkIndex, record }) =>
-        postWithDeterministicRkey(
-          agent,
-          mapping,
-          destinationId,
-          externalPostId,
-          chunkIndex,
-          record,
-        ),
+        postWithDeterministicRkey(agent, mapping, destinationId, externalPostId, chunkIndex, record),
     }),
     batch,
   );
@@ -3244,13 +3179,7 @@ const digestWorkerService = new DigestWorkerService(
       arm: (destinationId, routeId, nextRunAt) => digestJobService.arm(destinationId, routeId, nextRunAt),
       claimNext: (excludedDestinationIds, resolveMaxEntries, acquireLease) => {
         if (isRestoreRestartRequired()) return null;
-        return digestJobService.claimNext(
-          excludedDestinationIds,
-          Date.now(),
-          200,
-          resolveMaxEntries,
-          acquireLease,
-        );
+        return digestJobService.claimNext(excludedDestinationIds, Date.now(), 200, resolveMaxEntries, acquireLease);
       },
       checkpoint: (id, claimToken, checkpoint, contentHash) =>
         digestJobService.checkpoint(id, claimToken, checkpoint, contentHash),
@@ -3269,14 +3198,7 @@ const digestWorkerService = new DigestWorkerService(
     delivery: createBlueskyDigestDeliveryAdapter({
       getAgent,
       publish: (agent, mapping, input) =>
-        postWithDeterministicRkey(
-          agent,
-          mapping,
-          input.destinationId,
-          input.runKey,
-          input.chunk.index,
-          input.record,
-        ),
+        postWithDeterministicRkey(agent, mapping, input.destinationId, input.runKey, input.chunk.index, input.record),
     }),
     buildPreview: (entries, policy, runKey) => buildDigestPreview(entries, policy, runKey),
     nextRun: (policy) => nextDigestRun(policy),
@@ -3299,16 +3221,12 @@ const digestWorkerService = new DigestWorkerService(
         destinationLeaseService.release(destinationId, RUNTIME_OWNER_ID);
       },
     },
-    onWorkerError: (error) =>
-      logPipeline('Queue', `❌ Digest worker crashed: ${describeError(error)}`, true),
+    onWorkerError: (error) => logPipeline('Queue', `❌ Digest worker crashed: ${describeError(error)}`, true),
   },
   activePostDestinations,
 );
 
-const queueBatchStarts = new WeakMap<
-  QueueBatch,
-  { startedAt: number; queueContext: Partial<CorrelationContext> }
->();
+const queueBatchStarts = new WeakMap<QueueBatch, { startedAt: number; queueContext: Partial<CorrelationContext> }>();
 
 const queueWorkerService = new DestinationQueueWorkerService(
   {
@@ -3318,8 +3236,7 @@ const queueWorkerService = new DestinationQueueWorkerService(
     findMapping: (config, mappingId) => {
       const destinationId =
         config.destinations.find(
-          (destination) =>
-            destination.id === mappingId || destination.metadata.legacyMappingIds.includes(mappingId),
+          (destination) => destination.id === mappingId || destination.metadata.legacyMappingIds.includes(mappingId),
         )?.id ?? mappingId;
       return config.mappings.find((mapping) => mapping.id === destinationId);
     },
@@ -3364,22 +3281,15 @@ const queueWorkerService = new DestinationQueueWorkerService(
           historyIdentityKeys(candidate).includes(item.bsky_identifier.toLowerCase()),
         );
       const record = mapping
-        ? findProcessedTweetDual(
-            (twitterId, key) => dbService.getTweet(twitterId, key),
-            item.twitter_id,
-            mapping,
-          )
+        ? findProcessedTweetDual((twitterId, key) => dbService.getTweet(twitterId, key), item.twitter_id, mapping)
         : dbService.getTweet(item.twitter_id, item.bsky_identifier);
-      return record
-        ? { status: record.status, recordedAt: parseSqliteUtcTimestampMs(record.created_at) }
-        : null;
+      return record ? { status: record.status, recordedAt: parseSqliteUtcTimestampMs(record.created_at) } : null;
     },
     markDone: (item) =>
       item.queue_id
         ? void postQueueService.markDoneById(item.queue_id)
         : postQueueService.markDone(item.twitter_id, item.bsky_identifier),
-    releaseForRetry: (item, error, maxAttempts) =>
-      postQueueService.releaseForRetry(item, error, maxAttempts),
+    releaseForRetry: (item, error, maxAttempts) => postQueueService.releaseForRetry(item, error, maxAttempts),
     describeError,
     classifyError: classifyQueueError,
     metrics: {
@@ -3458,8 +3368,7 @@ const queueWorkerService = new DestinationQueueWorkerService(
       );
       queueBatchStarts.delete(batch);
     },
-    onWorkerError: (error) =>
-      logPipeline('Queue', `❌ Worker scheduler error: ${describeError(error)}`, true),
+    onWorkerError: (error) => logPipeline('Queue', `❌ Worker scheduler error: ${describeError(error)}`, true),
   },
   POST_WORKER_CONCURRENCY,
   QUEUE_MAX_ATTEMPTS,
@@ -4259,9 +4168,7 @@ async function runAccountTask(
         );
         const accountCount = backfillSources.length;
         const estimatedTotalTweets = accountCount * limit;
-        console.log(
-          `${logPrefix} Running backfill for ${backfillSources.length} active accounts (limit ${limit})...`,
-        );
+        console.log(`${logPrefix} Running backfill for ${backfillSources.length} active accounts (limit ${limit})...`);
         updateAppStatus({
           state: 'backfilling',
           currentAccount: backfillSources[0],
@@ -4690,10 +4597,8 @@ async function main(): Promise<void> {
       deleteByMappingId: (mappingId) => postQueueService.deleteByMappingId(mappingId),
       pendingCount: () => postQueueService.getCounts().pending,
       getConfig,
-      onRecovered: (count) =>
-        logPipeline('Queue', `♻️ Recovered ${count} in-flight tweet(s) from a previous run.`),
-      onPending: (count) =>
-        logPipeline('Queue', `📬 ${count} tweet(s) already queued; post workers will resume.`),
+      onRecovered: (count) => logPipeline('Queue', `♻️ Recovered ${count} in-flight tweet(s) from a previous run.`),
+      onPending: (count) => logPipeline('Queue', `📬 ${count} tweet(s) already queued; post workers will resume.`),
     },
     14 * 24 * 60 * 60 * 1000,
   );
@@ -4806,8 +4711,7 @@ async function main(): Promise<void> {
           ? `[${new Date().toISOString()}] ⏰ Running deferred scheduled checks after backfill queue.`
           : `[${new Date().toISOString()}] ⏰ Scheduled check triggered.`,
       ),
-    onSweepCompleted: () =>
-      updateAppStatus({ state: 'idle', message: 'Scheduled checks complete' }),
+    onSweepCompleted: () => updateAppStatus({ state: 'idle', message: 'Scheduled checks complete' }),
   });
   await schedulerService.runForever();
 }

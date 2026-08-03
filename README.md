@@ -148,6 +148,8 @@ Each cycle splits discovery from delivery so posting never delays detection:
 
 The queue and processed history survive restarts. Repeated failures are parked (dashboard Retry/Clear) instead of retrying forever. Long threads checkpoint after each Bluesky chunk and resume after crash or retry. Quoted X posts prefer native Bluesky record embeds; otherwise retained scraper metadata produces an external quote card before screenshot or plain-link fallbacks.
 
+New routes default to **Start with new posts only**. Their first successful fetch atomically records a route-scoped baseline and queues none of that initial batch. This means adding another X account to an existing Bluesky destination does not disturb its existing routes. The global default or a per-route override can instead import the normal recent batch. Changing the setting after initialization never imports older posts; use explicit Backfill for that.
+
 Operational endpoints:
 
 - `GET /healthz` and `GET /readyz` — unauthenticated, redacted probes

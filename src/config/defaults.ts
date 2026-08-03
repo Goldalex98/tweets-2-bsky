@@ -1,19 +1,20 @@
 import { DEFAULT_CHECK_INTERVAL_MINUTES } from '../scheduler-timing.js';
 import { withCompatibilityMappings } from './projection.js';
 import {
-  type AppConfig,
   type AIConfig,
+  type AppConfig,
+  CURRENT_CONFIG_SCHEMA_VERSION,
+  type DefaultInitialImportMode,
   type DestinationAIOverrides,
   type DuplicateSuppressionPolicy,
   type ModerationPolicy,
-  CURRENT_CONFIG_SCHEMA_VERSION,
   type NotificationConfig,
   type PostingPolicy,
   type ProfileManagementPolicy,
+  type RouteDeliveryPolicy,
+  type RoutingPolicy,
   type SchedulerConfig,
   type SourceFilterPolicy,
-  type RoutingPolicy,
-  type RouteDeliveryPolicy,
   type SourceSchedulePolicy,
   type TwitterConfig,
   type UserPermissions,
@@ -21,6 +22,7 @@ import {
 } from './schemas.js';
 
 export const DEFAULT_ATTRIBUTION_TEMPLATE = 'Source: @{username} on X';
+export const DEFAULT_INITIAL_IMPORT_MODE: DefaultInitialImportMode = 'new-only';
 
 export const DEFAULT_TWITTER_CONFIG: TwitterConfig = {
   authToken: '',
@@ -234,6 +236,7 @@ export function getDefaultConfig(): AppConfig {
     revision: 0,
     updatedAt: new Date(0).toISOString(),
     twitter: { ...DEFAULT_TWITTER_CONFIG },
+    defaultInitialImportMode: DEFAULT_INITIAL_IMPORT_MODE,
     sources: [],
     destinations: [],
     routes: [],

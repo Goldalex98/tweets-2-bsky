@@ -1,16 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { createDefaultMappingPolicies, getDefaultConfig } from './config/defaults.js';
-import {
-  migrateConfig,
-  migrateConfigWithMetadata,
-  planConfigMigration,
-} from './config/migrations.js';
-import {
-  assertValidAppConfig,
-  isConfigRecord,
-  normalizeConfigV3,
-} from './config/normalize.js';
+import { migrateConfig, migrateConfigWithMetadata } from './config/migrations.js';
+import { assertValidAppConfig, isConfigRecord, normalizeConfigV3 } from './config/normalize.js';
 import { applyMappingProjection, toCanonicalConfig } from './config/projection.js';
 import type { AccountMapping, AppConfig, TwitterConfig } from './config/schemas.js';
 import { decryptConfigDocument, encryptConfigDocument } from './secret-storage.js';
@@ -61,9 +53,7 @@ export class ConfigRevisionConflictError extends Error {
     readonly current: ConfigVersion,
     readonly expectedRevision: number,
   ) {
-    super(
-      `Configuration revision ${expectedRevision} is stale; the stored revision is ${current.revision}.`,
-    );
+    super(`Configuration revision ${expectedRevision} is stale; the stored revision is ${current.revision}.`);
     this.name = 'ConfigRevisionConflictError';
   }
 }
@@ -81,6 +71,7 @@ export const CONFIG_PRE_V4_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v4-backup`;
 export const CONFIG_PRE_V5_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v5-backup`;
 export const CONFIG_PRE_V6_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v6-backup`;
 export const CONFIG_PRE_V7_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v7-backup`;
+export const CONFIG_PRE_V8_BACKUP_FILE = `${ACTIVE_CONFIG_FILE}.pre-v8-backup`;
 
 let configPathInitialized = false;
 let configWriteBlockedReason: string | undefined;
@@ -187,6 +178,10 @@ function ensurePreV7Backup(rawText: string): void {
   writeMigrationBackup(CONFIG_PRE_V7_BACKUP_FILE, rawText, 'pre-v7');
 }
 
+function ensurePreV8Backup(rawText: string): void {
+  writeMigrationBackup(CONFIG_PRE_V8_BACKUP_FILE, rawText, 'pre-v8');
+}
+
 function loadConfigText(rawText: string): ReturnType<typeof migrateConfigWithMetadata> {
   const parsed = decryptConfigDocument(JSON.parse(rawText));
   return migrateConfigWithMetadata(parsed);
@@ -201,6 +196,7 @@ function recoverConfigFromBackup(): AppConfig | undefined {
     const backupText = fs.readFileSync(CONFIG_BACKUP_FILE, 'utf8');
     const result = loadConfigText(backupText);
     if (result.migrated) {
+      if (result.fromVersion < 8) ensurePreV8Backup(backupText);
       if (result.fromVersion < 7) ensurePreV7Backup(backupText);
       if (result.fromVersion < 6) ensurePreV6Backup(backupText);
       if (result.fromVersion < 5) ensurePreV5Backup(backupText);
@@ -282,6 +278,7 @@ export function getConfig(): AppConfig {
   if (JSON.stringify(parsed) !== JSON.stringify(toCanonicalConfig(result.config))) {
     try {
       if (result.migrated) {
+        if (result.fromVersion < 8) ensurePreV8Backup(rawText);
         if (result.fromVersion < 7) ensurePreV7Backup(rawText);
         if (result.fromVersion < 6) ensurePreV6Backup(rawText);
         if (result.fromVersion < 5) ensurePreV5Backup(rawText);
@@ -293,9 +290,7 @@ export function getConfig(): AppConfig {
       }
       writeConfigFile(result.config);
       if (result.migrated) {
-        console.log(
-          `📦 Upgraded config schema from v${result.fromVersion} to v${result.toVersion}; review migrated destination policies.`,
-        );
+        console.log(`📦 Upgraded config schema from v${result.fromVersion} to v${result.toVersion}.`);
       }
     } catch (error) {
       configWriteBlockedReason = `Configuration migration could not be written: ${(error as Error).message}`;
@@ -371,18 +366,6 @@ export function saveCanonicalConfig(config: AppConfig): void {
     throw new Error(`Refusing to save config: ${configWriteBlockedReason}`);
   }
   persistWithRevisionSwap(config, toCanonicalConfig(config));
-}
-
-export function getConfigMigrationReport(rawConfig?: unknown) {
-  if (rawConfig !== undefined) {
-    return planConfigMigration(rawConfig);
-  }
-  ensureConfigPathReady();
-  if (!fs.existsSync(CONFIG_FILE)) {
-    return planConfigMigration(toCanonicalConfig(getDefaultConfig()));
-  }
-  const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as unknown;
-  return planConfigMigration(parsed);
 }
 
 type MappingPolicyFields =

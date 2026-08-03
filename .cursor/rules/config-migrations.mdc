@@ -7,7 +7,7 @@ alwaysApply: false
 # Config migrations
 
 - Bump `CURRENT_CONFIG_SCHEMA_VERSION` in `src/config/schemas.ts` only with a real `migrateVNToVN+1`.
-- Wire into `applyMigrationsFromV3` / `migrateConfigWithMetadata` / `planConfigMigration`.
+- Wire into `applyMigrationsFromV3` / `migrateConfigWithMetadata`.
 - Migrations must be **idempotent** and **byte-stable** on reload (re-normalize via `normalizeConfigV3(toCanonicalConfig(...))` when needed).
 - Update `ROLLBACK_BACKUP_SUFFIX` to `.pre-vN-backup`; add `ensurePreVNBackup` in `config-manager.ts`.
 - Preserve legacy behavior until the versioned migration explicitly changes it.

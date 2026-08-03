@@ -28,15 +28,16 @@ const dialogProps = {
   sourceInput: '',
   parseSummary: { duplicates: [], invalid: [] },
   busy: false,
-  canReviewMigration: true,
+  globalInitialImportDefault: 'new-only' as const,
+  addSourcesInitialImportMode: 'inherit' as const,
   onClose: () => undefined,
   onSubmit: () => undefined,
   onFormChange: () => undefined,
   onSourceInputChange: () => undefined,
+  onAddSourcesInitialImportModeChange: () => undefined,
   onAddSources: async () => undefined,
   onRemoveSource: () => undefined,
   onManageAccount: () => undefined,
-  onDismissMigrationReview: () => undefined,
   onSaveSourceFilters: async () => undefined,
   onSaveSourceSchedule: async () => undefined,
   schedulerIntervalMinutes: 5,
@@ -159,12 +160,7 @@ describe('profile mutation control', () => {
 describe('edit destination dialog', () => {
   test('exposes attribution controls on the delivery section', () => {
     const markup = renderToStaticMarkup(
-      <EditDestinationDialog
-        mapping={mapping()}
-        form={form()}
-        {...dialogProps}
-        initialSection="delivery"
-      />,
+      <EditDestinationDialog mapping={mapping()} form={form()} {...dialogProps} initialSection="delivery" />,
     );
 
     expect(markup).toContain('id="edit-destination-attribution-mode"');
@@ -191,16 +187,13 @@ describe('edit destination dialog', () => {
 
   test('exposes source filters on the sources section', () => {
     const markup = renderToStaticMarkup(
-      <EditDestinationDialog
-        mapping={mapping()}
-        form={form()}
-        {...dialogProps}
-        initialSection="sources"
-      />,
+      <EditDestinationDialog mapping={mapping()} form={form()} {...dialogProps} initialSection="sources" />,
     );
 
     expect(markup).toContain('Source filters');
     expect(markup).toContain('X source polling');
+    expect(markup).toContain('Use global default');
+    expect(markup).toContain('Current global default: Start with new posts only.');
     expect(markup).toContain('Source add/remove applies immediately');
     expect(markup).not.toContain('Source add/remove is applied when you click Save Destination');
   });
@@ -249,5 +242,27 @@ describe('scheduler interval control', () => {
     expect(markup).toContain('Check interval must be between 1 and 1440 minutes.');
     expect(markup).toContain('aria-invalid="true"');
     expect(markup).toContain('disabled=""');
+  });
+
+  test('shows the safe new-only global initial import default', () => {
+    const markup = renderToStaticMarkup(
+      <SchedulerSection
+        value={scheduler(5)}
+        setValue={() => undefined}
+        saving={false}
+        onSubmit={() => undefined}
+        sourceDefaults={{
+          revision: 3,
+          updatedAt: '2026-08-02T12:00:00.000Z',
+          defaultInitialImportMode: 'new-only',
+        }}
+        setSourceDefaults={() => undefined}
+        onSaveSourceDefaults={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('Import existing posts when adding an X account');
+    expect(markup).toContain('Off starts new sources with a baseline');
+    expect(markup).toContain('Save X source default');
   });
 });

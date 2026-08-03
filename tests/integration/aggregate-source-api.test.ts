@@ -116,6 +116,11 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
               headers: auth,
               body: JSON.stringify({ filters: { originalPosts: 'yes' } })
             });
+            const invalidInitialImportMode = await json('/api/destinations/' + mappingBefore.id + '/sources/two', {
+              method: 'PATCH',
+              headers: auth,
+              body: JSON.stringify({ initialImportMode: 'everything' })
+            });
             const validSourcePolicy = await json('/api/destinations/' + mappingBefore.id + '/sources/two', {
               method: 'PATCH',
               headers: auth,
@@ -123,7 +128,8 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
                 state: 'paused',
                 cancelPendingQueue: false,
                 filters: { mediaOnly: true, sensitiveContent: 'skip' },
-                schedule: { mode: 'fixed', minIntervalMinutes: 2, maxIntervalMinutes: 30, fixedIntervalMinutes: 7 }
+                schedule: { mode: 'fixed', minIntervalMinutes: 2, maxIntervalMinutes: 30, fixedIntervalMinutes: 7 },
+                initialImportMode: 'recent'
               })
             });
             const filterPreview = await json(
@@ -135,6 +141,27 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
               }
             );
             const mappingAfter = configManager.getConfig().mappings[0];
+            const sourceDefaultsBefore = await json('/api/settings/source-defaults', { headers: auth });
+            const versionBeforeDefaultsUpdate = configManager.getConfig();
+            const sourceDefaultsUpdate = await json('/api/settings/source-defaults', {
+              method: 'PATCH',
+              headers: auth,
+              body: JSON.stringify({
+                defaultInitialImportMode: 'recent',
+                revision: versionBeforeDefaultsUpdate.revision,
+                updatedAt: versionBeforeDefaultsUpdate.updatedAt
+              })
+            });
+            const staleDestinationCreate = await json('/api/destinations', {
+              method: 'POST',
+              headers: auth,
+              body: JSON.stringify({
+                twitterUsernames: ['four'],
+                bskyIdentifier: 'unused.example',
+                bskyPassword: '<redacted-app-password>',
+                ...staleVersion
+              })
+            });
             await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
               unauthorized,
               invalid,
@@ -144,9 +171,15 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
               blockedRemoval,
               unauthorizedSourcePolicy,
               invalidSourcePolicy,
+              invalidInitialImportMode,
               validSourcePolicy,
               filterPreview,
+              sourceDefaultsBefore,
+              sourceDefaultsUpdate,
+              staleDestinationCreate,
               sources: mappingAfter.twitterUsernames,
+              threeRouteMode: configManager.getConfig().routes.find((route) => route.sourceId === configManager.getConfig().sources.find((source) => source.username === 'three')?.id)?.initialImportMode,
+              twoRouteMode: configManager.getConfig().routes.find((route) => route.sourceId === configManager.getConfig().sources.find((source) => source.username === 'two')?.id)?.initialImportMode,
               passwordUnchanged: mappingAfter.bskyPassword === mappingBefore.bskyPassword,
               postingPolicyUnchanged: JSON.stringify(mappingAfter.postingPolicy) === JSON.stringify(mappingBefore.postingPolicy),
               profilePolicyUnchanged: JSON.stringify(mappingAfter.profileManagement) === JSON.stringify(mappingBefore.profileManagement),
@@ -160,10 +193,7 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
       ],
       { env: temporary.env, stdout: 'pipe', stderr: 'pipe' },
     );
-    const [exitCode, stderr] = await Promise.all([
-      subprocess.exited,
-      new Response(subprocess.stderr).text(),
-    ]);
+    const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()]);
     expect(exitCode, stderr).toBe(0);
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as Record<string, unknown>;
     expect(result.unauthorized.status).toBe(401);
@@ -186,6 +216,7 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
     expect(result.blockedRemoval.status).toBe(409);
     expect(result.unauthorizedSourcePolicy.status).toBe(401);
     expect(result.invalidSourcePolicy.status).toBe(400);
+    expect(result.invalidInitialImportMode.status).toBe(400);
     expect(result.validSourcePolicy).toMatchObject({
       status: 200,
       body: {
@@ -193,14 +224,23 @@ test('aggregate source APIs enforce permissions and preserve credentials, policy
         queuedItemsPreserved: true,
         filters: { mediaOnly: true, sensitiveContent: 'skip' },
         schedule: { mode: 'fixed', fixedIntervalMinutes: 7 },
+        initialImportMode: 'recent',
       },
     });
     expect(result.filterPreview).toMatchObject({
       status: 200,
       body: { allowed: false, reason: 'media-required' },
     });
+    expect(result.sourceDefaultsBefore).toMatchObject({ status: 200, body: { defaultInitialImportMode: 'new-only' } });
+    expect(result.sourceDefaultsUpdate).toMatchObject({ status: 200, body: { defaultInitialImportMode: 'recent' } });
+    expect(result.staleDestinationCreate).toMatchObject({
+      status: 409,
+      body: { code: 'CONFIG_REVISION_CONFLICT' },
+    });
     expect(result.sources).toHaveLength(3);
     expect(result.sources).toEqual(expect.arrayContaining(['one', 'two', 'three']));
+    expect(result.threeRouteMode).toBe('inherit');
+    expect(result.twoRouteMode).toBe('recent');
     expect(result.passwordUnchanged).toBe(true);
     expect(result.postingPolicyUnchanged).toBe(true);
     expect(result.profilePolicyUnchanged).toBe(true);

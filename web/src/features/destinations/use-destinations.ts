@@ -5,6 +5,7 @@ import type {
   AccountGroup,
   AccountMapping,
   BskyProfileView,
+  InitialImportMode,
   SourceFilterPolicy,
   SourceSchedulePolicy,
 } from './types';
@@ -101,12 +102,14 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
   );
 
   const createDestination = useCallback(
-    async (payload: object) => {
-      const response = await api.post<AccountMapping>('/api/destinations', payload);
+    async (payload: object, version?: ConfigVersion) => {
+      const response = await withConflictRefresh(() =>
+        api.post<AccountMapping>('/api/destinations', version ? withConfigVersion(payload, version) : payload),
+      );
       setMappings((current) => [...current, response.data]);
       return response.data;
     },
-    [],
+    [withConflictRefresh],
   );
 
   /**
@@ -140,7 +143,7 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
   );
 
   const syncSources = useCallback(
-    async (mapping: AccountMapping, nextSources: string[]) => {
+    async (mapping: AccountMapping, nextSources: string[], initialImportMode: InitialImportMode = 'inherit') => {
       let version: ConfigVersion = mapping;
       const current = new Set(mapping.twitterUsernames.map((username) => username.toLowerCase()));
       const next = new Set(nextSources.map((username) => username.toLowerCase()));
@@ -150,7 +153,7 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
         if (added.length > 0) {
           const response = await api.post<ConfigVersion>(
             `/api/destinations/${mapping.id}/sources`,
-            withConfigVersion({ sources: added }, version),
+            withConfigVersion({ sources: added, initialImportMode }, version),
           );
           version = response.data;
         }
@@ -166,9 +169,7 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
         if (!latest) {
           // Never synthesize sources without routeId — content/delivery panels
           // key off route metadata and would hide the newly added source.
-          throw new Error(
-            'Destination list refresh failed after updating sources. Reload and try again.',
-          );
+          throw new Error('Destination list refresh failed after updating sources. Reload and try again.');
         }
         return latest;
       });
@@ -184,16 +185,19 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
         filters?: SourceFilterPolicy;
         schedule?: SourceSchedulePolicy;
         state?: 'enabled' | 'paused';
+        initialImportMode?: InitialImportMode;
       },
     ) => {
-      const response = await withConflictRefresh(() =>
+      await withConflictRefresh(() =>
         api.patch(
           `/api/destinations/${mapping.id}/sources/${encodeURIComponent(username)}`,
           withConfigVersion(payload, mapping),
         ),
       );
-      await fetchDestinations();
-      return response.data;
+      const loaded = await fetchDestinations();
+      const latest = loaded?.find((entry) => entry.id === mapping.id);
+      if (!latest) throw new Error('Destination refresh failed after saving the source. Reload and try again.');
+      return latest;
     },
     [fetchDestinations, withConflictRefresh],
   );
@@ -242,15 +246,18 @@ export function useDestinations({ authenticated, onError }: UseDestinationsOptio
     return response.data;
   }, []);
 
-  const applyProfileSync = useCallback(async (mapping: AccountMapping, sourceUsername?: string) => {
-    const response = await withConflictRefresh(() =>
-      api.post(`/api/mappings/${mapping.id}/profile/apply`, {
-        sourceUsername: sourceUsername || undefined,
-      }),
-    );
-    await fetchDestinations();
-    return response.data;
-  }, [fetchDestinations, withConflictRefresh]);
+  const applyProfileSync = useCallback(
+    async (mapping: AccountMapping, sourceUsername?: string) => {
+      const response = await withConflictRefresh(() =>
+        api.post(`/api/mappings/${mapping.id}/profile/apply`, {
+          sourceUsername: sourceUsername || undefined,
+        }),
+      );
+      await fetchDestinations();
+      return response.data;
+    },
+    [fetchDestinations, withConflictRefresh],
+  );
 
   const queuePinSync = useCallback(async (mapping: AccountMapping, sourceUsername?: string) => {
     const response = await api.post(`/api/pin-sync/${mapping.id}`, {

@@ -20,6 +20,10 @@ export interface SourceSweepDependencies<Raw, Normalized> {
   fetch(source: Source): Promise<Raw[]>;
   normalize(raw: Raw, source: Source): Normalized;
   identify(candidate: Normalized): string;
+  prepareRouteCandidates?(
+    candidates: readonly Normalized[],
+    context: { source: Source; destination: Destination; route: Route },
+  ): readonly Normalized[] | Promise<readonly Normalized[]>;
   applySourcePolicy(
     candidate: Normalized,
     context: { source: Source; destination: Destination; route: Route },
@@ -89,9 +93,12 @@ export class CanonicalSourceSweepService<Raw, Normalized> {
         const destination = destinationById.get(route.destinationId);
         if (!destination) continue;
         const context = { source, destination, route };
+        const routeCandidates = this.dependencies.prepareRouteCandidates
+          ? await this.dependencies.prepareRouteCandidates(normalized, context)
+          : normalized;
         const destinationCandidates: Normalized[] = [];
         const seenInBatch = new Set<string>();
-        for (const candidate of normalized) {
+        for (const candidate of routeCandidates) {
           const policy = this.dependencies.applySourcePolicy(candidate, context);
           if (!policy.allowed) {
             result.filteredPosts += 1;

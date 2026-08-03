@@ -12,7 +12,7 @@ Copy and track:
 ```
 - [ ] Bump CURRENT_CONFIG_SCHEMA_VERSION in src/config/schemas.ts
 - [ ] Implement migrateV{N-1}ToV{N} in src/config/migrations.ts
-- [ ] Wire applyMigrationsFromV3 + migrateConfigWithMetadata + planConfigMigration
+- [ ] Wire applyMigrationsFromV3 + migrateConfigWithMetadata
 - [ ] Update ROLLBACK_BACKUP_SUFFIX and ConfigMigrationReport backupSuffix union
 - [ ] ensurePreV{N}Backup in src/config-manager.ts (+ recover/getConfig paths)
 - [ ] normalize + assertValidAppConfig; projection if mappings affected

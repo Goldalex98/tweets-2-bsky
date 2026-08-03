@@ -31,7 +31,7 @@ test('application entry point stays a dashboard shell', () => {
 test('destination onboarding exposes aggregate review and safe backfill defaults', () => {
   expect(destinationWizardSource).toContain('Create Bluesky Destination');
   expect(destinationWizardSource).toContain('X Sources ({props.sources.length})');
-  expect(destinationWizardSource).toContain('Backfill:</strong> None (request separately after creation)');
+  expect(destinationWizardSource).toContain('Backfill:</strong> Available separately after creation');
   expect(destinationWizardSource).toContain('Profile &amp; pin policy:</strong>');
   expect(destinationWizardSource).toContain(
     "allowProfileMutation ? 'Mutations allowed (sync modes still off)' : 'Mutations disabled'",

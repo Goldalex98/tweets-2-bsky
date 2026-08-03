@@ -6,22 +6,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import {
-  estimateChecksPerHour,
-  formatLocalDateTime,
   MAX_CHECK_INTERVAL_MINUTES,
   MIN_CHECK_INTERVAL_MINUTES,
+  estimateChecksPerHour,
+  formatLocalDateTime,
   parseCheckIntervalMinutes,
 } from '../../lib/dashboard-utils';
-import {
-  SourcePollingPanel,
-  uniquePollingOptions,
-} from '../destinations/source-polling-panel';
-import type { AccountMapping, SourceSchedulePolicy } from '../destinations/types';
+import { SourcePollingPanel, uniquePollingOptions } from '../destinations/source-polling-panel';
+import type { AccountMapping, InitialImportMode, SourceSchedulePolicy } from '../destinations/types';
 import type { SchedulerSettings } from '../status/types';
 import type {
+  AIConfig,
   AccountSecurityEmailState,
   AccountSecurityPasswordState,
-  AIConfig,
   AuthUser,
   CookieHealthStatus,
   ManagedUser,
@@ -33,13 +30,18 @@ import type {
   UserFormState,
   UserPermissions,
 } from './types';
+import type { SourceDefaultsSettings } from './use-source-defaults';
 import { PERMISSION_OPTIONS } from './utils';
 
 const NOTIFICATION_EVENT_OPTIONS: Array<{ key: NotificationEvent; label: string; hint: string }> = [
   { key: 'twitter-auth-failure', label: 'X / Twitter auth failure', hint: 'Cookie or scraper authentication failed.' },
   { key: 'bsky-auth-failure', label: 'Bluesky auth failure', hint: 'Destination login or app password rejected.' },
   { key: 'queue-parked', label: 'Queue item parked', hint: 'A post exhausted retries and was parked as failed.' },
-  { key: 'queue-age', label: 'Queue age alert', hint: 'Oldest pending item exceeded QUEUE_AGE_ALERT_MS (default 1 hour). Off by default.' },
+  {
+    key: 'queue-age',
+    label: 'Queue age alert',
+    hint: 'Oldest pending item exceeded QUEUE_AGE_ALERT_MS (default 1 hour). Off by default.',
+  },
   { key: 'update-failure', label: 'Update failure', hint: 'In-app update process failed to start or exit cleanly.' },
 ];
 
@@ -73,21 +75,68 @@ export function AccountSecuritySection({
 }) {
   return (
     <Card>
-      <CardHeader><CardTitle>Account Security</CardTitle><CardDescription>Update the email and password for {user.username || user.email || 'your account'}.</CardDescription></CardHeader>
+      <CardHeader>
+        <CardTitle>Account Security</CardTitle>
+        <CardDescription>
+          Update the email and password for {user.username || user.email || 'your account'}.
+        </CardDescription>
+      </CardHeader>
       <CardContent className="grid gap-6 border-t pt-4 lg:grid-cols-2">
         <form className="space-y-3" onSubmit={onSaveEmail}>
           <p className="font-semibold">Change Email</p>
-          <Label htmlFor="account-current-email">Current Email</Label><Input id="account-current-email" value={email.currentEmail} disabled />
-          <Label htmlFor="account-new-email">New Email</Label><Input id="account-new-email" type="email" value={email.newEmail} onChange={(event) => setEmail((current) => ({ ...current, newEmail: event.target.value }))} required />
-          <Label htmlFor="account-email-password">Current Password</Label><Input id="account-email-password" type="password" value={email.password} onChange={(event) => setEmail((current) => ({ ...current, password: event.target.value }))} required />
-          <Button size="sm" type="submit" disabled={busy}><Save className="mr-2 h-4 w-4" />Save Email</Button>
+          <Label htmlFor="account-current-email">Current Email</Label>
+          <Input id="account-current-email" value={email.currentEmail} disabled />
+          <Label htmlFor="account-new-email">New Email</Label>
+          <Input
+            id="account-new-email"
+            type="email"
+            value={email.newEmail}
+            onChange={(event) => setEmail((current) => ({ ...current, newEmail: event.target.value }))}
+            required
+          />
+          <Label htmlFor="account-email-password">Current Password</Label>
+          <Input
+            id="account-email-password"
+            type="password"
+            value={email.password}
+            onChange={(event) => setEmail((current) => ({ ...current, password: event.target.value }))}
+            required
+          />
+          <Button size="sm" type="submit" disabled={busy}>
+            <Save className="mr-2 h-4 w-4" />
+            Save Email
+          </Button>
         </form>
         <form className="space-y-3" onSubmit={onSavePassword}>
           <p className="font-semibold">Change Password</p>
-          <Label htmlFor="account-current-password">Current Password</Label><Input id="account-current-password" type="password" value={password.currentPassword} onChange={(event) => setPassword((current) => ({ ...current, currentPassword: event.target.value }))} required />
-          <Label htmlFor="account-new-password">New Password</Label><Input id="account-new-password" type="password" value={password.newPassword} onChange={(event) => setPassword((current) => ({ ...current, newPassword: event.target.value }))} required />
-          <Label htmlFor="account-confirm-password">Confirm New Password</Label><Input id="account-confirm-password" type="password" value={password.confirmPassword} onChange={(event) => setPassword((current) => ({ ...current, confirmPassword: event.target.value }))} required />
-          <Button size="sm" type="submit" disabled={busy}><Save className="mr-2 h-4 w-4" />Save Password</Button>
+          <Label htmlFor="account-current-password">Current Password</Label>
+          <Input
+            id="account-current-password"
+            type="password"
+            value={password.currentPassword}
+            onChange={(event) => setPassword((current) => ({ ...current, currentPassword: event.target.value }))}
+            required
+          />
+          <Label htmlFor="account-new-password">New Password</Label>
+          <Input
+            id="account-new-password"
+            type="password"
+            value={password.newPassword}
+            onChange={(event) => setPassword((current) => ({ ...current, newPassword: event.target.value }))}
+            required
+          />
+          <Label htmlFor="account-confirm-password">Confirm New Password</Label>
+          <Input
+            id="account-confirm-password"
+            type="password"
+            value={password.confirmPassword}
+            onChange={(event) => setPassword((current) => ({ ...current, confirmPassword: event.target.value }))}
+            required
+          />
+          <Button size="sm" type="submit" disabled={busy}>
+            <Save className="mr-2 h-4 w-4" />
+            Save Password
+          </Button>
         </form>
       </CardContent>
     </Card>
@@ -95,7 +144,21 @@ export function AccountSecuritySection({
 }
 
 export function AccessScopeSection({ permissions }: { permissions: UserPermissions }) {
-  return <Card><CardHeader><CardTitle>Access Scope</CardTitle><CardDescription>Your current account permissions.</CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2 pt-0">{PERMISSION_OPTIONS.filter((item) => permissions[item.key]).map((item) => <Badge key={item.key} variant="outline">{item.label}</Badge>)}</CardContent></Card>;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Access Scope</CardTitle>
+        <CardDescription>Your current account permissions.</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-wrap gap-2 pt-0">
+        {PERMISSION_OPTIONS.filter((item) => permissions[item.key]).map((item) => (
+          <Badge key={item.key} variant="outline">
+            {item.label}
+          </Badge>
+        ))}
+      </CardContent>
+    </Card>
+  );
 }
 
 export function SystemSection({
@@ -113,7 +176,40 @@ export function SystemSection({
   onUpdate(): void;
   onAdd(): void;
 }) {
-  return <Card><CardHeader><CardTitle>Admin Settings</CardTitle><CardDescription>Running version, updates, and quick account creation.</CardDescription></CardHeader><CardContent className="space-y-4 pt-0"><div className="rounded-lg border p-3"><p className="font-semibold">Running Version</p><p className="font-mono text-sm">v{runtime?.version || 'unknown'}{runtime?.commit ? ` (${runtime.commit})` : ''}</p><p className="text-xs text-muted-foreground">{update?.running ? 'Update running' : 'No update running'}</p></div><div className="flex gap-2"><Button variant="outline" onClick={onUpdate} disabled={updating || update?.running}>{updating || update?.running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}Update</Button>{canCreate ? <Button onClick={onAdd}><Plus className="mr-2 h-4 w-4" />Add Destination</Button> : null}</div></CardContent></Card>;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Admin Settings</CardTitle>
+        <CardDescription>Running version, updates, and quick account creation.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
+        <div className="rounded-lg border p-3">
+          <p className="font-semibold">Running Version</p>
+          <p className="font-mono text-sm">
+            v{runtime?.version || 'unknown'}
+            {runtime?.commit ? ` (${runtime.commit})` : ''}
+          </p>
+          <p className="text-xs text-muted-foreground">{update?.running ? 'Update running' : 'No update running'}</p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={onUpdate} disabled={updating || update?.running}>
+            {updating || update?.running ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            Update
+          </Button>
+          {canCreate ? (
+            <Button onClick={onAdd}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add Destination
+            </Button>
+          ) : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 export function SchedulerSection({
@@ -123,6 +219,11 @@ export function SchedulerSection({
   onSubmit,
   mappings = [],
   onSaveSourceSchedule,
+  sourceDefaults,
+  setSourceDefaults,
+  sourceDefaultsSaving = false,
+  onSaveSourceDefaults,
+  onSaveSourceInitialImportMode,
 }: {
   value: SchedulerSettings;
   setValue: Dispatch<SetStateAction<SchedulerSettings | null>>;
@@ -130,6 +231,11 @@ export function SchedulerSection({
   onSubmit(event: FormEvent<HTMLFormElement>): void;
   mappings?: readonly AccountMapping[];
   onSaveSourceSchedule?(mapping: AccountMapping, username: string, schedule: SourceSchedulePolicy): Promise<void>;
+  sourceDefaults?: SourceDefaultsSettings | null;
+  setSourceDefaults?: Dispatch<SetStateAction<SourceDefaultsSettings | null>>;
+  sourceDefaultsSaving?: boolean;
+  onSaveSourceDefaults?(): void;
+  onSaveSourceInitialImportMode?(mapping: AccountMapping, username: string, mode: InitialImportMode): Promise<void>;
 }) {
   // The field is kept as text so clearing it shows an error instead of posting NaN.
   const [draft, setDraft] = useState(String(value.intervalMinutes));
@@ -140,7 +246,8 @@ export function SchedulerSection({
   }
 
   const parsed = parseCheckIntervalMinutes(draft);
-  const checksPerHour = parsed.minutes === null ? null : estimateChecksPerHour(value.enabledSourceCount, parsed.minutes);
+  const checksPerHour =
+    parsed.minutes === null ? null : estimateChecksPerHour(value.enabledSourceCount, parsed.minutes);
   const pollingOptions = uniquePollingOptions(mappings);
   const diagnostics = value.diagnostics;
 
@@ -148,7 +255,9 @@ export function SchedulerSection({
     <Card>
       <CardHeader>
         <CardTitle>Scheduler</CardTitle>
-        <CardDescription>Controls automatic fetch sweeps. Manual operations remain available while disabled.</CardDescription>
+        <CardDescription>
+          Controls automatic fetch sweeps. Manual operations remain available while disabled.
+        </CardDescription>
       </CardHeader>
       <CardContent className="border-t pt-4">
         <form className="space-y-4" onSubmit={onSubmit} noValidate>
@@ -178,7 +287,9 @@ export function SchedulerSection({
             <input
               type="checkbox"
               checked={value.enabled}
-              onChange={(event) => setValue((current) => (current ? { ...current, enabled: event.target.checked } : current))}
+              onChange={(event) =>
+                setValue((current) => (current ? { ...current, enabled: event.target.checked } : current))
+              }
             />
           </label>
           <div className="space-y-1">
@@ -216,14 +327,55 @@ export function SchedulerSection({
             <input
               type="checkbox"
               checked={value.runOnStartup}
-              onChange={(event) => setValue((current) => (current ? { ...current, runOnStartup: event.target.checked } : current))}
+              onChange={(event) =>
+                setValue((current) => (current ? { ...current, runOnStartup: event.target.checked } : current))
+              }
             />
             Run once on startup
           </label>
           <Button type="submit" disabled={saving || parsed.error !== null}>
-            <Save className="mr-2 h-4 w-4" />Save scheduler
+            <Save className="mr-2 h-4 w-4" />
+            Save scheduler
           </Button>
         </form>
+
+        {sourceDefaults && setSourceDefaults && onSaveSourceDefaults ? (
+          <div className="mt-6 space-y-3 border-t pt-6">
+            <div>
+              <h3 className="text-sm font-semibold">New X source defaults</h3>
+              <p className="text-xs text-muted-foreground">
+                This default applies when a new X source uses “Use global default.” Existing initialized sources are not
+                rescanned when it changes.
+              </p>
+            </div>
+            <label className="flex items-center justify-between rounded-md border p-3 text-sm">
+              <span>
+                <strong>Import existing posts when adding an X account</strong>
+                <span className="block text-xs text-muted-foreground">
+                  Off starts new sources with a baseline and mirrors only posts published afterward.
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={sourceDefaults.defaultInitialImportMode === 'recent'}
+                onChange={(event) =>
+                  setSourceDefaults((current) =>
+                    current
+                      ? { ...current, defaultInitialImportMode: event.target.checked ? 'recent' : 'new-only' }
+                      : current,
+                  )
+                }
+              />
+            </label>
+            <p className="text-xs text-muted-foreground">
+              Historical imports remain explicit: use Backfill to import older posts later.
+            </p>
+            <Button type="button" size="sm" disabled={sourceDefaultsSaving || saving} onClick={onSaveSourceDefaults}>
+              <Save className="mr-2 h-4 w-4" />
+              Save X source default
+            </Button>
+          </div>
+        ) : null}
 
         {onSaveSourceSchedule ? (
           <div className="mt-6 border-t pt-6">
@@ -231,8 +383,12 @@ export function SchedulerSection({
               options={pollingOptions}
               globalIntervalMinutes={value.intervalMinutes}
               busy={saving}
-              onSave={(option, schedule) =>
-                onSaveSourceSchedule(option.mapping, option.username, schedule)
+              onSave={(option, schedule) => onSaveSourceSchedule(option.mapping, option.username, schedule)}
+              globalInitialImportDefault={sourceDefaults?.defaultInitialImportMode ?? 'new-only'}
+              onSaveInitialImportMode={
+                onSaveSourceInitialImportMode
+                  ? (option, mode) => onSaveSourceInitialImportMode(option.mapping, option.username, mode)
+                  : undefined
               }
               title="Per-source polling"
               description="Canonical X source policies apply everywhere that source is routed. Adaptive mode is recommended for breaking-news accounts."
@@ -245,8 +401,8 @@ export function SchedulerSection({
             <div>
               <h3 className="text-sm font-semibold">X request safety guardrails</h3>
               <p className="text-xs text-muted-foreground">
-                Effective runtime values are read-only here. Change environment overrides only when operational
-                metrics show sustained headroom; changes require a restart.
+                Effective runtime values are read-only here. Change environment overrides only when operational metrics
+                show sustained headroom; changes require a restart.
               </p>
             </div>
             <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
@@ -307,7 +463,10 @@ export function TwitterSettingsSection({
     <Card>
       <CardHeader>
         <CardTitle>Twitter Credentials</CardTitle>
-        <CardDescription>Secrets are write-only; saved values are never returned. Backup cookies are used when the primary slot fails authentication.</CardDescription>
+        <CardDescription>
+          Secrets are write-only; saved values are never returned. Backup cookies are used when the primary slot fails
+          authentication.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 border-t pt-4">
         {cookieHealth ? (
@@ -394,9 +553,13 @@ export function AiSettingsSection({
   setValue: Dispatch<SetStateAction<AIConfig>>;
   busy: boolean;
   onSubmit(event: FormEvent<HTMLFormElement>): void;
-  onPreviewText(capability: 'translation' | 'summarization' | 'cleanup' | 'hashtags', text: string): Promise<{ enabled: boolean; output?: string }>;
+  onPreviewText(
+    capability: 'translation' | 'summarization' | 'cleanup' | 'hashtags',
+    text: string,
+  ): Promise<{ enabled: boolean; output?: string }>;
 }) {
-  const [previewCapability, setPreviewCapability] = useState<(typeof AI_TEXT_CAPABILITY_OPTIONS)[number]['key']>('cleanup');
+  const [previewCapability, setPreviewCapability] =
+    useState<(typeof AI_TEXT_CAPABILITY_OPTIONS)[number]['key']>('cleanup');
   const [previewText, setPreviewText] = useState('Example post that could use a light cleanup.');
   const [previewOutput, setPreviewOutput] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -407,7 +570,8 @@ export function AiSettingsSection({
       <CardHeader>
         <CardTitle>AI</CardTitle>
         <CardDescription>
-          Image alt text and optional text transforms. Text capabilities are off by default and apply in order: cleanup, translation, summarization, hashtags.
+          Image alt text and optional text transforms. Text capabilities are off by default and apply in order: cleanup,
+          translation, summarization, hashtags.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 border-t pt-4">
@@ -427,7 +591,9 @@ export function AiSettingsSection({
                 id="ai-provider"
                 className="h-10 w-full rounded-md border bg-background px-3"
                 value={value.provider}
-                onChange={(event) => setValue((current) => ({ ...current, provider: event.target.value as AIConfig['provider'] }))}
+                onChange={(event) =>
+                  setValue((current) => ({ ...current, provider: event.target.value as AIConfig['provider'] }))
+                }
               >
                 <option value="gemini">Gemini</option>
                 <option value="openai">OpenAI</option>
@@ -447,7 +613,11 @@ export function AiSettingsSection({
             </div>
             <div>
               <Label htmlFor="ai-model">Model</Label>
-              <Input id="ai-model" value={value.model || ''} onChange={(event) => setValue((current) => ({ ...current, model: event.target.value }))} />
+              <Input
+                id="ai-model"
+                value={value.model || ''}
+                onChange={(event) => setValue((current) => ({ ...current, model: event.target.value }))}
+              />
             </div>
             <div>
               <Label htmlFor="ai-max-alt">Maximum alt text characters</Label>
@@ -455,14 +625,17 @@ export function AiSettingsSection({
                 id="ai-max-alt"
                 type="number"
                 value={value.maxAltTextChars}
-                onChange={(event) => setValue((current) => ({ ...current, maxAltTextChars: Number(event.target.value) }))}
+                onChange={(event) =>
+                  setValue((current) => ({ ...current, maxAltTextChars: Number(event.target.value) }))
+                }
               />
             </div>
           </div>
           <fieldset className="space-y-2 rounded-md border p-3">
             <legend className="px-1 text-sm font-semibold">Text capabilities</legend>
             <p className="text-xs text-muted-foreground">
-              Post text is sent to the provider only for enabled capabilities. Failures skip that step and continue posting.
+              Post text is sent to the provider only for enabled capabilities. Failures skip that step and continue
+              posting.
             </p>
             {AI_TEXT_CAPABILITY_OPTIONS.map((option) => (
               <label key={option.key} className="flex items-start gap-2 text-sm">
@@ -509,13 +682,19 @@ export function AiSettingsSection({
                 onChange={(event) => setPreviewCapability(event.target.value as typeof previewCapability)}
               >
                 {AI_TEXT_CAPABILITY_OPTIONS.map((option) => (
-                  <option key={option.key} value={option.key}>{option.label}</option>
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
                 ))}
               </select>
             </div>
             <div>
               <Label htmlFor="ai-preview-text">Sample text</Label>
-              <Input id="ai-preview-text" value={previewText} onChange={(event) => setPreviewText(event.target.value)} />
+              <Input
+                id="ai-preview-text"
+                value={previewText}
+                onChange={(event) => setPreviewText(event.target.value)}
+              />
             </div>
           </div>
           <Button
@@ -526,14 +705,20 @@ export function AiSettingsSection({
             onClick={() => {
               setPreviewBusy(true);
               void onPreviewText(previewCapability, previewText)
-                .then((result) => setPreviewOutput(result.enabled ? result.output || '(empty response)' : 'Capability disabled'))
+                .then((result) =>
+                  setPreviewOutput(result.enabled ? result.output || '(empty response)' : 'Capability disabled'),
+                )
                 .catch((error: unknown) => setPreviewOutput(error instanceof Error ? error.message : 'Preview failed'))
                 .finally(() => setPreviewBusy(false));
             }}
           >
             {previewBusy ? 'Previewing…' : 'Run preview'}
           </Button>
-          {previewOutput ? <p className="whitespace-pre-wrap text-sm" data-testid="ai-text-preview-output">{previewOutput}</p> : null}
+          {previewOutput ? (
+            <p className="whitespace-pre-wrap text-sm" data-testid="ai-text-preview-output">
+              {previewOutput}
+            </p>
+          ) : null}
         </div>
       </CardContent>
     </Card>
@@ -557,7 +742,10 @@ export function NotificationsSection({
     <Card>
       <CardHeader>
         <CardTitle>Webhook Notifications</CardTitle>
-        <CardDescription>Send selected operational events to an HTTPS endpoint. The URL and signing secret are never returned by the API.</CardDescription>
+        <CardDescription>
+          Send selected operational events to an HTTPS endpoint. The URL and signing secret are never returned by the
+          API.
+        </CardDescription>
       </CardHeader>
       <CardContent className="border-t pt-4">
         <form className="space-y-4" onSubmit={onSubmit}>
@@ -634,10 +822,141 @@ export function NotificationsSection({
   );
 }
 
-export function UsersSection({ users, form, setForm, editingId, busy, onCreate, onEdit, onDelete }: { users: ManagedUser[]; form: UserFormState; setForm: Dispatch<SetStateAction<UserFormState>>; editingId: string | null; busy: boolean; onCreate(event: FormEvent<HTMLFormElement>): void; onEdit(user: ManagedUser): void; onDelete(user: ManagedUser): void }) {
-  return <Card><CardHeader><CardTitle>User Access Manager</CardTitle><CardDescription>Create users and review destination access.</CardDescription></CardHeader><CardContent className="space-y-5 border-t pt-4"><form className="grid gap-3 sm:grid-cols-2" onSubmit={onCreate}><div><Label htmlFor="new-user-name">Username</Label><Input id="new-user-name" value={form.username} onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))} /></div><div><Label htmlFor="new-user-email">Email</Label><Input id="new-user-email" type="email" value={form.email} onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))} /></div><div><Label htmlFor="new-user-password">Password</Label><Input id="new-user-password" type="password" value={form.password} onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))} required /></div><label className="flex items-center gap-2 self-end pb-2"><input type="checkbox" checked={form.isAdmin} onChange={(event) => setForm((current) => ({ ...current, isAdmin: event.target.checked }))} />Administrator</label><Button type="submit" disabled={busy}><Plus className="mr-2 h-4 w-4" />Create user</Button></form><div className="space-y-2">{users.length === 0 ? <p className="text-sm text-muted-foreground">No additional users.</p> : null}{users.map((user) => <div key={user.id} className="flex items-center justify-between rounded-md border p-3"><div><p className="font-medium">{user.username || user.email}</p><p className="text-xs text-muted-foreground">{user.role} · {user.mappingCount} destinations</p></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => onEdit(user)}>{editingId === user.id ? 'Editing' : 'Edit'}</Button><Button size="sm" variant="destructive" onClick={() => onDelete(user)}><Trash2 className="h-3.5 w-3.5" /><span className="sr-only">Delete {user.username || user.email}</span></Button></div></div>)}</div></CardContent></Card>;
+export function UsersSection({
+  users,
+  form,
+  setForm,
+  editingId,
+  busy,
+  onCreate,
+  onEdit,
+  onDelete,
+}: {
+  users: ManagedUser[];
+  form: UserFormState;
+  setForm: Dispatch<SetStateAction<UserFormState>>;
+  editingId: string | null;
+  busy: boolean;
+  onCreate(event: FormEvent<HTMLFormElement>): void;
+  onEdit(user: ManagedUser): void;
+  onDelete(user: ManagedUser): void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>User Access Manager</CardTitle>
+        <CardDescription>Create users and review destination access.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5 border-t pt-4">
+        <form className="grid gap-3 sm:grid-cols-2" onSubmit={onCreate}>
+          <div>
+            <Label htmlFor="new-user-name">Username</Label>
+            <Input
+              id="new-user-name"
+              value={form.username}
+              onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
+            />
+          </div>
+          <div>
+            <Label htmlFor="new-user-email">Email</Label>
+            <Input
+              id="new-user-email"
+              type="email"
+              value={form.email}
+              onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
+            />
+          </div>
+          <div>
+            <Label htmlFor="new-user-password">Password</Label>
+            <Input
+              id="new-user-password"
+              type="password"
+              value={form.password}
+              onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+              required
+            />
+          </div>
+          <label className="flex items-center gap-2 self-end pb-2">
+            <input
+              type="checkbox"
+              checked={form.isAdmin}
+              onChange={(event) => setForm((current) => ({ ...current, isAdmin: event.target.checked }))}
+            />
+            Administrator
+          </label>
+          <Button type="submit" disabled={busy}>
+            <Plus className="mr-2 h-4 w-4" />
+            Create user
+          </Button>
+        </form>
+        <div className="space-y-2">
+          {users.length === 0 ? <p className="text-sm text-muted-foreground">No additional users.</p> : null}
+          {users.map((user) => (
+            <div key={user.id} className="flex items-center justify-between rounded-md border p-3">
+              <div>
+                <p className="font-medium">{user.username || user.email}</p>
+                <p className="text-xs text-muted-foreground">
+                  {user.role} · {user.mappingCount} destinations
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => onEdit(user)}>
+                  {editingId === user.id ? 'Editing' : 'Edit'}
+                </Button>
+                <Button size="sm" variant="destructive" onClick={() => onDelete(user)}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span className="sr-only">Delete {user.username || user.email}</span>
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
-export function DataManagementSection({ busy, onExport, onImport, onBackup, onRestore }: { busy: boolean; onExport(): void; onImport(): void; onBackup(mode: 'redacted' | 'full'): void; onRestore(): void }) {
-  return <Card><CardHeader><CardTitle>Data Management</CardTitle><CardDescription>Export/import mappings and provider settings, or create and restore backups.</CardDescription></CardHeader><CardContent className="grid gap-3 border-t pt-4 sm:grid-cols-2"><Button variant="outline" onClick={onExport} disabled={busy}><Download className="mr-2 h-4 w-4" />Export configuration</Button><Button variant="outline" onClick={onImport} disabled={busy}><Upload className="mr-2 h-4 w-4" />Import configuration</Button><Button variant="outline" onClick={() => onBackup('redacted')} disabled={busy}><Download className="mr-2 h-4 w-4" />Create redacted backup</Button><Button variant="outline" onClick={() => onBackup('full')} disabled={busy}><Download className="mr-2 h-4 w-4" />Create full backup</Button><Button variant="destructive" onClick={onRestore} disabled={busy}><Upload className="mr-2 h-4 w-4" />Restore backup</Button></CardContent></Card>;
+export function DataManagementSection({
+  busy,
+  onExport,
+  onImport,
+  onBackup,
+  onRestore,
+}: {
+  busy: boolean;
+  onExport(): void;
+  onImport(): void;
+  onBackup(mode: 'redacted' | 'full'): void;
+  onRestore(): void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Data Management</CardTitle>
+        <CardDescription>Export/import mappings and provider settings, or create and restore backups.</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3 border-t pt-4 sm:grid-cols-2">
+        <Button variant="outline" onClick={onExport} disabled={busy}>
+          <Download className="mr-2 h-4 w-4" />
+          Export configuration
+        </Button>
+        <Button variant="outline" onClick={onImport} disabled={busy}>
+          <Upload className="mr-2 h-4 w-4" />
+          Import configuration
+        </Button>
+        <Button variant="outline" onClick={() => onBackup('redacted')} disabled={busy}>
+          <Download className="mr-2 h-4 w-4" />
+          Create redacted backup
+        </Button>
+        <Button variant="outline" onClick={() => onBackup('full')} disabled={busy}>
+          <Download className="mr-2 h-4 w-4" />
+          Create full backup
+        </Button>
+        <Button variant="destructive" onClick={onRestore} disabled={busy}>
+          <Upload className="mr-2 h-4 w-4" />
+          Restore backup
+        </Button>
+      </CardContent>
+    </Card>
+  );
 }

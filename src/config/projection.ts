@@ -43,10 +43,7 @@ export function projectAccountMappings(
   return config.destinations.map((destination) => {
     const routeSources = (routesByDestination.get(destination.id) ?? [])
       .map((route) => ({ route, source: sourceById.get(route.sourceId) }))
-      .filter(
-        (entry): entry is { route: Route; source: Source } =>
-          Boolean(entry.source) && entry.source?.type === 'x',
-      )
+      .filter((entry): entry is { route: Route; source: Source } => Boolean(entry.source) && entry.source?.type === 'x')
       .sort((a, b) => a.source.username.localeCompare(b.source.username));
     const twitterUsernames = routeSources.map(({ source }) => source.username);
     const isRoutePaused = ({ route }: { route: Route }): boolean =>
@@ -56,6 +53,9 @@ export function projectAccountMappings(
       .map(({ source }) => source.username);
     const routePausedUsernames = routeSources.filter(isRoutePaused).map(({ source }) => source.username);
     const routeIdsByUsername = Object.fromEntries(routeSources.map(({ route, source }) => [source.username, route.id]));
+    const initialImportModesByUsername = Object.fromEntries(
+      routeSources.map(({ route, source }) => [source.username, route.initialImportMode]),
+    );
     const metadata = destination.metadata;
     const account = destination.bskyAccountId ? accountById.get(destination.bskyAccountId) : undefined;
 
@@ -99,6 +99,12 @@ export function projectAccountMappings(
     });
     Object.defineProperty(mapping, 'routePausedUsernames', {
       value: routePausedUsernames,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(mapping, 'initialImportModesByUsername', {
+      value: initialImportModesByUsername,
       enumerable: false,
       configurable: true,
       writable: true,
@@ -209,6 +215,8 @@ export function applyMappingProjection(config: AppConfig, mappings: readonly Acc
         sourceId: source.id,
         destinationId: destination.id,
         enabled: mapping.enabled && !routePaused,
+        initialImportMode:
+          existingRoute?.initialImportMode ?? mapping.initialImportModesByUsername?.[username] ?? 'inherit',
         filters: existingRoute?.filters ?? {
           ...source.filters,
           includeKeywords: [...source.filters.includeKeywords],

@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { type Page, type Route, expect, test } from '@playwright/test';
 
 const version = { revision: 7, updatedAt: '2026-07-24T20:00:00.000Z' };
 const permissions = {
@@ -72,9 +72,10 @@ async function mockDashboard(page: Page) {
         bskyIdentifier: 'destination.bsky.social',
         bskyServiceUrl: 'https://bsky.social',
         enabled: true,
-        postingPolicy: sources.length > 1
-          ? { ...postingPolicy, attribution: { ...postingPolicy.attribution, mode: 'multiple-sources' } }
-          : postingPolicy,
+        postingPolicy:
+          sources.length > 1
+            ? { ...postingPolicy, attribution: { ...postingPolicy.attribution, mode: 'multiple-sources' } }
+            : postingPolicy,
         profileManagement,
         aiOverrides: {
           imageAltText: 'inherit',
@@ -140,6 +141,9 @@ async function mockDashboard(page: Page) {
       };
       if (method === 'PATCH') return json(route, { ...scheduler, ...(body as object) });
       return json(route, scheduler);
+    }
+    if (path === '/api/settings/source-defaults') {
+      return json(route, { ...version, defaultInitialImportMode: 'new-only', ...(body as object) });
     }
     if (path === '/api/settings/notifications') {
       return json(route, {
@@ -210,22 +214,6 @@ async function mockDashboard(page: Page) {
     }
     if (/^\/api\/queue\/items\/[^/]+\/[^/]+$/.test(path) && method === 'DELETE') {
       return json(route, { success: true, affected: 1 });
-    }
-    if (/^\/api\/(destinations|mappings)\/[^/]+\/migration-review$/.test(path)) {
-      const destination = destinations[0] as Record<string, unknown> | undefined;
-      if (destination?.migrationReview && typeof destination.migrationReview === 'object') {
-        destination.migrationReview = {
-          ...(destination.migrationReview as object),
-          needsAdminReview: false,
-          reviewedAt: '2026-07-25T20:00:00.000Z',
-        };
-      }
-      return json(route, {
-        ...version,
-        success: true,
-        migrationReview: { needsAdminReview: false, reviewedAt: '2026-07-25T20:00:00.000Z' },
-        destination,
-      });
     }
     if (path === '/api/backup/restore/validate') {
       return json(route, { valid: true, mode: 'redacted', dryRun: true, writesPerformed: 0 });
@@ -370,6 +358,9 @@ test('cookie session, CSRF, and aggregate onboarding stay mutation-safe', async 
 
   await page.getByRole('button', { name: 'Add Bluesky destination' }).click();
   await expect(page.getByRole('dialog', { name: 'Create Bluesky Destination' })).toBeVisible();
+  await expect(page.getByLabel('Initial import')).toHaveValue('inherit');
+  await expect(page.getByText('Current global default: Start with new posts only.')).toBeVisible();
+  await page.getByLabel('Initial import').selectOption('new-only');
   await sourcesField(page).fill('@alpha\nbeta, alpha');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('button', { name: 'Next' }).click();
@@ -380,6 +371,9 @@ test('cookie session, CSRF, and aggregate onboarding stay mutation-safe', async 
   await page.getByRole('button', { name: 'Create Destination' }).click();
 
   await expect.poll(() => mutations.some((entry) => entry.path === '/api/destinations')).toBe(true);
+  expect(mutations.find((entry) => entry.path === '/api/destinations')?.body).toMatchObject({
+    initialImportMode: 'new-only',
+  });
   expect(mutations.some((entry) => entry.path.includes('/profile/apply'))).toBe(false);
   expect(mutations.some((entry) => entry.path.includes('/sync-profile'))).toBe(false);
 });
@@ -446,8 +440,19 @@ test('a one-to-one destination keeps attribution off unless the operator opts in
 test('scheduler interval refuses an empty value instead of posting NaN', async ({ page }) => {
   const mutations = await mockDashboard(page);
   await page.goto('/');
-  await page.getByRole('navigation', { name: 'Dashboard navigation' }).getByRole('button', { name: 'Settings' }).click();
+  await page
+    .getByRole('navigation', { name: 'Dashboard navigation' })
+    .getByRole('button', { name: 'Settings' })
+    .click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Scheduler' }).click();
+
+  const importExisting = page.getByLabel('Import existing posts when adding an X account');
+  await expect(importExisting).not.toBeChecked();
+  await importExisting.check();
+  await page.getByRole('button', { name: 'Save X source default' }).click();
+  await expect
+    .poll(() => mutations.find((entry) => entry.path === '/api/settings/source-defaults')?.body)
+    .toMatchObject({ defaultInitialImportMode: 'recent' });
 
   const interval = page.getByLabel('Check every (minutes)');
   await expect(interval).toHaveValue('5');
@@ -523,9 +528,7 @@ test('the wizard links an existing managed account instead of collecting a passw
   await page.getByRole('button', { name: 'Next' }).click();
   await dialog.getByLabel('Connect a new Bluesky account').check();
   await expect(dialog.getByLabel('Bluesky App Password')).toBeVisible();
-  await expect(
-    dialog.getByText('stored as a managed account in Settings → Bluesky accounts'),
-  ).toBeVisible();
+  await expect(dialog.getByText('stored as a managed account in Settings → Bluesky accounts')).toBeVisible();
 });
 
 test('the destination editor repoints a destination at another managed account', async ({ page }) => {
@@ -568,8 +571,8 @@ test('the destination editor repoints a destination at another managed account',
   await expect(page.getByText('Destination now posts to @spare-mirror.bsky.social')).toBeVisible();
 });
 
-test('destination editor uses section navigation and dismisses migration review', async ({ page }) => {
-  const mutations = await mockDashboard(page);
+test('destination editor uses section navigation and keeps operations guidance', async ({ page }) => {
+  await mockDashboard(page);
   await page.route('**/api/destinations', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     return json(route, [
@@ -614,11 +617,6 @@ test('destination editor uses section navigation and dismisses migration review'
           dryRun: false,
         },
         duplicateSuppression: { enabled: false, windowHours: 24, perceptualImageHash: false },
-        migrationReview: {
-          needsAdminReview: true,
-          migratedFromSchemaVersion: 1,
-          notices: ['Legacy migration notice.'],
-        },
         sources: [
           {
             username: 'alpha',
@@ -640,8 +638,6 @@ test('destination editor uses section navigation and dismisses migration review'
   });
 
   await page.goto('/accounts');
-  await expect(page.getByText('Migrated — review').first()).toBeVisible();
-
   await page.goto('/accounts?destinationId=destination-1&section=moderation');
   const dialog = page.getByRole('dialog', { name: 'Edit Bluesky Destination' });
   await expect(dialog).toBeVisible();
@@ -685,7 +681,7 @@ test('destination editor uses section navigation and dismisses migration review'
     {
       label: 'Operations',
       assertion: async () => {
-        await expect(dialog.getByText('Legacy migration notice.')).toBeVisible();
+        await expect(dialog.getByText('Backfill and delete remain')).toBeVisible();
       },
     },
   ];
@@ -709,13 +705,8 @@ test('destination editor uses section navigation and dismisses migration review'
   await expect.poll(() => page.url()).toContain('section=delivery');
 
   await sections.getByRole('button', { name: 'Operations' }).click();
-  await expect(dialog.getByText('Legacy migration notice.')).toBeVisible();
-  await dialog.getByRole('button', { name: 'Mark as reviewed' }).click();
-  await expect
-    .poll(() =>
-      mutations.some((entry) => entry.path === '/api/destinations/destination-1/migration-review'),
-    )
-    .toBe(true);
+  await expect(dialog.getByText('Backfill and delete remain')).toBeVisible();
+  await expect(dialog.getByText('Migration review')).toHaveCount(0);
 
   await page.goto('/accounts?destinationId=destination-1&section=nonsense');
   await expect(page.getByRole('dialog', { name: 'Edit Bluesky Destination' })).toBeVisible();
@@ -740,6 +731,7 @@ test('adding a source updates the filter select without closing the editor', asy
 
   let revision = 7;
   let updatedAt = version.updatedAt;
+  let addedInitialImportMode: string | undefined;
   let destination = {
     ...version,
     id: 'destination-1',
@@ -792,7 +784,8 @@ test('adding a source updates the filter select without closing the editor', asy
 
   await page.route('**/api/destinations/destination-1/sources', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
-    const body = (route.request().postDataJSON?.() ?? {}) as { sources?: string[] };
+    const body = (route.request().postDataJSON?.() ?? {}) as { sources?: string[]; initialImportMode?: string };
+    addedInitialImportMode = body.initialImportMode;
     const added = (body.sources ?? []).map((entry) => String(entry).replace(/^@/, '').toLowerCase());
     revision += 1;
     updatedAt = new Date().toISOString();
@@ -825,8 +818,10 @@ test('adding a source updates the filter select without closing the editor', asy
   await expect(filterSelect).toHaveValue('alpha');
 
   await dialog.locator('#edit-source-input').fill('gamma');
+  await dialog.locator('#edit-add-sources-initial-import-mode').selectOption('new-only');
   await dialog.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(page.getByText('Added @gamma.')).toBeVisible();
+  expect(addedInitialImportMode).toBe('new-only');
 
   await expect(filterSelect.locator('option')).toHaveCount(2);
   await expect(filterSelect.locator('option[value="gamma"]')).toHaveCount(1);

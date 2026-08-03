@@ -32,21 +32,6 @@ function mapping(patch: Partial<AccountMapping> = {}): AccountMapping {
 }
 
 describe('summarizeDestinationHealth', () => {
-  test('a migrated destination that is otherwise fine is neutral, not warning', () => {
-    const summary = summarizeDestinationHealth(
-      mapping({
-        migrationReview: {
-          needsAdminReview: true,
-          migratedFromSchemaVersion: 1,
-          notices: ['Legacy migration notice.'],
-        },
-      }),
-    );
-    expect(summary.severity).toBe('neutral');
-    expect(summary.label).toBe('Migrated — review');
-    expect(summary.label).not.toBe('Needs review');
-  });
-
   test('missing credentialConfigured is danger', () => {
     const summary = summarizeDestinationHealth(mapping({ credentialConfigured: false }));
     expect(summary).toMatchObject({ severity: 'danger', label: 'Missing credential' });
@@ -73,30 +58,34 @@ describe('summarizeDestinationHealth', () => {
     expect(summary).toMatchObject({ severity: 'danger', label: 'DID mismatch' });
   });
 
-  test('paused beats failed queue and migration review', () => {
+  test('paused beats a failed queue', () => {
     const summary = summarizeDestinationHealth(
       mapping({
         enabled: false,
         destinationState: 'paused',
-        queue: { mapping_id: 'destination-1', bsky_identifier: 'aggregate.bsky.social', pending: 0, failed: 3, processing: 0, oldest_enqueued_at: null },
-        migrationReview: {
-          needsAdminReview: true,
-          migratedFromSchemaVersion: 1,
-          notices: ['notice'],
+        queue: {
+          mapping_id: 'destination-1',
+          bsky_identifier: 'aggregate.bsky.social',
+          pending: 0,
+          failed: 3,
+          processing: 0,
+          oldest_enqueued_at: null,
         },
       }),
     );
     expect(summary.label).toBe('Paused');
   });
 
-  test('failed queue beats migration review', () => {
+  test('failed queue is reported', () => {
     const summary = summarizeDestinationHealth(
       mapping({
-        queue: { mapping_id: 'destination-1', bsky_identifier: 'aggregate.bsky.social', pending: 0, failed: 2, processing: 0, oldest_enqueued_at: null },
-        migrationReview: {
-          needsAdminReview: true,
-          migratedFromSchemaVersion: 1,
-          notices: ['notice'],
+        queue: {
+          mapping_id: 'destination-1',
+          bsky_identifier: 'aggregate.bsky.social',
+          pending: 0,
+          failed: 2,
+          processing: 0,
+          oldest_enqueued_at: null,
         },
       }),
     );

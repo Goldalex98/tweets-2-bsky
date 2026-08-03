@@ -1,32 +1,13 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DB_PATH, PENDING_DB_RESTORE_PATH } from './storage-paths.js';
-import {
-  type MigrationDatabase,
-  runDatabaseMigrations,
-} from './db/migrations/index.js';
-import {
-  classifyQueueError,
-  sanitizeForDiagnostics,
-  sanitizedErrorMessage,
-} from './observability.js';
-import {
-  createIngestionSecrets,
-  hashIngestionToken,
-  type IngestionScope,
-} from './ingestion-security.js';
-import {
-  decryptValue,
-  encryptValue,
-  isEncryptedValue,
-  parseEncryptionKey,
-} from './secret-storage.js';
+import { type MigrationDatabase, runDatabaseMigrations } from './db/migrations/index.js';
+import { classifyQueueError, sanitizeForDiagnostics, sanitizedErrorMessage } from './observability.js';
+import { createIngestionSecrets, hashIngestionToken, type IngestionScope } from './ingestion-security.js';
+import { decryptValue, encryptValue, isEncryptedValue, parseEncryptionKey } from './secret-storage.js';
 import type { DeliveryFallbackEvent } from './delivery-diagnostics.js';
 import type { NormalizedPost } from './normalized-post.js';
-import {
-  parseSqliteUtcTimestampMs,
-  toIsoUtcTimestamp,
-} from './sqlite-utc-timestamp.js';
+import { parseSqliteUtcTimestampMs, toIsoUtcTimestamp } from './sqlite-utc-timestamp.js';
 
 export { parseSqliteUtcTimestampMs, toIsoUtcTimestamp } from './sqlite-utc-timestamp.js';
 
@@ -129,9 +110,9 @@ export function validateDatabaseSnapshot(snapshotPath: string): number {
       | { integrity_check?: string }
       | undefined;
     if (integrity?.integrity_check !== 'ok') throw new Error('SQLite integrity check failed.');
-    const row = db
-      .prepare('SELECT MAX(version) AS version FROM restore_candidate.schema_migrations')
-      .get() as { version?: number } | undefined;
+    const row = db.prepare('SELECT MAX(version) AS version FROM restore_candidate.schema_migrations').get() as
+      | { version?: number }
+      | undefined;
     const version = Number(row?.version) || 0;
     if (version <= 0) throw new Error('SQLite migration metadata is missing.');
     if (version >= 7) {
@@ -533,9 +514,7 @@ export const dbService = {
   getPostsByDestinationId(destinationId: string): ProcessedTweet[] {
     return (
       db
-        .prepare(
-          'SELECT * FROM processed_tweets WHERE destination_id = ? ORDER BY datetime(created_at) ASC, rowid ASC',
-        )
+        .prepare('SELECT * FROM processed_tweets WHERE destination_id = ? ORDER BY datetime(created_at) ASC, rowid ASC')
         .all(destinationId) as ProcessedTweetRow[]
     ).map(rowToProcessedTweet);
   },
@@ -594,9 +573,7 @@ export const dbService = {
 
   countTweetsBySourceForDestination(twitterUsername: string, bskyIdentifier: string): number {
     const row = db
-      .prepare(
-        'SELECT COUNT(*) AS count FROM processed_tweets WHERE twitter_username = ? AND bsky_identifier = ?',
-      )
+      .prepare('SELECT COUNT(*) AS count FROM processed_tweets WHERE twitter_username = ? AND bsky_identifier = ?')
       .get(twitterUsername.toLowerCase(), bskyIdentifier.toLowerCase()) as { count: number } | undefined;
     return row?.count ?? 0;
   },
@@ -621,7 +598,10 @@ export const dbService = {
     stmt.run(bskyIdentifier.toLowerCase(), twitterUsername.toLowerCase());
   },
 
-  rekeyDestinationIdentity(previousIdentifier: string, nextIdentifier: string): {
+  rekeyDestinationIdentity(
+    previousIdentifier: string,
+    nextIdentifier: string,
+  ): {
     processed: number;
     queued: number;
   } {
@@ -666,12 +646,7 @@ export const dbService = {
     return { processed, queued };
   },
 
-  markOverrideRequeued(
-    externalPostId: string,
-    destinationId: string,
-    actorId: string,
-    at = Date.now(),
-  ): void {
+  markOverrideRequeued(externalPostId: string, destinationId: string, actorId: string, at = Date.now()): void {
     db.prepare(`
       UPDATE processed_tweets
       SET override_requeued_at = ?, override_requeued_by = ?
@@ -694,12 +669,7 @@ export const dbService = {
   // worker's idempotency check treat the override as already settled and
   // silently drop it without ever posting). Returns 1 when the skip record
   // was consumed, 0 if it was already gone (e.g. a concurrent override).
-  finalizeOverrideRequeue(
-    externalPostId: string,
-    destinationId: string,
-    actorId: string,
-    at = Date.now(),
-  ): number {
+  finalizeOverrideRequeue(externalPostId: string, destinationId: string, actorId: string, at = Date.now()): number {
     let removed = 0;
     db.transaction(() => {
       dbService.markOverrideRequeued(externalPostId, destinationId, actorId, at);
@@ -746,6 +716,17 @@ export interface PersistedDestinationRuntimeState {
   lastErrorMessage?: string;
   lastErrorAt?: number;
   consecutiveFailures: number;
+}
+
+export type AppliedInitialImportMode = 'recent' | 'new-only';
+
+export interface PersistedRouteInitialImportState {
+  routeId: string;
+  status: 'initialized';
+  appliedMode: AppliedInitialImportMode;
+  baselinePostId?: string;
+  baselinePostCreatedAt?: number;
+  initializedAt: number;
 }
 
 const optionalNumber = (value: unknown): number | undefined =>
@@ -883,11 +864,7 @@ export const runtimeStateService = {
       : null;
   },
 
-  recordDestinationEvent(
-    destinationId: string,
-    event: 'login' | 'post' | 'profile' | 'pin',
-    at = Date.now(),
-  ): void {
+  recordDestinationEvent(destinationId: string, event: 'login' | 'post' | 'profile' | 'pin', at = Date.now()): void {
     const column = {
       login: 'last_bsky_login_at',
       post: 'last_bsky_post_at',
@@ -903,12 +880,7 @@ export const runtimeStateService = {
     `).run(destinationId, at);
   },
 
-  recordDestinationFailure(
-    destinationId: string,
-    category: string,
-    message: string,
-    at = Date.now(),
-  ): void {
+  recordDestinationFailure(destinationId: string, category: string, message: string, at = Date.now()): void {
     db.prepare(`
       INSERT INTO destination_runtime_state (
         destination_id, last_error_category, last_error_message, last_error_at, consecutive_failures
@@ -919,6 +891,52 @@ export const runtimeStateService = {
         last_error_at = excluded.last_error_at,
         consecutive_failures = destination_runtime_state.consecutive_failures + 1
     `).run(destinationId, category, message.slice(0, 500), at);
+  },
+};
+
+/**
+ * Route-scoped because delivery history is destination-scoped even when one
+ * canonical X source fans out to multiple destinations.
+ */
+export const routeInitialImportStateService = {
+  get(routeId: string): PersistedRouteInitialImportState | null {
+    const row = db.prepare('SELECT * FROM route_initial_import_state WHERE route_id = ?').get(routeId) as
+      | Record<string, unknown>
+      | undefined;
+    return row
+      ? {
+          routeId: String(row.route_id),
+          status: 'initialized',
+          appliedMode: row.applied_mode === 'new-only' ? 'new-only' : 'recent',
+          baselinePostId: optionalText(row.baseline_post_id),
+          baselinePostCreatedAt: optionalNumber(row.baseline_post_created_at),
+          initializedAt: Number(row.initialized_at),
+        }
+      : null;
+  },
+
+  initialize(input: {
+    routeId: string;
+    appliedMode: AppliedInitialImportMode;
+    baselinePostId?: string;
+    baselinePostCreatedAt?: number;
+    initializedAt?: number;
+  }): PersistedRouteInitialImportState {
+    const initializedAt = input.initializedAt ?? Date.now();
+    db.prepare(`
+      INSERT OR IGNORE INTO route_initial_import_state (
+        route_id, status, applied_mode, baseline_post_id, baseline_post_created_at, initialized_at
+      ) VALUES (?, 'initialized', ?, ?, ?, ?)
+    `).run(
+      input.routeId,
+      input.appliedMode,
+      input.baselinePostId ?? null,
+      input.baselinePostCreatedAt ?? null,
+      initializedAt,
+    );
+    const state = this.get(input.routeId);
+    if (!state) throw new Error(`Failed to persist initial-import state for route ${input.routeId}.`);
+    return state;
   },
 };
 
@@ -1234,9 +1252,9 @@ export const postQueueService = {
   },
 
   getQueuedExternalPostIdSet(destinationId: string): Set<string> {
-    const rows = db
-      .prepare('SELECT external_post_id FROM post_queue WHERE destination_id = ?')
-      .all(destinationId) as { external_post_id: string }[];
+    const rows = db.prepare('SELECT external_post_id FROM post_queue WHERE destination_id = ?').all(destinationId) as {
+      external_post_id: string;
+    }[];
     return new Set(rows.map((row) => row.external_post_id));
   },
 
@@ -1293,9 +1311,7 @@ export const postQueueService = {
     const group = groups.find(
       (candidate) =>
         allowedMappingIds.has(candidate.mapping_id) &&
-        !excludedDestinationKeys.has(
-          resolveDestinationKey(candidate.destination_id || candidate.mapping_id),
-        ),
+        !excludedDestinationKeys.has(resolveDestinationKey(candidate.destination_id || candidate.mapping_id)),
     );
     if (!group) return null;
     const destinationKey = resolveDestinationKey(group.destination_id || group.mapping_id);
@@ -1323,9 +1339,7 @@ export const postQueueService = {
           maxItems,
         ) as PostQueueRow[];
       items = rows.map(rowToQueueItem);
-      const mark = db.prepare(
-        "UPDATE post_queue SET status = 'processing', updated_at = ? WHERE queue_id = ?",
-      );
+      const mark = db.prepare("UPDATE post_queue SET status = 'processing', updated_at = ? WHERE queue_id = ?");
       for (const item of items) {
         mark.run(now, item.queue_id);
       }
@@ -1450,7 +1464,10 @@ export const postQueueService = {
     return changesCount();
   },
 
-  getSourceCounts(mappingId: string, twitterUsername: string): {
+  getSourceCounts(
+    mappingId: string,
+    twitterUsername: string,
+  ): {
     pending: number;
     processing: number;
     failed: number;
@@ -1472,16 +1489,15 @@ export const postQueueService = {
   },
 
   cancelPendingByMappingAndSource(mappingId: string, twitterUsername: string): number {
-    db.prepare(
-      "DELETE FROM post_queue WHERE mapping_id = ? AND twitter_username = ? AND status = 'pending'",
-    ).run(mappingId, twitterUsername.toLowerCase());
+    db.prepare("DELETE FROM post_queue WHERE mapping_id = ? AND twitter_username = ? AND status = 'pending'").run(
+      mappingId,
+      twitterUsername.toLowerCase(),
+    );
     return changesCount();
   },
 
   cancelPendingByRouteId(routeId: string): number {
-    db.prepare("DELETE FROM post_queue WHERE route_id = ? AND status = 'pending'").run(
-      routeId,
-    );
+    db.prepare("DELETE FROM post_queue WHERE route_id = ? AND status = 'pending'").run(routeId);
     return changesCount();
   },
 
@@ -1882,9 +1898,7 @@ export interface BackfillJob {
 const rowToBackfillJob = (row: Record<string, unknown>): BackfillJob => ({
   id: String(row.id),
   destinationId: String(row.destination_id),
-  sourceUsernames: row.source_usernames_json
-    ? (JSON.parse(String(row.source_usernames_json)) as string[])
-    : undefined,
+  sourceUsernames: row.source_usernames_json ? (JSON.parse(String(row.source_usernames_json)) as string[]) : undefined,
   limit: Number(row.limit_count) || 15,
   status: String(row.status) as BackfillJob['status'],
   attempts: Number(row.attempts) || 0,
@@ -1944,9 +1958,7 @@ export const backfillJobService = {
   },
 
   get(id: string): BackfillJob | null {
-    const row = db.prepare('SELECT * FROM backfill_jobs WHERE id = ?').get(id) as
-      | Record<string, unknown>
-      | undefined;
+    const row = db.prepare('SELECT * FROM backfill_jobs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     return row ? rowToBackfillJob(row) : null;
   },
 
@@ -2149,18 +2161,9 @@ const rowToDeliveryCheckpoint = (row: Record<string, unknown>): DeliveryCheckpoi
   createdAt: String(row.created_at),
   uri: optionalText(row.uri),
   cid: optionalText(row.cid),
-  root:
-    row.root_uri && row.root_cid
-      ? { uri: String(row.root_uri), cid: String(row.root_cid) }
-      : undefined,
-  parent:
-    row.parent_uri && row.parent_cid
-      ? { uri: String(row.parent_uri), cid: String(row.parent_cid) }
-      : undefined,
-  tail:
-    row.tail_uri && row.tail_cid
-      ? { uri: String(row.tail_uri), cid: String(row.tail_cid) }
-      : undefined,
+  root: row.root_uri && row.root_cid ? { uri: String(row.root_uri), cid: String(row.root_cid) } : undefined,
+  parent: row.parent_uri && row.parent_cid ? { uri: String(row.parent_uri), cid: String(row.parent_cid) } : undefined,
+  tail: row.tail_uri && row.tail_cid ? { uri: String(row.tail_uri), cid: String(row.tail_cid) } : undefined,
   completedAt: optionalNumber(row.completed_at),
 });
 
@@ -2174,9 +2177,7 @@ export const deliveryCheckpointService = {
       const existing = this.list(destinationId, externalPostId);
       if (
         existing.some(
-          (entry) =>
-            entry.chunkCount !== chunks.length ||
-            chunks[entry.chunkIndex]?.contentHash !== entry.contentHash,
+          (entry) => entry.chunkCount !== chunks.length || chunks[entry.chunkIndex]?.contentHash !== entry.contentHash,
         )
       ) {
         if (existing.some((entry) => entry.completedAt !== undefined)) {
@@ -2287,9 +2288,9 @@ export interface BlueskyAccountRuntimeState {
 
 export const blueskyAccountRuntimeService = {
   get(accountId: string): BlueskyAccountRuntimeState | null {
-    const row = db
-      .prepare('SELECT * FROM bluesky_account_runtime_state WHERE account_id = ?')
-      .get(accountId) as Record<string, unknown> | undefined;
+    const row = db.prepare('SELECT * FROM bluesky_account_runtime_state WHERE account_id = ?').get(accountId) as
+      | Record<string, unknown>
+      | undefined;
     return row
       ? {
           accountId: String(row.account_id),
@@ -2304,9 +2305,9 @@ export const blueskyAccountRuntimeService = {
   },
 
   list(): BlueskyAccountRuntimeState[] {
-    const rows = db
-      .prepare('SELECT account_id FROM bluesky_account_runtime_state ORDER BY account_id')
-      .all() as Array<{ account_id: string }>;
+    const rows = db.prepare('SELECT account_id FROM bluesky_account_runtime_state ORDER BY account_id').all() as Array<{
+      account_id: string;
+    }>;
     return rows
       .map((row) => this.get(row.account_id))
       .filter((state): state is BlueskyAccountRuntimeState => state !== null);
@@ -2535,9 +2536,7 @@ export const ingestionCredentialService = {
 
   list(): IngestionCredential[] {
     return (
-      db
-        .prepare('SELECT * FROM ingestion_credentials ORDER BY created_at DESC')
-        .all() as Record<string, unknown>[]
+      db.prepare('SELECT * FROM ingestion_credentials ORDER BY created_at DESC').all() as Record<string, unknown>[]
     ).map(rowToIngestionCredential);
   },
 
@@ -2593,9 +2592,11 @@ export const ingestionReplayService = {
     let inserted = false;
     db.transaction(() => {
       db.prepare('DELETE FROM ingestion_nonces WHERE expires_at <= ?').run(now);
-      db.prepare(
-        'INSERT OR IGNORE INTO ingestion_nonces (credential_id, nonce, expires_at) VALUES (?, ?, ?)',
-      ).run(credentialId, nonce, expiresAt);
+      db.prepare('INSERT OR IGNORE INTO ingestion_nonces (credential_id, nonce, expires_at) VALUES (?, ?, ?)').run(
+        credentialId,
+        nonce,
+        expiresAt,
+      );
       inserted = changesCount() === 1;
     })();
     return inserted;
@@ -2617,9 +2618,7 @@ export const ingestionReplayService = {
       .prepare(
         'SELECT external_post_id, response_json FROM ingestion_idempotency WHERE source_id = ? AND idempotency_key = ?',
       )
-      .get(input.sourceId, input.idempotencyKey) as
-      | { external_post_id: string; response_json?: string }
-      | undefined;
+      .get(input.sourceId, input.idempotencyKey) as { external_post_id: string; response_json?: string } | undefined;
     if (!byKey || byKey.external_post_id !== input.externalPostId) return { accepted: false, conflict: true };
     let response: unknown;
     try {
@@ -2631,9 +2630,11 @@ export const ingestionReplayService = {
   },
 
   saveResponse(sourceId: string, idempotencyKey: string, response: unknown): void {
-    db.prepare(
-      'UPDATE ingestion_idempotency SET response_json = ? WHERE source_id = ? AND idempotency_key = ?',
-    ).run(JSON.stringify(response), sourceId, idempotencyKey);
+    db.prepare('UPDATE ingestion_idempotency SET response_json = ? WHERE source_id = ? AND idempotency_key = ?').run(
+      JSON.stringify(response),
+      sourceId,
+      idempotencyKey,
+    );
   },
 
   releasePending(sourceId: string, idempotencyKey: string, externalPostId: string): boolean {
@@ -2712,12 +2713,16 @@ const rowToDigestEntry = (row: Record<string, unknown>): DigestEntry => {
     sourceType: String(row.source_type),
     externalPostId: String(row.external_post_id),
     post,
-    deliveryDiagnostics: post.repostContentSource === 'wrapper'
-      ? [{
-          kind: 'repost-wrapper-fallback',
-          reason: 'The scraper did not provide nested repost content; wrapper text and the X status link were retained.',
-        }]
-      : [],
+    deliveryDiagnostics:
+      post.repostContentSource === 'wrapper'
+        ? [
+            {
+              kind: 'repost-wrapper-fallback',
+              reason:
+                'The scraper did not provide nested repost content; wrapper text and the X status link were retained.',
+            },
+          ]
+        : [],
     policySnapshot: optionalText(row.policy_snapshot),
     status: String(row.status) as DigestEntry['status'],
     jobId: optionalText(row.job_id),
@@ -2792,9 +2797,7 @@ export const digestEntryService = {
   },
 
   cancelPending(routeId: string): number {
-    db.prepare(
-      "UPDATE digest_entries SET status = 'cancelled' WHERE route_id = ? AND status = 'pending'",
-    ).run(routeId);
+    db.prepare("UPDATE digest_entries SET status = 'cancelled' WHERE route_id = ? AND status = 'pending'").run(routeId);
     return changesCount();
   },
 };
@@ -2852,9 +2855,7 @@ export const digestJobService = {
   },
 
   get(id: string): DigestJob | null {
-    const row = db.prepare('SELECT * FROM digest_jobs WHERE id = ?').get(id) as
-      | Record<string, unknown>
-      | undefined;
+    const row = db.prepare('SELECT * FROM digest_jobs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     return row ? rowToDigestJob(row) : null;
   },
 
@@ -3045,9 +3046,7 @@ export const digestJobService = {
 
   resetProcessing(now = Date.now()): number {
     db.transaction(() => {
-      db.prepare(
-        "UPDATE digest_entries SET status = 'pending', job_id = NULL WHERE status = 'claimed'",
-      ).run();
+      db.prepare("UPDATE digest_entries SET status = 'pending', job_id = NULL WHERE status = 'claimed'").run();
       db.prepare(
         "UPDATE digest_jobs SET status = 'scheduled', claimed_at = NULL, claim_token = NULL, updated_at = ? WHERE status = 'processing'",
       ).run(now);

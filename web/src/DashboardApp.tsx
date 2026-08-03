@@ -1,3 +1,5 @@
+import { History, LayoutDashboard, LogOut, Moon, Newspaper, Plus, Settings2, Sun, SunMoon, Users } from 'lucide-react';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api, { getApiErrorMessage, withConfigVersion } from './api/client';
 import type { DashboardTab, Notice, SettingsSection, ThemeMode } from './api/types';
 import { ActivityQueuePage } from './components/features/activity-queue-page';
@@ -7,26 +9,10 @@ import { Button } from './components/ui/button';
 import { Card, CardContent } from './components/ui/card';
 import { ConfirmDialog } from './components/ui/confirm-dialog';
 import { NavList } from './components/ui/nav-list';
-import {
-  History,
-  LayoutDashboard,
-  LogOut,
-  Moon,
-  Newspaper,
-  Plus,
-  Settings2,
-  Sun,
-  SunMoon,
-  Users,
-} from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { useActivityPolling } from './features/activity/use-activity-polling';
 import type { ActivityLog, EnrichedPost, LocalPostSearchResult, QueueItemView } from './features/activity/types';
+import { useActivityPolling } from './features/activity/use-activity-polling';
 import { useBlueskyAccounts } from './features/bluesky-accounts/use-bluesky-accounts';
-import {
-  AddDestinationWizard,
-  type NewDestinationAccountMode,
-} from './features/destinations/add-destination-wizard';
+import { AddDestinationWizard, type NewDestinationAccountMode } from './features/destinations/add-destination-wizard';
 import { summarizeDestinationHealth } from './features/destinations/destination-health';
 import { DestinationsPage } from './features/destinations/destinations-page';
 import { EditDestinationDialog } from './features/destinations/edit-destination-dialog';
@@ -34,6 +20,7 @@ import type {
   AccountMapping,
   DestinationAIOverrides,
   DuplicateSuppressionPolicy,
+  InitialImportMode,
   MappingFormState,
   ModerationPolicy,
   RouteDeliveryPolicy,
@@ -53,8 +40,9 @@ import type {
   ManagedUser,
   UserFormState,
 } from './features/settings/types';
-import { defaultUserForm, normalizePermissions } from './features/settings/utils';
 import { useSettingsSecurity } from './features/settings/use-settings-security';
+import { useSourceDefaults } from './features/settings/use-source-defaults';
+import { defaultUserForm, normalizePermissions } from './features/settings/utils';
 import {
   ACCOUNT_SEARCH_MIN_SCORE,
   DEFAULT_GROUP_EMOJI,
@@ -157,6 +145,10 @@ export default function DashboardApp() {
     enabled: Boolean(session.token) && isAdmin,
     onError: handleError,
   });
+  const sourceDefaults = useSourceDefaults({
+    authenticated: Boolean(session.token),
+    onError: handleError,
+  });
   const ingestion = useIngestionDigests({
     enabled: Boolean(session.token) && isAdmin,
     onError: handleError,
@@ -234,6 +226,10 @@ export default function DashboardApp() {
   }, [isAdmin, settings.refresh]);
 
   useEffect(() => {
+    if (activeTab === 'settings' && settingsSection === 'scheduler') void sourceDefaults.refresh();
+  }, [activeTab, settingsSection, sourceDefaults.refresh]);
+
+  useEffect(() => {
     if (activeTab === 'settings' && settingsSection === 'ingestion' && isAdmin) void ingestion.refresh();
   }, [activeTab, ingestion.refresh, isAdmin, settingsSection]);
 
@@ -267,6 +263,7 @@ export default function DashboardApp() {
   const [validatingCredentials, setValidatingCredentials] = useState(false);
   const [newAccountMode, setNewAccountMode] = useState<NewDestinationAccountMode>('existing');
   const [newAccountId, setNewAccountId] = useState('');
+  const [newInitialImportMode, setNewInitialImportMode] = useState<InitialImportMode>('inherit');
 
   /** Managed accounts that no destination claims yet. */
   const unlinkedBlueskyAccounts = useMemo(
@@ -283,6 +280,7 @@ export default function DashboardApp() {
     setValidatingCredentials(false);
     setNewAccountMode(unlinkedBlueskyAccounts.length > 0 ? 'existing' : 'new');
     setNewAccountId('');
+    setNewInitialImportMode('inherit');
   }, [session.user?.email, session.user?.username, unlinkedBlueskyAccounts.length]);
 
   const openAdd = () => {
@@ -300,11 +298,7 @@ export default function DashboardApp() {
   // aggregates) until the operator picks a mode explicitly in the wizard.
   const syncAttributionDefault = useCallback((previousCount: number, nextCount: number) => {
     setNewMapping((current) => {
-      const mode = nextAttributionModeForSourceChange(
-        current.postingPolicy.attribution.mode,
-        previousCount,
-        nextCount,
-      );
+      const mode = nextAttributionModeForSourceChange(current.postingPolicy.attribution.mode, previousCount, nextCount);
       if (mode === current.postingPolicy.attribution.mode) return current;
       return {
         ...current,
@@ -324,9 +318,7 @@ export default function DashboardApp() {
     syncAttributionDefault(newSources.length, parsed.usernames.length);
   };
   const removeSource = (username: string) => {
-    const next = newSources.filter(
-      (source) => normalizeTwitterUsername(source) !== normalizeTwitterUsername(username),
-    );
+    const next = newSources.filter((source) => normalizeTwitterUsername(source) !== normalizeTwitterUsername(username));
     setNewSources(next);
     syncAttributionDefault(newSources.length, next.length);
   };
@@ -360,29 +352,36 @@ export default function DashboardApp() {
   const createDestination = () => {
     const allowProfileMutation = newMapping.profileManagement.allowProfileMutation;
     const useExistingAccount = newAccountMode === 'existing';
-    void run(async () => {
-      await destinations.createDestination({
-        owner: newMapping.owner.trim(),
-        twitterUsernames: newSources,
-        // Either link an existing managed account or hand over credentials for
-        // the server to save as a new managed account.
-        ...(useExistingAccount
-          ? { bskyAccountId: newAccountId }
-          : {
-              bskyIdentifier: newMapping.bskyIdentifier.trim(),
-              bskyPassword: newMapping.bskyPassword,
-              bskyServiceUrl: newMapping.bskyServiceUrl.trim(),
-            }),
-        groupName: newMapping.groupName.trim(),
-        groupEmoji: newMapping.groupEmoji.trim(),
-        postingPolicy: newMapping.postingPolicy,
-        profileManagement: newMapping.profileManagement,
-      });
-      closeAdd();
-      await Promise.all([destinations.fetchDestinations(), blueskyAccounts.refresh()]);
-    }, allowProfileMutation
-      ? 'Destination added. Profile mutation is allowed, but profile and pin sync modes are still off.'
-      : 'Destination added with profile and pin mutations disabled.');
+    void run(
+      async () => {
+        const latestSourceDefaults = await sourceDefaults.refresh();
+        if (!latestSourceDefaults) throw new Error('Could not refresh configuration before creating the destination.');
+        const payload = {
+          owner: newMapping.owner.trim(),
+          twitterUsernames: newSources,
+          initialImportMode: newInitialImportMode,
+          // Either link an existing managed account or hand over credentials for
+          // the server to save as a new managed account.
+          ...(useExistingAccount
+            ? { bskyAccountId: newAccountId }
+            : {
+                bskyIdentifier: newMapping.bskyIdentifier.trim(),
+                bskyPassword: newMapping.bskyPassword,
+                bskyServiceUrl: newMapping.bskyServiceUrl.trim(),
+              }),
+          groupName: newMapping.groupName.trim(),
+          groupEmoji: newMapping.groupEmoji.trim(),
+          postingPolicy: newMapping.postingPolicy,
+          profileManagement: newMapping.profileManagement,
+        };
+        await destinations.createDestination(payload, latestSourceDefaults);
+        closeAdd();
+        await Promise.all([destinations.fetchDestinations(), blueskyAccounts.refresh()]);
+      },
+      allowProfileMutation
+        ? 'Destination added. Profile mutation is allowed, but profile and pin sync modes are still off.'
+        : 'Destination added with profile and pin mutations disabled.',
+    );
   };
 
   const [editingMapping, setEditingMapping] = useState<AccountMapping | null>(null);
@@ -390,6 +389,7 @@ export default function DashboardApp() {
   const [editSources, setEditSources] = useState<string[]>([]);
   const [editSourceInput, setEditSourceInput] = useState('');
   const [editSourceSummary, setEditSourceSummary] = useState<SourceParseSummary>({ duplicates: [], invalid: [] });
+  const [editAddSourcesInitialImportMode, setEditAddSourcesInitialImportMode] = useState<InitialImportMode>('inherit');
 
   const startEdit = useCallback((mapping: AccountMapping, section?: string) => {
     setEditingMapping(mapping);
@@ -397,6 +397,7 @@ export default function DashboardApp() {
     setEditSources(mapping.twitterUsernames);
     setEditSourceInput('');
     setEditSourceSummary({ duplicates: [], invalid: [] });
+    setEditAddSourcesInitialImportMode('inherit');
     setEditForm({
       ...defaultMappingForm(),
       owner: mapping.owner || '',
@@ -517,7 +518,10 @@ export default function DashboardApp() {
     }) => {
       if (!editingMapping) return Promise.resolve();
       return run(async () => {
-        await api.patch(`/api/destinations/${editingMapping.id}/content-policies`, withConfigVersion(payload, editingMapping));
+        await api.patch(
+          `/api/destinations/${editingMapping.id}/content-policies`,
+          withConfigVersion(payload, editingMapping),
+        );
         await destinations.fetchDestinations();
       }, 'Content policies saved.');
     },
@@ -568,23 +572,11 @@ export default function DashboardApp() {
     [destinations.fetchDestinations, editingMapping, run],
   );
 
-  const dismissMigrationReview = useCallback(() => {
-    if (!editingMapping) return;
-    void run(async () => {
-      await api.patch(
-        `/api/destinations/${editingMapping.id}/migration-review`,
-        withConfigVersion({}, editingMapping),
-      );
-      await destinations.fetchDestinations();
-    }, 'Migration review dismissed.');
-  }, [destinations.fetchDestinations, editingMapping, run]);
-
   /** Accounts the editor may link: unlinked ones plus the current link. */
   const editableBlueskyAccounts = useMemo(() => {
     if (!editingMapping) return [];
     return blueskyAccounts.accounts.filter(
-      (account) =>
-        account.linkedDestinationId === null || account.linkedDestinationId === editingMapping.id,
+      (account) => account.linkedDestinationId === null || account.linkedDestinationId === editingMapping.id,
     );
   }, [blueskyAccounts.accounts, editingMapping]);
 
@@ -606,7 +598,15 @@ export default function DashboardApp() {
         }, `Destination now posts to @${handle}.`);
       });
     },
-    [askConfirmation, blueskyAccounts.accounts, blueskyAccounts.refresh, destinations.fetchDestinations, destinations.linkBlueskyAccount, editingMapping, run],
+    [
+      askConfirmation,
+      blueskyAccounts.accounts,
+      blueskyAccounts.refresh,
+      destinations.fetchDestinations,
+      destinations.linkBlueskyAccount,
+      editingMapping,
+      run,
+    ],
   );
 
   const openBlueskyAccountSettings = useCallback(() => {
@@ -651,14 +651,11 @@ export default function DashboardApp() {
     // Do not use run(): it swallows errors, which would clear focus/input incorrectly.
     setBusy(true);
     try {
-      const updated = await destinations.syncSources(editingMapping, parsed.usernames);
+      const updated = await destinations.syncSources(editingMapping, parsed.usernames, editAddSourcesInitialImportMode);
       setEditingMapping(updated);
       setEditSources(updated.twitterUsernames);
       setEditSourceInput('');
-      showNotice(
-        'success',
-        added.length === 1 ? `Added @${added[0]}.` : `Added ${added.length} sources.`,
-      );
+      showNotice('success', added.length === 1 ? `Added @${added[0]}.` : `Added ${added.length} sources.`);
       return added[0];
     } catch (error) {
       handleError(error, 'Failed to add sources.');
@@ -683,11 +680,8 @@ export default function DashboardApp() {
     }).then((ok) => {
       if (!ok) return;
       return run(async () => {
-        const latest =
-          destinations.mappings.find((entry) => entry.id === mappingAtPrompt.id) ?? mappingAtPrompt;
-        const nextSources = latest.twitterUsernames.filter(
-          (source) => normalizeTwitterUsername(source) !== normalized,
-        );
+        const latest = destinations.mappings.find((entry) => entry.id === mappingAtPrompt.id) ?? mappingAtPrompt;
+        const nextSources = latest.twitterUsernames.filter((source) => normalizeTwitterUsername(source) !== normalized);
         if (nextSources.length === latest.twitterUsernames.length) return;
         const updated = await destinations.syncSources(latest, nextSources);
         setEditingMapping(updated);
@@ -747,10 +741,13 @@ export default function DashboardApp() {
       const ids = [...selectedDestinationIds];
       const version = destinations.mappings.find((mapping) => ids.includes(mapping.id));
       if (ids.length === 0 || !version) return;
-      void runBulkAction(async () => {
-        await api.post('/api/destinations/bulk/state', withConfigVersion({ destinationIds: ids, state }, version));
-        await destinations.fetchDestinations();
-      }, state === 'paused' ? `Paused ${ids.length} destination(s).` : `Resumed ${ids.length} destination(s).`);
+      void runBulkAction(
+        async () => {
+          await api.post('/api/destinations/bulk/state', withConfigVersion({ destinationIds: ids, state }, version));
+          await destinations.fetchDestinations();
+        },
+        state === 'paused' ? `Paused ${ids.length} destination(s).` : `Resumed ${ids.length} destination(s).`,
+      );
     },
     [destinations, runBulkAction, selectedDestinationIds],
   );
@@ -798,7 +795,10 @@ export default function DashboardApp() {
   const groupedMappings = useMemo(() => {
     const groups = new Map<string, { key: string; name: string; emoji: string; mappings: AccountMapping[] }>();
     for (const mapping of filteredMappings) {
-      const meta = folderFilter === '__all__' ? { key: '__all__', name: 'All Accounts', emoji: '🌐' } : getMappingGroupMeta(mapping);
+      const meta =
+        folderFilter === '__all__'
+          ? { key: '__all__', name: 'All Accounts', emoji: '🌐' }
+          : getMappingGroupMeta(mapping);
       const group = groups.get(meta.key) || { ...meta, mappings: [] };
       group.mappings.push(mapping);
       groups.set(meta.key, group);
@@ -864,7 +864,9 @@ export default function DashboardApp() {
     setSearchingPosts(true);
     const timer = window.setTimeout(async () => {
       try {
-        const response = await api.get<LocalPostSearchResult[]>('/api/posts/search', { params: { q: query, limit: 120 } });
+        const response = await api.get<LocalPostSearchResult[]>('/api/posts/search', {
+          params: { q: query, limit: 120 },
+        });
         if (!cancelled) setLocalPosts(Array.isArray(response.data) ? response.data : []);
       } catch (error) {
         if (!cancelled) handleError(error, 'Failed to search local post history.');
@@ -879,12 +881,17 @@ export default function DashboardApp() {
   }, [handleError, postsSearch]);
 
   const filterByGroup = useCallback(
-    (mapping: AccountMapping | undefined, group: string) => group === 'all' || getMappingGroupMeta(mapping).key === group,
+    (mapping: AccountMapping | undefined, group: string) =>
+      group === 'all' || getMappingGroupMeta(mapping).key === group,
     [],
   );
-  const visiblePosts = activity.enrichedPosts.slice(0, 12).filter((post) => filterByGroup(resolvePost(post), postsGroup));
+  const visiblePosts = activity.enrichedPosts
+    .slice(0, 12)
+    .filter((post) => filterByGroup(resolvePost(post), postsGroup));
   const visibleLocalPosts = localPosts.filter((post) => filterByGroup(resolveLocalPost(post), postsGroup));
-  const visibleActivity = activity.recentActivity.filter((entry) => filterByGroup(resolveActivity(entry), activityGroup));
+  const visibleActivity = activity.recentActivity.filter((entry) =>
+    filterByGroup(resolveActivity(entry), activityGroup),
+  );
 
   const engagement = useMemo(() => {
     const scores = new Map<string, { identifier: string; score: number; posts: number }>();
@@ -893,9 +900,7 @@ export default function DashboardApp() {
       const displayHandle =
         post.author?.handle ||
         mapping?.bskyCanonicalHandle ||
-        (mapping?.bskyIdentifier && !mapping.bskyIdentifier.startsWith('did:')
-          ? mapping.bskyIdentifier
-          : undefined) ||
+        (mapping?.bskyIdentifier && !mapping.bskyIdentifier.startsWith('did:') ? mapping.bskyIdentifier : undefined) ||
         post.bskyIdentifier;
       const key = normalizeTwitterUsername(displayHandle);
       const current = scores.get(key) || { identifier: displayHandle, score: 0, posts: 0 };
@@ -906,8 +911,16 @@ export default function DashboardApp() {
     return [...scores.values()].sort((a, b) => b.score - a.score)[0];
   }, [activity.enrichedPosts, resolvePost]);
 
-  const [emailForm, setEmailForm] = useState<AccountSecurityEmailState>({ currentEmail: '', newEmail: '', password: '' });
-  const [passwordForm, setPasswordForm] = useState<AccountSecurityPasswordState>({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [emailForm, setEmailForm] = useState<AccountSecurityEmailState>({
+    currentEmail: '',
+    newEmail: '',
+    password: '',
+  });
+  const [passwordForm, setPasswordForm] = useState<AccountSecurityPasswordState>({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  });
   const [newUser, setNewUser] = useState<UserFormState>(defaultUserForm);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
@@ -966,7 +979,11 @@ export default function DashboardApp() {
   }
 
   if (!session.user) {
-    return <main className="flex min-h-screen items-center justify-center"><output>Loading dashboard…</output></main>;
+    return (
+      <main className="flex min-h-screen items-center justify-center">
+        <output>Loading dashboard…</output>
+      </main>
+    );
   }
 
   const currentStatus = activity.status?.currentStatus;
@@ -977,8 +994,16 @@ export default function DashboardApp() {
     ? Math.round(((currentStatus.processedCount || 0) / currentStatus.totalCount) * 100)
     : 0;
 
-  const cycleTheme = () => setTheme((current) => (current === 'system' ? 'light' : current === 'light' ? 'dark' : 'system'));
-  const themeIcon = theme === 'system' ? <SunMoon className="h-4 w-4" /> : theme === 'light' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />;
+  const cycleTheme = () =>
+    setTheme((current) => (current === 'system' ? 'light' : current === 'light' ? 'dark' : 'system'));
+  const themeIcon =
+    theme === 'system' ? (
+      <SunMoon className="h-4 w-4" />
+    ) : theme === 'light' ? (
+      <Sun className="h-4 w-4" />
+    ) : (
+      <Moon className="h-4 w-4" />
+    );
 
   const recoveryNotices: RecoveryNotice[] = destinations.mappings.reduce<RecoveryNotice[]>((notices, mapping) => {
     const { severity, label, detail } = summarizeDestinationHealth(mapping);
@@ -1047,12 +1072,32 @@ export default function DashboardApp() {
     <div className="min-h-screen bg-muted/20 text-foreground">
       <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <div><p className="font-semibold">Tweets-2-Bsky</p><p className="text-xs text-muted-foreground">Crosspost control center</p></div>
+          <div>
+            <p className="font-semibold">Tweets-2-Bsky</p>
+            <p className="text-xs text-muted-foreground">Crosspost control center</p>
+          </div>
           <div className="flex items-center gap-2">
-            {canCreateMappings ? <Button size="sm" onClick={openAdd}><Plus className="mr-2 h-4 w-4" />Add Bluesky destination</Button> : null}
-            <Button size="sm" variant="outline" onClick={() => void run(activity.runNow, 'Check triggered.')} disabled={!permissions.runNow}><LayoutDashboard className="mr-2 h-4 w-4" />Run now</Button>
-            <Button size="icon" variant="ghost" aria-label={`Theme: ${theme} (${resolvedTheme})`} onClick={cycleTheme}>{themeIcon}</Button>
-            <Button size="icon" variant="ghost" aria-label="Log out" onClick={() => void session.logout()}><LogOut className="h-4 w-4" /></Button>
+            {canCreateMappings ? (
+              <Button size="sm" onClick={openAdd}>
+                <Plus className="mr-2 h-4 w-4" />
+                Add Bluesky destination
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void run(activity.runNow, 'Check triggered.')}
+              disabled={!permissions.runNow}
+            >
+              <LayoutDashboard className="mr-2 h-4 w-4" />
+              Run now
+            </Button>
+            <Button size="icon" variant="ghost" aria-label={`Theme: ${theme} (${resolvedTheme})`} onClick={cycleTheme}>
+              {themeIcon}
+            </Button>
+            <Button size="icon" variant="ghost" aria-label="Log out" onClick={() => void session.logout()}>
+              <LogOut className="h-4 w-4" />
+            </Button>
           </div>
         </div>
       </header>
@@ -1062,10 +1107,30 @@ export default function DashboardApp() {
         </div>
       ) : null}
       <div className="mx-auto grid max-w-[1600px] gap-6 px-4 py-6 lg:grid-cols-[220px_1fr]">
-        <Card className="h-fit lg:sticky lg:top-24"><CardContent className="p-2"><NavList items={dashboardTabs} activeId={activeTab} onSelect={setActiveTab} ariaLabel="Dashboard navigation" /></CardContent></Card>
+        <Card className="h-fit lg:sticky lg:top-24">
+          <CardContent className="p-2">
+            <NavList
+              items={dashboardTabs}
+              activeId={activeTab}
+              onSelect={setActiveTab}
+              ariaLabel="Dashboard navigation"
+            />
+          </CardContent>
+        </Card>
         <main className="min-w-0">
-          <div className="mb-5"><h1 id="page-title" className="text-2xl font-semibold">{dashboardTabs.find((tab) => tab.id === activeTab)?.label}</h1></div>
-          {notice ? <div role={notice.tone === 'error' ? 'alert' : 'status'} className={`mb-4 rounded-md border p-3 text-sm ${notice.tone === 'error' ? 'border-red-300 text-red-700 dark:text-red-300' : ''}`}>{notice.message}</div> : null}
+          <div className="mb-5">
+            <h1 id="page-title" className="text-2xl font-semibold">
+              {dashboardTabs.find((tab) => tab.id === activeTab)?.label}
+            </h1>
+          </div>
+          {notice ? (
+            <div
+              role={notice.tone === 'error' ? 'alert' : 'status'}
+              className={`mb-4 rounded-md border p-3 text-sm ${notice.tone === 'error' ? 'border-red-300 text-red-700 dark:text-red-300' : ''}`}
+            >
+              {notice.message}
+            </div>
+          ) : null}
           <OperationsStatus
             jobs={activity.status?.activeJobs || []}
             queue={queue}
@@ -1118,18 +1183,16 @@ export default function DashboardApp() {
               getProfile={getProfile}
               canManage={canManageMapping}
               isBackfillQueued={(id) => pendingBackfills.some((entry) => entry.id === id)}
-              isBackfillActive={(id) => currentStatus?.state === 'backfilling' && currentStatus.backfillMappingId === id}
+              isBackfillActive={(id) =>
+                currentStatus?.state === 'backfilling' && currentStatus.backfillMappingId === id
+              }
               onEdit={startEdit}
               onDelete={(mapping) => void run(() => destinations.deleteDestination(mapping), 'Destination deleted.')}
               onBackfill={(mapping) => void run(() => activity.requestBackfill(mapping.id), 'Backfill queued.')}
               onCancelBackfill={(mapping) => void run(() => activity.cancelBackfill(mapping.id), 'Backfill cancelled.')}
               onApplyProfileSync={(mapping) =>
                 void run(
-                  () =>
-                    destinations.applyProfileSync(
-                      mapping,
-                      mapping.profileManagement.profileSync.sourceUsername,
-                    ),
+                  () => destinations.applyProfileSync(mapping, mapping.profileManagement.profileSync.sourceUsername),
                   'Profile sync applied.',
                 )
               }
@@ -1184,33 +1247,70 @@ export default function DashboardApp() {
               getActivityGroup={(entry) => getMappingGroupMeta(resolveActivity(entry as ActivityLog))}
               copyDiagnostic={async (item) => {
                 const queueItem = item as QueueItemView;
-                const diagnostic = JSON.stringify({
-                  queue: { status: item.status, attempts: item.attempts, enqueuedAt: item.enqueued_at, category: item.error_category },
-                  identities: { destinationId: queueItem.destination_id, routeId: queueItem.route_id, sourceId: queueItem.source_id, requestId: queueItem.request_id, externalPostId: item.twitter_id },
-                  policy: { version: item.policy_version, behavior: item.policy_snapshot ? 'snapshotted' : 'current' },
-                  error: item.error_message,
-                  deliveryFallbacks: queueItem.delivery_diagnostics ?? item.delivery_diagnostics ?? null,
-                }, null, 2);
+                const diagnostic = JSON.stringify(
+                  {
+                    queue: {
+                      status: item.status,
+                      attempts: item.attempts,
+                      enqueuedAt: item.enqueued_at,
+                      category: item.error_category,
+                    },
+                    identities: {
+                      destinationId: queueItem.destination_id,
+                      routeId: queueItem.route_id,
+                      sourceId: queueItem.source_id,
+                      requestId: queueItem.request_id,
+                      externalPostId: item.twitter_id,
+                    },
+                    policy: {
+                      version: item.policy_version,
+                      behavior: item.policy_snapshot ? 'snapshotted' : 'current',
+                    },
+                    error: item.error_message,
+                    deliveryFallbacks: queueItem.delivery_diagnostics ?? item.delivery_diagnostics ?? null,
+                  },
+                  null,
+                  2,
+                );
                 try {
                   await navigator.clipboard.writeText(diagnostic);
                   showNotice('success', 'Redacted queue diagnostic copied.');
                 } catch {
-                  showNotice('error', 'The browser blocked clipboard access; copy the diagnostic from the item instead.');
+                  showNotice(
+                    'error',
+                    'The browser blocked clipboard access; copy the diagnostic from the item instead.',
+                  );
                 }
               }}
               reevaluatePolicy={async (item) => {
-                const ok = await askConfirmation({ title: 'Use current queue policy?', description: 'Replace this queued item policy snapshot with current policy.', confirmLabel: 'Use current policy' });
+                const ok = await askConfirmation({
+                  title: 'Use current queue policy?',
+                  description: 'Replace this queued item policy snapshot with current policy.',
+                  confirmLabel: 'Use current policy',
+                });
                 if (ok) await run(() => activity.reevaluateQueueItem(item as QueueItemView), 'Queue policy updated.');
               }}
               operateItem={async (item, action) => {
                 if (action === 'cancel') {
-                  const ok = await askConfirmation({ title: 'Cancel queue item?', description: 'The pending delivery will be removed.', confirmLabel: 'Cancel item', destructive: true });
+                  const ok = await askConfirmation({
+                    title: 'Cancel queue item?',
+                    description: 'The pending delivery will be removed.',
+                    confirmLabel: 'Cancel item',
+                    destructive: true,
+                  });
                   if (!ok) return;
                 }
-                await run(() => activity.operateQueueItem(item as QueueItemView, action), action === 'retry' ? 'Queue item requeued.' : 'Queue item cancelled.');
+                await run(
+                  () => activity.operateQueueItem(item as QueueItemView, action),
+                  action === 'retry' ? 'Queue item requeued.' : 'Queue item cancelled.',
+                );
               }}
               overrideSkipped={async (entry) => {
-                const ok = await askConfirmation({ title: 'Override skipped item?', description: 'Re-evaluate and explicitly override current policy for this retained item.', confirmLabel: 'Override and requeue' });
+                const ok = await askConfirmation({
+                  title: 'Override skipped item?',
+                  description: 'Re-evaluate and explicitly override current policy for this retained item.',
+                  confirmLabel: 'Override and requeue',
+                });
                 if (ok) await run(() => activity.overrideSkipped(entry as ActivityLog), 'Skipped item requeued.');
               }}
             />
@@ -1241,6 +1341,9 @@ export default function DashboardApp() {
               update={settings.updateStatus}
               busy={busy}
               schedulerSaving={schedulerSaving}
+              sourceDefaults={sourceDefaults.value}
+              setSourceDefaults={sourceDefaults.setValue}
+              sourceDefaultsSaving={sourceDefaults.saving}
               mappings={destinations.mappings}
               updateBusy={updateBusy}
               editingUserId={editingUserId}
@@ -1269,42 +1372,77 @@ export default function DashboardApp() {
                 retryDigest: ingestion.retryDigest,
                 cancelDigest: ingestion.cancelDigest,
               }}
-              onSaveEmail={(event) => saveWithNotice(event, async () => {
-                await settings.changeEmail(emailForm);
-                session.setUser((current) => current ? { ...current, email: emailForm.newEmail } : current);
-                setEmailForm({ currentEmail: emailForm.newEmail, newEmail: '', password: '' });
-              }, 'Email updated.')}
-              onSavePassword={(event) => saveWithNotice(event, async () => {
-                await settings.changePassword(passwordForm);
-                setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-              }, 'Password updated.')}
+              onSaveEmail={(event) =>
+                saveWithNotice(
+                  event,
+                  async () => {
+                    await settings.changeEmail(emailForm);
+                    session.setUser((current) => (current ? { ...current, email: emailForm.newEmail } : current));
+                    setEmailForm({ currentEmail: emailForm.newEmail, newEmail: '', password: '' });
+                  },
+                  'Email updated.',
+                )
+              }
+              onSavePassword={(event) =>
+                saveWithNotice(
+                  event,
+                  async () => {
+                    await settings.changePassword(passwordForm);
+                    setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+                  },
+                  'Password updated.',
+                )
+              }
               onSaveScheduler={(event) => {
                 event.preventDefault();
                 setSchedulerSaving(true);
-                void settings.saveScheduler().then(() => showNotice('success', 'Scheduler saved.')).catch((error) => handleError(error, 'Failed to save scheduler.')).finally(() => setSchedulerSaving(false));
+                void settings
+                  .saveScheduler()
+                  .then(() => showNotice('success', 'Scheduler saved.'))
+                  .catch((error) => handleError(error, 'Failed to save scheduler.'))
+                  .finally(() => setSchedulerSaving(false));
               }}
               onSaveSourceSchedule={async (mapping, username, schedule) => {
                 await run(async () => {
                   await destinations.patchSource(mapping, username, { schedule });
                 }, `Polling policy saved for @${username}.`);
               }}
+              onSaveSourceInitialImportMode={async (mapping, username, initialImportMode) => {
+                await run(async () => {
+                  await destinations.patchSource(mapping, username, { initialImportMode });
+                }, `Initial import setting saved for @${username}.`);
+              }}
+              onSaveSourceDefaults={() => {
+                void sourceDefaults
+                  .save()
+                  .then(() => showNotice('success', 'X source default saved.'))
+                  .catch((error) => handleError(error, 'Failed to save X source default.'));
+              }}
               onSaveTwitter={(event) => saveWithNotice(event, settings.saveTwitter, 'Twitter credentials saved.')}
               onSaveAi={(event) => saveWithNotice(event, settings.saveAi, 'AI settings saved.')}
               onPreviewAiText={(capability, text) => settings.previewAiText(capability, text)}
-              onSaveNotifications={(event) => saveWithNotice(event, settings.saveNotifications, 'Notification settings saved.')}
+              onSaveNotifications={(event) =>
+                saveWithNotice(event, settings.saveNotifications, 'Notification settings saved.')
+              }
               onTestNotifications={() => {
                 void run(() => settings.testNotifications(), 'Test notification queued.');
               }}
-              onCreateUser={(event) => saveWithNotice(event, async () => {
-                await settings.createUser({
-                  username: newUser.username || undefined,
-                  email: newUser.email || undefined,
-                  password: newUser.password,
-                  isAdmin: newUser.isAdmin,
-                  permissions: newUser.permissions,
-                });
-                setNewUser(defaultUserForm());
-              }, 'User created.')}
+              onCreateUser={(event) =>
+                saveWithNotice(
+                  event,
+                  async () => {
+                    await settings.createUser({
+                      username: newUser.username || undefined,
+                      email: newUser.email || undefined,
+                      password: newUser.password,
+                      isAdmin: newUser.isAdmin,
+                      permissions: newUser.permissions,
+                    });
+                    setNewUser(defaultUserForm());
+                  },
+                  'User created.',
+                )
+              }
               onEditUser={(user) => setEditingUserId(user.id)}
               onDeleteUser={(user: ManagedUser) =>
                 void askConfirmation({
@@ -1334,15 +1472,19 @@ export default function DashboardApp() {
                   .finally(() => setUpdateBusy(false));
               }}
               onAddDestination={openAdd}
-              onExport={() => void run(async () => {
-                const response = await api.get('/api/config/export');
-                downloadJson('tweets-2-bsky-config.json', response.data);
-              })}
+              onExport={() =>
+                void run(async () => {
+                  const response = await api.get('/api/config/export');
+                  downloadJson('tweets-2-bsky-config.json', response.data);
+                })
+              }
               onImport={() => importInput.current?.click()}
-              onBackup={(mode) => void run(async () => {
-                const response = await api.post('/api/backup/create', { mode });
-                downloadJson(`tweets-2-bsky-${mode}-backup.json`, response.data);
-              })}
+              onBackup={(mode) =>
+                void run(async () => {
+                  const response = await api.post('/api/backup/create', { mode });
+                  downloadJson(`tweets-2-bsky-${mode}-backup.json`, response.data);
+                })
+              }
               onRestore={() => restoreInput.current?.click()}
             />
           ) : null}
@@ -1353,6 +1495,8 @@ export default function DashboardApp() {
         step={addStep}
         sourceInput={newSourceInput}
         sources={newSources}
+        initialImportMode={newInitialImportMode}
+        globalInitialImportDefault={sourceDefaults.effectiveDefault}
         parseSummary={newSourceSummary}
         form={newMapping}
         busy={busy}
@@ -1370,6 +1514,7 @@ export default function DashboardApp() {
         }}
         onClose={closeAdd}
         onSourceInputChange={setNewSourceInput}
+        onInitialImportModeChange={setNewInitialImportMode}
         onAddSources={addSources}
         onRemoveSource={removeSource}
         onFormChange={setNewMapping}
@@ -1385,7 +1530,8 @@ export default function DashboardApp() {
         parseSummary={editSourceSummary}
         busy={busy}
         schedulerIntervalMinutes={settings.scheduler?.intervalMinutes ?? 5}
-        canReviewMigration={isAdmin}
+        globalInitialImportDefault={sourceDefaults.effectiveDefault}
+        addSourcesInitialImportMode={editAddSourcesInitialImportMode}
         blueskyAccounts={editableBlueskyAccounts}
         canChangeAccount={editingMapping ? canManageMapping(editingMapping) : false}
         onChangeAccount={changeBlueskyAccount}
@@ -1396,22 +1542,28 @@ export default function DashboardApp() {
         onSubmit={submitEdit}
         onFormChange={setEditForm}
         onSourceInputChange={setEditSourceInput}
+        onAddSourcesInitialImportModeChange={setEditAddSourcesInitialImportMode}
         onAddSources={addEditSources}
         onRemoveSource={removeEditSource}
         onManageAccount={openBlueskyAccountSettings}
         onSectionChange={setPendingEditSection}
-        onDismissMigrationReview={dismissMigrationReview}
         onSaveSourceFilters={async (username, filters) => {
           if (!editingMapping) return;
           await run(async () => {
-            await destinations.patchSource(editingMapping, username, { filters });
+            setEditingMapping(await destinations.patchSource(editingMapping, username, { filters }));
           }, `Filters saved for @${username}.`);
         }}
         onSaveSourceSchedule={async (username, schedule) => {
           if (!editingMapping) return;
           await run(async () => {
-            await destinations.patchSource(editingMapping, username, { schedule });
+            setEditingMapping(await destinations.patchSource(editingMapping, username, { schedule }));
           }, `Polling policy saved for @${username}.`);
+        }}
+        onSaveSourceInitialImportMode={async (username, initialImportMode) => {
+          if (!editingMapping) return;
+          await run(async () => {
+            setEditingMapping(await destinations.patchSource(editingMapping, username, { initialImportMode }));
+          }, `Initial import setting saved for @${username}.`);
         }}
         onPreviewSourceFilter={async (username, filters, metadata) => {
           if (!editingMapping) throw new Error('No destination selected.');
@@ -1433,19 +1585,13 @@ export default function DashboardApp() {
         onApplyProfileSync={() => {
           if (!editingMapping) return;
           void run(async () => {
-            await destinations.applyProfileSync(
-              editingMapping,
-              editForm.profileManagement.profileSync.sourceUsername,
-            );
+            await destinations.applyProfileSync(editingMapping, editForm.profileManagement.profileSync.sourceUsername);
           }, 'Profile sync applied.');
         }}
         onQueuePinSync={() => {
           if (!editingMapping) return;
           void run(async () => {
-            await destinations.queuePinSync(
-              editingMapping,
-              editForm.profileManagement.pinSync.sourceUsername,
-            );
+            await destinations.queuePinSync(editingMapping, editForm.profileManagement.pinSync.sourceUsername);
           }, 'Pin sync queued.');
         }}
         onSaveContentPolicy={saveContentPolicy}
@@ -1514,13 +1660,22 @@ export default function DashboardApp() {
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (!file) return;
-          void askConfirmation({ title: 'Restore backup?', description: 'Current configuration and runtime data may be replaced. You will need to restart the service afterward.', confirmLabel: 'Restore backup', destructive: true }).then((ok) => {
+          void askConfirmation({
+            title: 'Restore backup?',
+            description:
+              'Current configuration and runtime data may be replaced. You will need to restart the service afterward.',
+            confirmLabel: 'Restore backup',
+            destructive: true,
+          }).then((ok) => {
             if (!ok) return;
             void run(async () => {
               const version = settings.scheduler;
               if (!version) throw new Error('Settings are still loading; retry the restore in a moment.');
               const bundle = JSON.parse(await file.text());
-              const response = await api.post<{ restartRequired?: boolean }>('/api/backup/restore/apply', withConfigVersion({ bundle }, version));
+              const response = await api.post<{ restartRequired?: boolean }>(
+                '/api/backup/restore/apply',
+                withConfigVersion({ bundle }, version),
+              );
               if (response.data?.restartRequired !== false) setRestartRequired(true);
               showNotice('success', 'Backup restored. Restart the service now to finish applying the database.');
             });

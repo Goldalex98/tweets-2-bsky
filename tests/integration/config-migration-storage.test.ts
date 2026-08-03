@@ -64,6 +64,10 @@ test('first legacy load writes versioned backups and the second load is byte sta
           ${JSON.stringify(`${configPath}.pre-v5-backup`)},
           'utf8',
         );
+        const preV8Backup = fs.readFileSync(
+          ${JSON.stringify(`${configPath}.pre-v8-backup`)},
+          'utf8',
+        );
         const second = configManager.getConfig();
         const afterSecond = fs.readFileSync(${JSON.stringify(configPath)}, 'utf8');
         fs.writeFileSync(
@@ -78,6 +82,7 @@ test('first legacy load writes versioned backups and the second load is byte sta
             preV3Backup,
             preV4Backup,
             preV5Backup,
+            preV8Backup,
           }),
         );
       `,
@@ -94,11 +99,13 @@ test('first legacy load writes versioned backups and the second load is byte sta
       preV3Backup: string;
       preV4Backup: string;
       preV5Backup: string;
+      preV8Backup: string;
     };
     expect(stored.preV2Backup).toBe(legacy);
     expect(stored.preV3Backup).toBe(legacy);
     expect(stored.preV4Backup).toBe(legacy);
     expect(stored.preV5Backup).toBe(legacy);
+    expect(stored.preV8Backup).toBe(legacy);
     expect(stored.afterSecond).toBe(stored.afterFirst);
     expect(stored.second).toEqual(stored.first);
     expect(stored.first.schemaVersion).toBe(CURRENT_CONFIG_SCHEMA_VERSION);

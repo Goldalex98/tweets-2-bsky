@@ -19,7 +19,7 @@ The application is a single Bun process with explicit runtime services:
 - `src/server.ts` provides the Express API, authentication, operational controls, and static web serving.
 - `web/` contains the React/Vite dashboard. A production build is served from `web/dist/`.
 
-No runtime service imports `src/server.ts`; server-owned scheduler controls are injected by `src/index.ts`, preventing a composition/server import cycle. `src/config-manager.ts` owns schema-v7 JSON configuration, compatibility projection, atomic writes, encryption, and optimistic revision metadata. `src/config/` contains schemas, normalization, migrations, projection, transfer, and domain services. `src/pipeline/` contains fetch/run orchestration. `src/storage-paths.ts` resolves the data directory at module load. `src/db.ts` assembles SQLite-backed services and applies ordered migrations from `src/db/migrations/` (through migration 010 for Bluesky account runtime health).
+No runtime service imports `src/server.ts`; server-owned scheduler controls are injected by `src/index.ts`, preventing a composition/server import cycle. `src/config-manager.ts` owns schema-v8 JSON configuration, compatibility projection, atomic writes, encryption, and optimistic revision metadata. `src/config/` contains schemas, normalization, migrations, projection, transfer, and domain services. `src/pipeline/` contains fetch/run orchestration. `src/storage-paths.ts` resolves the data directory at module load. `src/db.ts` assembles SQLite-backed services and applies ordered migrations from `src/db/migrations/` (through migration 011 for route initial-import state).
 
 ### Identity model
 
@@ -50,6 +50,8 @@ enabled sources/routes -> X fetch sweep -> post_queue (SQLite)
 ```
 
 The scheduler service evaluates server commands independently from interval rescheduling: `run-now` requests a sweep, while `reschedule` only wakes the loop to adopt the new due time. Enabled startup runs and due scheduled runs defer behind backfills and resume after that queue drains. Fetching and posting are deliberately separate: the X sweep service discovers posts and writes durable queue rows, while queue workers claim rows and perform Bluesky-side work.
+
+Before route policy evaluation, each route resolves its persisted initial-import state. A `new-only` route atomically records the newest fetched post ID/timestamp in `route_initial_import_state` and suppresses that route's first batch; sibling routes sharing the same canonical fetch continue independently. Failed fetches do not initialize, successful empty timelines record an explicit timestamp baseline, and later sweeps admit only posts newer than a `new-only` baseline. Explicit backfill does not consult this baseline.
 
 Immediate and digest workers share one active-destination lock set. This serializes all writes to a destination while allowing different destinations to run concurrently. Queue and processed-history keys are destination-scoped, which prevents the same source post from being posted twice to one destination while allowing deliberate posting to different destinations. Queue rows and delivery checkpoints survive restarts; in-flight queue and digest work is re-armed on startup. One-shot and history-import modes still use the same durable queue unless explicitly running a dry-run/legacy inline preview path.
 Queue rows contain immutable policy and decision snapshots. Operators may explicitly re-evaluate non-processing rows with permission and confirmation; normal configuration edits never rewrite queued work.

@@ -75,9 +75,9 @@ The persistent-volume matrix copies legacy one-to-one and aggregate fixtures to 
 3. Run release validation against fixtures and exercise one one-to-one and one aggregate destination.
 4. Pull the immutable image tag or source revision.
 5. Start with the same persistent volume and encryption key.
-6. Check `/readyz`, queue depth, migration review notices, and a read-only credential/profile preview.
+6. Check `/readyz`, queue depth, initial-import route state, and a read-only credential/profile preview.
 
-Config and database migrations are automatic and idempotent. Config upgrades retain `.pre-vN-backup` files; database migrations are additive and recorded in `schema_migrations` (through `010-bluesky-account-runtime` for per-account auth health).
+Config and database migrations are automatic and idempotent. Config upgrades retain `.pre-vN-backup` files; database migrations are additive and recorded in `schema_migrations` (through `011-route-initial-import-state`). Migration 011 intentionally remains when rolling configuration back because it is an additive, isolated runtime-state table.
 
 ## Rollback
 

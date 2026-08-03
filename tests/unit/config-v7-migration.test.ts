@@ -149,7 +149,7 @@ describe('schema v6 to v7 migration', () => {
       ],
     });
 
-    expect(result.toVersion).toBe(7);
+    expect(result.toVersion).toBe(8);
     expect(result.config.blueskyAccounts.length).toBe(1);
     expect(result.config.destinations[0]?.id).toBe('destination-1');
     expect(result.config.destinations[0]?.storageKey).toBe('did:plc:example');

@@ -4,15 +4,16 @@ import { Dialog } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import {
-  ADD_ACCOUNT_STEP_COUNT,
   ADD_ACCOUNT_STEPS,
+  ADD_ACCOUNT_STEP_COUNT,
   describeAttribution,
   validateAttributionTemplate,
 } from '../../lib/dashboard-utils';
 import type { BlueskyAccountView } from '../bluesky-accounts/types';
 import { BlueskyAccountSelect } from './bluesky-account-select';
+import { InitialImportModeControl, describeInitialImportDefault } from './initial-import-mode-control';
 import { AttributionPolicyFields, ProfileMutationField } from './policy-controls';
-import type { MappingFormState, SourceParseSummary } from './types';
+import type { DefaultInitialImportMode, InitialImportMode, MappingFormState, SourceParseSummary } from './types';
 
 export type NewDestinationAccountMode = 'existing' | 'new';
 
@@ -21,6 +22,8 @@ interface AddDestinationWizardProps {
   step: number;
   sourceInput: string;
   sources: string[];
+  initialImportMode: InitialImportMode;
+  globalInitialImportDefault: DefaultInitialImportMode;
   parseSummary: SourceParseSummary;
   form: MappingFormState;
   busy: boolean;
@@ -35,6 +38,7 @@ interface AddDestinationWizardProps {
   onManageAccounts(): void;
   onClose(): void;
   onSourceInputChange(value: string): void;
+  onInitialImportModeChange(value: InitialImportMode): void;
   onAddSources(): void;
   onRemoveSource(username: string): void;
   onFormChange(update: (current: MappingFormState) => MappingFormState): void;
@@ -57,12 +61,16 @@ export function AddDestinationWizard(props: AddDestinationWizardProps) {
       <div className="flex min-h-full flex-col">
         <header className="flex items-start justify-between gap-3 border-b p-5">
           <div>
-            <h2 id="add-destination-title" className="text-xl font-semibold">Create Bluesky Destination</h2>
+            <h2 id="add-destination-title" className="text-xl font-semibold">
+              Create Bluesky Destination
+            </h2>
             <p id="add-destination-description" className="text-sm text-muted-foreground">
               Add one or more X sources without implicit profile mutations.
             </p>
           </div>
-          <Button aria-label="Close add destination flow" size="icon" variant="ghost" onClick={props.onClose}><X aria-hidden="true" className="h-4 w-4" /></Button>
+          <Button aria-label="Close add destination flow" size="icon" variant="ghost" onClick={props.onClose}>
+            <X aria-hidden="true" className="h-4 w-4" />
+          </Button>
         </header>
         <ol className="grid grid-cols-4 border-b">
           {ADD_ACCOUNT_STEPS.map((label, index) => (
@@ -71,7 +79,8 @@ export function AddDestinationWizard(props: AddDestinationWizardProps) {
               aria-current={props.step === index + 1 ? 'step' : undefined}
               className={`px-2 py-3 text-center text-xs ${props.step === index + 1 ? 'font-semibold text-foreground' : 'text-muted-foreground'}`}
             >
-              <span className="block">{index + 1}</span>{label}
+              <span className="block">{index + 1}</span>
+              {label}
             </li>
           ))}
         </ol>
@@ -86,9 +95,13 @@ export function AddDestinationWizard(props: AddDestinationWizardProps) {
             {props.step === 1 ? 'Cancel' : 'Back'}
           </Button>
           {props.step < ADD_ACCOUNT_STEP_COUNT ? (
-            <Button onClick={props.onNext} disabled={props.validating}>{props.validating ? 'Validating…' : 'Next'}</Button>
+            <Button onClick={props.onNext} disabled={props.validating}>
+              {props.validating ? 'Validating…' : 'Next'}
+            </Button>
           ) : (
-            <Button onClick={props.onCreate} disabled={props.busy || templateError !== null}>{props.busy ? 'Creating…' : 'Create Destination'}</Button>
+            <Button onClick={props.onCreate} disabled={props.busy || templateError !== null}>
+              {props.busy ? 'Creating…' : 'Create Destination'}
+            </Button>
           )}
         </footer>
       </div>
@@ -99,7 +112,10 @@ export function AddDestinationWizard(props: AddDestinationWizardProps) {
 function SourcesStep(props: AddDestinationWizardProps) {
   return (
     <div className="space-y-4">
-      <div><h3 className="font-semibold">Choose X sources</h3><p className="text-sm text-muted-foreground">Paste usernames separated by spaces, commas, or new lines.</p></div>
+      <div>
+        <h3 className="font-semibold">Choose X sources</h3>
+        <p className="text-sm text-muted-foreground">Paste usernames separated by spaces, commas, or new lines.</p>
+      </div>
       <div className="space-y-2">
         <Label htmlFor="new-twitter-sources">X Sources</Label>
         <textarea
@@ -113,8 +129,16 @@ function SourcesStep(props: AddDestinationWizardProps) {
         <p id="new-twitter-sources-hint" className="text-xs text-muted-foreground">
           Bulk paste is supported: every valid username is added to this one Bluesky destination.
         </p>
-        <Button onClick={props.onAddSources} disabled={!props.sourceInput.trim()}>Add</Button>
+        <Button onClick={props.onAddSources} disabled={!props.sourceInput.trim()}>
+          Add
+        </Button>
       </div>
+      <InitialImportModeControl
+        id="new-source-initial-import-mode"
+        value={props.initialImportMode}
+        globalDefault={props.globalInitialImportDefault}
+        onChange={props.onInitialImportModeChange}
+      />
       <ul className="flex flex-wrap gap-2" aria-label={`Selected sources (${props.sources.length})`}>
         {props.sources.map((username) => (
           <li key={username} className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm">
@@ -130,8 +154,14 @@ function SourcesStep(props: AddDestinationWizardProps) {
           </li>
         ))}
       </ul>
-      {props.parseSummary.invalid.map((entry, index) => <p key={`${entry.input}-${index}`} role="alert" className="text-xs text-red-600">{entry.input}: {entry.reason}</p>)}
-      {props.parseSummary.duplicates.length > 0 ? <p className="text-xs text-muted-foreground">Duplicate usernames were ignored.</p> : null}
+      {props.parseSummary.invalid.map((entry, index) => (
+        <p key={`${entry.input}-${index}`} role="alert" className="text-xs text-red-600">
+          {entry.input}: {entry.reason}
+        </p>
+      ))}
+      {props.parseSummary.duplicates.length > 0 ? (
+        <p className="text-xs text-muted-foreground">Duplicate usernames were ignored.</p>
+      ) : null}
     </div>
   );
 }
@@ -139,11 +169,23 @@ function SourcesStep(props: AddDestinationWizardProps) {
 function CreateStep(props: AddDestinationWizardProps) {
   return (
     <div className="space-y-4">
-      <div><h3 className="font-semibold">Destination details</h3><p className="text-sm text-muted-foreground">Optional ownership and folder metadata.</p></div>
+      <div>
+        <h3 className="font-semibold">Destination details</h3>
+        <p className="text-sm text-muted-foreground">Optional ownership and folder metadata.</p>
+      </div>
       <Label htmlFor="new-owner">Owner</Label>
-      <Input id="new-owner" data-autofocus value={props.form.owner} onChange={(event) => props.onFormChange((current) => ({ ...current, owner: event.target.value }))} />
+      <Input
+        id="new-owner"
+        data-autofocus
+        value={props.form.owner}
+        onChange={(event) => props.onFormChange((current) => ({ ...current, owner: event.target.value }))}
+      />
       <Label htmlFor="new-group-name">Folder name</Label>
-      <Input id="new-group-name" value={props.form.groupName} onChange={(event) => props.onFormChange((current) => ({ ...current, groupName: event.target.value }))} />
+      <Input
+        id="new-group-name"
+        value={props.form.groupName}
+        onChange={(event) => props.onFormChange((current) => ({ ...current, groupName: event.target.value }))}
+      />
     </div>
   );
 }
@@ -161,8 +203,8 @@ function CredentialsStep(props: AddDestinationWizardProps) {
       <div>
         <h3 className="font-semibold">Bluesky account</h3>
         <p className="text-sm text-muted-foreground">
-          Destinations post through a managed Bluesky account. Accounts and their app passwords are managed in
-          Settings → Bluesky accounts. Validation is read-only and never changes the account profile.
+          Destinations post through a managed Bluesky account. Accounts and their app passwords are managed in Settings
+          → Bluesky accounts. Validation is read-only and never changes the account profile.
         </p>
       </div>
       <fieldset className="space-y-2">
@@ -234,11 +276,27 @@ function CredentialsStep(props: AddDestinationWizardProps) {
       ) : (
         <div className="space-y-2">
           <Label htmlFor="new-bsky-identifier">Bluesky Identifier</Label>
-          <Input id="new-bsky-identifier" data-autofocus value={props.form.bskyIdentifier} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyIdentifier: event.target.value }))} required />
+          <Input
+            id="new-bsky-identifier"
+            data-autofocus
+            value={props.form.bskyIdentifier}
+            onChange={(event) => props.onFormChange((current) => ({ ...current, bskyIdentifier: event.target.value }))}
+            required
+          />
           <Label htmlFor="new-bsky-password">Bluesky App Password</Label>
-          <Input id="new-bsky-password" type="password" value={props.form.bskyPassword} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyPassword: event.target.value }))} required />
+          <Input
+            id="new-bsky-password"
+            type="password"
+            value={props.form.bskyPassword}
+            onChange={(event) => props.onFormChange((current) => ({ ...current, bskyPassword: event.target.value }))}
+            required
+          />
           <Label htmlFor="new-bsky-service">Bluesky Service URL</Label>
-          <Input id="new-bsky-service" value={props.form.bskyServiceUrl} onChange={(event) => props.onFormChange((current) => ({ ...current, bskyServiceUrl: event.target.value }))} />
+          <Input
+            id="new-bsky-service"
+            value={props.form.bskyServiceUrl}
+            onChange={(event) => props.onFormChange((current) => ({ ...current, bskyServiceUrl: event.target.value }))}
+          />
           <p className="text-xs text-muted-foreground">
             These credentials are stored as a managed account in Settings → Bluesky accounts, not on the destination.
           </p>
@@ -259,16 +317,31 @@ function ReviewStep(props: AddDestinationWizardProps) {
     <div className="space-y-4">
       <h3 className="font-semibold">Verify &amp; Create</h3>
       <div className="rounded-md border p-4 text-sm">
-        <p><strong>Destination:</strong> @{handle}</p>
+        <p>
+          <strong>Destination:</strong> @{handle}
+        </p>
         <p>
           <strong>Bluesky account:</strong>{' '}
           {useExisting
             ? 'Existing managed account from Settings'
             : 'New managed account saved to Settings → Bluesky accounts'}
         </p>
-        <p><strong>X Sources ({props.sources.length}):</strong> {props.sources.map((source) => `@${source}`).join(', ')}</p>
-        <p><strong>Backfill:</strong> None (request separately after creation)</p>
-        <p><strong>Attribution:</strong> {describeAttribution(props.form.postingPolicy.attribution.mode, props.sources.length)}</p>
+        <p>
+          <strong>X Sources ({props.sources.length}):</strong> {props.sources.map((source) => `@${source}`).join(', ')}
+        </p>
+        <p>
+          <strong>Initial import:</strong>{' '}
+          {props.initialImportMode === 'inherit'
+            ? `Use global default — ${describeInitialImportDefault(props.globalInitialImportDefault)}`
+            : describeInitialImportDefault(props.initialImportMode)}
+        </p>
+        <p>
+          <strong>Backfill:</strong> Available separately after creation
+        </p>
+        <p>
+          <strong>Attribution:</strong>{' '}
+          {describeAttribution(props.form.postingPolicy.attribution.mode, props.sources.length)}
+        </p>
         <p>
           <strong>Profile &amp; pin policy:</strong>{' '}
           {allowProfileMutation ? 'Mutations allowed (sync modes still off)' : 'Mutations disabled'}

@@ -1,10 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
-import {
-  CURRENT_CONFIG_SCHEMA_VERSION,
-  normalizeConfig,
-  normalizeRouteDelivery,
-} from '../../src/config-manager.js';
+import { CURRENT_CONFIG_SCHEMA_VERSION, normalizeConfig, normalizeRouteDelivery } from '../../src/config-manager.js';
 import { DEFAULT_ROUTE_DELIVERY } from '../../src/config/defaults.js';
 
 function readFixture(name: string): unknown {
@@ -17,6 +13,7 @@ describe('legacy config normalization', () => {
     expect(config).toMatchObject({
       schemaVersion: CURRENT_CONFIG_SCHEMA_VERSION,
       twitter: { authToken: '', ct0: '' },
+      defaultInitialImportMode: 'new-only',
       sources: [],
       destinations: [],
       routes: [],

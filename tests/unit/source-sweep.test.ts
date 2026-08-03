@@ -72,6 +72,42 @@ describe('canonical source sweep', () => {
     expect(enqueued).toEqual({ a: [], b: ['100'] });
   });
 
+  test('prepares candidates independently for each route before policy and enqueue', async () => {
+    let fetches = 0;
+    const policyCandidates: Record<string, number[]> = {};
+    const enqueued: Record<string, number[]> = {};
+    const service = new CanonicalSourceSweepService<number, number>({
+      fetch: async () => {
+        fetches += 1;
+        return [100, 101, 102];
+      },
+      normalize: (value) => value,
+      identify: String,
+      prepareRouteCandidates: async (candidates, { destination: target }) =>
+        target.id === 'a' ? [] : candidates.filter((candidate) => candidate !== 101),
+      applySourcePolicy: (value, { destination: target }) => {
+        policyCandidates[target.id] = [...(policyCandidates[target.id] ?? []), value];
+        return { allowed: true, reason: 'allowed', policyVersion: 2 };
+      },
+      isDestinationDuplicate: () => false,
+      enqueue: (values, { destination: target }) => {
+        enqueued[target.id] = [...values];
+        return values.length;
+      },
+    });
+
+    const result = await service.execute({
+      sources: [source],
+      destinations: [destination('a'), destination('b')],
+      routes: [route('a'), route('b')],
+    });
+
+    expect(fetches).toBe(1);
+    expect(policyCandidates).toEqual({ b: [100, 102] });
+    expect(enqueued).toEqual({ a: [], b: [100, 102] });
+    expect(result).toMatchObject({ fetchedSources: 1, fetchedPosts: 3, filteredPosts: 0, enqueuedPosts: 2 });
+  });
+
   test('paused routes and disabled sources are never fetched', async () => {
     let fetches = 0;
     const pausedRoute = { ...route('a'), relationship: { ...route('a').relationship, sourcePaused: true } };
