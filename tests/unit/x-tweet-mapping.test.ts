@@ -134,6 +134,58 @@ describe('X scraper tweet mapping', () => {
     expect(transformed.text.split(mapped.permanentUrl ?? '')).toHaveLength(2);
   });
 
+  test('recovers long-form note text retained in a nested repost result', () => {
+    const noteText =
+      'A long-form repost continues past the legacy cutoff and preserves every sentence after the media link.';
+    const mapped = mapScraperTweetToLocalTweet(
+      scraperTweet({
+        id: 'wrapper-note',
+        username: 'source',
+        isRetweet: true,
+        text: 'RT @author: A long-form repost continues…',
+        urls: [],
+        photos: [],
+        videos: [],
+        hashtags: [],
+        mentions: [],
+        thread: [],
+        __raw_UNSTABLE: {
+          id_str: 'wrapper-note',
+          full_text: 'RT @author: A long-form repost continues…',
+          retweeted_status_result: {
+            result: {
+              note_tweet: {
+                note_tweet_results: {
+                  result: { text: noteText },
+                },
+              },
+            },
+          },
+        },
+        retweetedStatusId: 'original-note',
+        retweetedStatus: {
+          id: 'original-note',
+          username: 'author',
+          text: 'A long-form repost continues https://t.co/media',
+          urls: [],
+          photos: [],
+          videos: [],
+          hashtags: [],
+          mentions: [],
+          thread: [],
+          __raw_UNSTABLE: {
+            id_str: 'original-note',
+            full_text: 'A long-form repost continues https://t.co/media',
+          },
+        },
+      }),
+    );
+
+    expect(mapped.full_text).toBe(`RT @author: ${noteText}`);
+    expect(mapped.full_text).not.toContain('https://t.co/media');
+    expect(mapped.repostContentSource).toBe('nested');
+  });
+
   test('synthesizes nested links and media when raw nested data is unavailable', () => {
     const mapped = mapScraperTweetToLocalTweet(
       scraperTweet({

@@ -36,6 +36,17 @@ interface RawExtras {
   lang?: unknown;
   in_reply_to_user_id_str?: string;
   card?: TweetCard | null;
+  retweeted_status_result?: {
+    result?: {
+      note_tweet?: {
+        note_tweet_results?: {
+          result?: {
+            text?: unknown;
+          };
+        };
+      };
+    };
+  };
 }
 
 const normalizeXStatusUrl = (value: string | undefined): string | undefined => {
@@ -113,6 +124,11 @@ const nestedRepostText = (nested: ScraperTweet | undefined): string | undefined 
   return typeof nested.text === 'string' && nested.text.trim() ? nested.text : undefined;
 };
 
+const nestedRepostNoteText = (wrapperExtras: RawExtras | undefined): string | undefined => {
+  const noteText = wrapperExtras?.retweeted_status_result?.result?.note_tweet?.note_tweet_results?.result?.text;
+  return typeof noteText === 'string' && noteText.trim() ? noteText : undefined;
+};
+
 const repostText = (wrapperText: string, nested: ScraperTweet, nestedText: string): string => {
   const existingPrefix = wrapperText.match(/^RT\s+@[^:]+:\s*/i)?.[0];
   const prefix = existingPrefix ?? (nested.username ? `RT @${nested.username}: ` : 'RT: ');
@@ -128,7 +144,10 @@ export function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): LocalTw
   const wrapperRaw = scraperTweet.__raw_UNSTABLE;
   const wrapperExtras = wrapperRaw as (typeof wrapperRaw & RawExtras) | undefined;
   const nestedCandidate = scraperTweet.retweetedStatus;
-  const recoveredNestedText = nestedRepostText(nestedCandidate);
+  // The scraper expands note_tweet for top-level posts, but nested reposts are
+  // parsed through its legacy path. Recover the retained long-form text before
+  // falling back to the nested object's abbreviated full_text.
+  const recoveredNestedText = nestedRepostNoteText(wrapperExtras) ?? nestedRepostText(nestedCandidate);
   // A textless nested object is not usable content. Treat it exactly like a
   // missing nested status so wrapper text, entities and diagnostics survive.
   const nested = recoveredNestedText ? nestedCandidate : undefined;
