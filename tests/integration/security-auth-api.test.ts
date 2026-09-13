@@ -200,11 +200,13 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
       'data:',
       'https://cdn.bsky.app',
       'https://video.bsky.app',
+      'https://video.cdn.bsky.app',
       'https://*.bsky.social',
       'https://*.bsky.network',
     ]);
     expect(directives.get('script-src')).toEqual(["'self'"]);
     expect(directives.get('connect-src')).not.toContain('https://video.bsky.app');
+    expect(directives.get('connect-src')).not.toContain('https://video.cdn.bsky.app');
     expect(result.noStore).toContain('no-store');
   } finally {
     temporary.cleanup();

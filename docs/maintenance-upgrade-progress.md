@@ -1,6 +1,6 @@
 # Maintenance upgrade progress
 
-Updated: 2026-09-13. Production 3.6.4 remains healthy and pinned, with original scheduler/ingress controls and shared Watchtower restored. Live UI acceptance identified a confirmed CSP defect: video.bsky.app thumbnails are excluded by img-src. A minimal corrective 3.6.5 release, exact-image validation, fresh stopped-writer backup/cutover, and final live acceptance remain open. Earlier backup/migration/continuity/API successes are retained but do not complete the goal.
+Updated: 2026-09-13. Production 3.6.5 is healthy at verified root ea73eb8c with exact migration 12 continuity and live API acceptance, but ordinary browser acceptance still fails Posts thumbnails: video.bsky.app redirects to CSP-blocked video.cdn.bsky.app. Original scheduler/ingress controls are restored and shared Watchtower runs with the app pinned/excluded. A second exact image-origin correction, isolated browser redirect regression, planned 3.6.6 release, and final deployed UI acceptance remain open.
 
 ## Execution identity
 
@@ -16,11 +16,11 @@ Updated: 2026-09-13. Production 3.6.4 remains healthy and pinned, with original 
 
 | Agent | Owned work | Current action |
 | --- | --- | --- |
-| Main orchestrator | Integration, deployment discovery, Git/release/deploy, final verification | Original controls restored; build/release corrective CSP fix, validate exact image, repeat bounded cutover and final live acceptance |
+| Main orchestrator | Integration, deployment discovery, Git/release/deploy, final verification | 3.6.5 native image/cutover/continuity/API verified; prepare exact CDN-origin correction and 3.6.6 acceptance |
 | dependency_plan | Manifest/lockfile, Dockerfile, workflows, runtime checker, image validation | Implementation, native amd64/arm64 CI, and promoted manifest verification complete |
 | pipeline_plan | Pipeline/database/services/adapters and related tests | Implementation and independent reviews complete |
 | deployment_plan | Frontend/config/browser runner and E2E | Implementation and local browser validation complete |
-| portainer_bridge | Corrective CSP fix, regression test, and real UI verification | Add only video.bsky.app to image policy, verify regression, and complete actual UI acceptance |
+| portainer_bridge | Corrective CSP fix, regression test, and real UI verification | Add only video.cdn.bsky.app alongside first host; isolated browser redirect regression and final ordinary UI acceptance |
 | cutover_controls | Read-only old-release quiescence review | Reviewed deployed 3.6.3 source at d824648; supported controls and observability limitations recorded below |
 
 Workers must not stage/commit/push. Main performs all remote mutations. Keep incomplete production acceptance open even though implementation and local checks pass.
@@ -33,10 +33,10 @@ Workers must not stage/commit/push. Main performs all remote mutations. Keep inc
 | 0: original work preservation | PASS | Original Git-normalized diff empty; original AI blob equals HEAD; no destructive checkout cleanup |
 | 0: fixture screenshots | PASS | Frozen baseline: 4 Playwright tests, 16 desktop/mobile light/dark captures under test-results/maintenance-baseline |
 | 0: production target/digest/data/key/backups | PASS | Target/published digest and same volume/env verified; protected copied-volume rehearsal and final stopped-writer recovery 20260913T160955Z-1204b84a2f2d41899b83f4391a5e7ad2 passed |
-| 0: prevent accidental updater deployment | PINNED / SHARED UPDATER RESTORED | Production pins 3.6.4 root digest/release ref with app Watchtower enable=false; Portainer polling remains guarded and shared Watchtower is running again |
+| 0: prevent accidental updater deployment | PINNED / SHARED UPDATER RESTORED | Production pins 3.6.5 root digest/release ref with app Watchtower enable=false; Portainer polling remains guarded and shared Watchtower is running again |
 | 0: schema documentation alignment | IMPLEMENTED | AGENTS/README/architecture/Cursor identity mirror corrected to v8; historical v7 migration section retained |
 | 1: all original security advisories | LOCAL PASS | Frozen install completed without changes; audit reports zero vulnerabilities across 724 packages |
-| 1: release prerequisites and exact-image/native smoke | PASS | Release/GHCR succeeded; both native architecture jobs passed; exact promoted image local smoke exited 0 |
+| 1: release prerequisites and exact-image/native smoke | THROUGH 3.6.5 PASS / 3.6.6 OPEN | 3.6.5 native provenance, exact published-image smoke, and server copy passed; second exact CSP origin correction requires final release/image acceptance |
 | 2: retry/deferred semantics and SQLite busy wait | IMPLEMENTED / LOCAL PASS | Implementation and reviews complete; included in full 441-test gate |
 | 3: cancellation/leases/recovery/shutdown/scraper deadlines | IMPLEMENTED / LOCAL PASS | Implementation and reviews complete; included in full gate and isolated runtime fixtures |
 | 4: account block migration/API/resume/mutation gates | IMPLEMENTED / LOCAL PASS | Migration012 and block/resume persistence, API, and mutation gates pass full gate and network-isolated real-backend checks |
@@ -45,14 +45,14 @@ Workers must not stage/commit/push. Main performs all remote mutations. Keep inc
 | 7: compiler/lint/frontend/CSS/icons | IMPLEMENTED / LOCAL PASS | Both typechecks/build and browser workflows pass; AI exclusion retained |
 | 8: real-backend, published-image, production smoke | PARTIAL | Published image, production copy, healthy 3.6.4, exact continuity, deployed API/assets, and startup logs pass; corrected real UI and post-resume checks remain open |
 | Independent pipeline/config/secrets reviews | COMPLETE | Main-task handoff confirms implementation findings repaired and reviews complete |
-| Full frozen-install/check/audit gate | LOCAL PASS | Recorded exit 0 for both logs below; 369 unit + 59 integration + 13 release = 441 tests, zero failures; implementation committed as 76c209c |
+| Full frozen-install/check/audit gate | LOCAL PASS | Original install/audit evidence retained; corrective pinned maintenance-csp-check-pinned.log passed lint/typechecks/build and 369 unit + 59 integration + 13 release = 441 tests |
 | Mocked UI + real-backend integration | LOCAL PASS | Playwright 21 passed, 4 optional capture tests skipped; separate network-none backend run: 11 tests, 160 assertions, zero failures |
 | Fresh/current/legacy migration/restore/restart | FIXTURE + PRODUCTION COPY PASS | 18 fixture stages and actual protected server snapshot copy/migrate/restart pass against published digest; source/app unchanged and all five helper resources removed |
-| amd64/arm64 native/container/Chromium | PASS | GHCR arm64 job 103746731882 and amd64 job 103746731886 passed native SQLite/sharp/Chromium, migration, and backend checks |
-| Exact published digest validation | PASS | Published root/tested children verified; main local session 67390 exited 0 against promoted digest; test-results/maintenance-published-image.log |
-| Git push/release/registry manifests | PASS | Main push f257d723; Release 34765700058 and GHCR 34765838301 succeeded; v3.6.4 tag/release/package/README agree at generated f58e6da1 |
-| Production cutover/readiness/authenticated smoke | PARTIAL / CORRECTION REQUIRED | 3.6.4 cutover/API/continuity passed; live Posts thumbnails expose confirmed CSP img-src omission; 3.6.5 correction and final live UI acceptance pending |
-| Repair loop and completion audit | OPEN | Original controls restored; minimal CSP fix/regression, corrective release/image validation, fresh backup/cutover, live UI/post-resume acceptance and final evidence audit required |
+| amd64/arm64 native/container/Chromium | THROUGH 3.6.5 PASS | GHCR 34768653297 succeeded: both native architectures passed 18 migration stages and 11 backend tests/162 assertions; final planned 3.6.6 image checks remain open |
+| Exact published digest validation | THROUGH 3.6.5 PASS / 3.6.6 OPEN | 3.6.5 root ea73eb8c native provenance and exact-image session 26093 exited 0; maintenance-csp-published-image.log; final correction not released yet |
+| Git push/release/registry manifests | THROUGH 3.6.5 PASS / 3.6.6 OPEN | Corrective 7ce81eca/5d37d755 and Release 34768543332/GHCR 34768653297 succeeded; next exact CDN CSP correction planned for 3.6.6 |
+| Production cutover/readiness/authenticated smoke | PARTIAL / SECOND CORRECTION REQUIRED | 3.6.5 cutover/API/12-to-12 continuity passed; Posts images still fail due video.cdn.bsky.app redirect CSP omission; planned 3.6.6 and final live UI acceptance open |
+| Repair loop and completion audit | OPEN | First origin correction deployed; second exact redirected image-origin fix/browser regression, final release/image/cutover/UI/post-resume acceptance and evidence audit remain |
 
 ## Verified local validation evidence
 
@@ -117,7 +117,7 @@ Production facts below are from the main task's verified remote investigation; t
 - Application-helper ownership precheck initially failed. The folder owner was corrected to the current Windows user with `icacls /setowner`, leaving the DACL unchanged; user application-session readiness then succeeded.
 - Automatic approval review rejected a risky ACL-descriptor approach and an opaque helper invocation. Main resolved these using the documented owner-only command and complete inline code. No sensitive production configuration/database/key material was transferred locally.
 - During the first cutover both updaters were guarded and the old writer exited before replacement. Production 3.6.4 is now healthy, original scheduler/ingress controls restored, shared Watchtower running, and the app remains explicitly pinned/excluded while the corrective release is prepared.
-- Still open: minimal confirmed CSP correction and regression verification; corrective release/published-image checks; fresh drain/backup and corrective cutover; complete real UI and post-resume acceptance; cleanup and final evidence audit. Re-capture controls for the next cutover instead of reusing an already-restored scheduler handle.
+- First corrective 3.6.5 native/image/copy/cutover/continuity/API checks passed. Still open: second exact CDN CSP-origin correction and isolated browser redirect regression, planned 3.6.6 release/image/cutover, final ordinary UI and post-resume acceptance, cleanup/evidence audit. Original controls were restored again; capture fresh handles before another cutover.
 
 ## Verified production cutover and pre-resume acceptance
 
@@ -142,7 +142,33 @@ Evidence below is from the main task's actual execution; this ledger update make
 - Public normal-access probe after restoration: GET `/readyz` returned 200; harmless unauthenticated POST `/__maintenance_nonexistent_probe__` returned 200 through the SPA fallback, confirming the maintenance 503 is gone. No mutative application route was targeted. The initially guessed 404 expectation is not an application defect.
 - Private `final-backup.py` now accepts only complete migrations 1–11 or 1–12 for Snapshot. Verify retains the existing 11-to-12 additive path and adds exact 12-to-12 migration history/table/core/account-block continuity for the corrective release; no extra schema allowances. `app-control.py` explicitly accepts only versions 3.6.3/3.6.4/3.6.5 in both the API and saved scheduler-record guards.
 - Focused offline helper fixtures passed real WAL-inclusive backup, 11-to-12 and exact 12-to-12 continuity (including an existing block row), and rejection of extra migrations/history/table/core/block/config/env/JWT changes. Both helpers compile and exactly two explicit scheduler-version guards include 3.6.5. No remote helper invocation or business-code edit was performed in this preparation.
-- Still required: corrected-release checks/push/release/native image promotion, exact published-image acceptance, fresh control capture/gate/drain/stopped-writer backup, corrective cutover, authenticated API/real UI/continuity/log acceptance, final restoration/post-resume checks, and completion audit. The overall goal remains incomplete.
+- First corrective 3.6.5 release/image/copy/cutover/continuity/API checks completed. The ordinary UI exposed the second exact redirected CDN origin omission below. Its correction, planned 3.6.6 release and full final acceptance remain required; the overall goal remains incomplete.
+
+## Corrective 3.6.5 release checkpoint
+
+This is supplied completed evidence from the main task; no remote or Git calls or test reruns occur in this ledger update.
+
+- Corrective commit `7ce81eca196bf8a308ffec727971acafd973358b` was pushed. The correction addresses the confirmed video-thumbnail CSP host omission; no dependency changes were made.
+- `test-results/maintenance-csp-check-pinned.log`: full gate passed with the intended Bun 1.4.2, all lint/typechecks/build successful, 369 unit + 59 integration + 13 release tests = 441 passed. An earlier untrusted attempt inherited Bun 1.3.14 and encountered EPERM; it is not passing evidence. The successful invocation passes an explicit environment to `Bun.spawn`: `env: {...process.env, PATH: dirname(process.execPath) + ';' + process.env.PATH}`. Merely mutating process.env did not reliably propagate the pinned runtime to the child.
+- Corrective Release workflow `34768543332` succeeded and generated `v3.6.5` at commit `5d37d75550b91cafec2cc225e50c8007605337dd`. Tag/GitHub Release/package.json/README agree; main reported clean release state before this ledger update. AI Git blob remains `ccdd0b9b906e92219b1f4caacf28f61827e6b70b`, with no dependency changes.
+- Release-tag GHCR run `34768653297` completed successfully. Native arm64 job `103754415740` and amd64 job `103754415774` each passed 18 migration stages plus 11 backend tests with 162 assertions; exact native provenance for the promoted 3.6.5 root was verified. Subsequent image/server/cutover evidence is recorded below.
+- At that release checkpoint production remained pinned 3.6.4 with original controls restored. The subsequent second cutover below deployed 3.6.5 and then restored controls again after its ordinary UI failure.
+- Automatic approval review rejected an optional standalone diagnostic that would extract video-thumbnail URLs from authenticated app data and fetch them directly from video.bsky.app because that sensitive-data egress was not specifically authorized. It did not execute; no retry or workaround was attempted, and the optional probe was abandoned. Main explained this rejection to the user. Required ordinary deployed-browser acceptance, including normal authorized UI image loading, remains planned and has not been waived.
+
+## Verified 3.6.5 cutover and second exact CSP-origin correction
+
+- 3.6.5 promoted root `sha256:ea73eb8c7c5c55a1a81b4d76d88c05728b31c103fa245fa7e103184cc410927a` passed exact native provenance verification. GHCR run `34768653297` succeeded with both architecture smoke/migration/backend jobs.
+- Main local exact-image session `26093` exited 0; log `test-results/maintenance-csp-published-image.log`. Actual server copied-volume run `e178a5b63da248588ffc0e92a15a2853` passed copy/migrate/restart against this root; source/app unchanged and all five disposable resources cleaned up.
+- Second Caddy gate run `85c90f357fd948a0ac15ca029a1a9572` enabled at `2026-09-13 16:36:51 UTC`. Scheduler disabled from revision 24 to 25 with handle `b7bfb97fb68f411daaf6fd54f6d23e83`, retaining original three-minute interval and runOnStartup=true.
+- Drain reconciled three matched sweeps, last finish `16:32:05 UTC`, latest empty result `16:34:55 UTC`; no active counters, ambiguous work, or errors. The 3.6.4 writer stopped gracefully with exit 0 before final backup/replacement.
+- Fresh recovery `20260913T163809Z-503f2a2e2b5d42b1b16a3ea357493852`, protected server-side under the maintenance directory: migration 12, processed_tweets 8947, delivery_checkpoints 12738, route_initial_import_state 4; other core counts 0. This is the new authoritative pre-second-cutover backup, alongside retained prior recovery artifacts.
+- Portainer deployed 3.6.5 release commit `5d37d75550b91cafec2cc225e50c8007605337dd` at the above immutable root. New container `87ee1028f482b089d85dce1e525f5753b691b987d505e3affd29e0c14151e48c` is healthy, with the same environment/volume, explicit digest pin, and updater exclusion.
+- Exact 12-to-12 continuity passed. Live 3.6.5 API checks passed with the original baseline identity fingerprint unchanged. Ordinary UI anonymous checks passed; Posts images still failed.
+- Ordinary authorized browser diagnostics established that video.bsky.app redirects thumbnails to video.cdn.bsky.app, which is also absent from CSP img-src. The worker is adding that second exact image origin and an isolated browser redirect regression. Planned corrective 3.6.6 and final ordinary deployed UI acceptance remain **OPEN**; no wildcard CSP allowance or waiver is appropriate.
+- The saved original proxy security headers were verified: `X-Frame-Options: SAMEORIGIN` and `Referrer-Policy: strict-origin-when-cross-origin`. The private probe had incorrectly required stricter application defaults; its expectation was corrected to the original proxy behavior. This mismatch is not an application regression.
+- Main restored scheduler revision 25 to 26, enabled=true, intervalMinutes=3, runOnStartup=true. Original Caddy SHA `7bee499a982c52f732f02dd244b8bec8f4814f752a9ab7a2b69a4762507c3167` restored exactly, gateActive=false. Shared Watchtower remains running with app enable=false; production 3.6.5 stays pinned.
+- Private app-control.py adds 3.6.6 only to its two explicit API/saved-scheduler-record version guards. Syntax/AST checks confirm exactly those two allowlists; no remote helper execution. Existing 12-to-12 backup continuity needs no change.
+- Overall acceptance remains incomplete until the redirected-origin correction passes its final release/image/cutover/live UI and post-resume checks.
 
 ## Old-release cutover constraints
 
@@ -169,8 +195,8 @@ These historical cutover constraints were reviewed against old deployed ref `d82
 
 - Docker Desktop 29.6.2 is available; local candidate container tests passed.
 - Official Node 22.22.2 Windows executable is in ignored test artifacts, verified against nodejs.org SHASUMS. Exact release-toolchain rehearsal exited 0; global Node unchanged.
-- Bun 1.4.2 is available at `C:/Users/Alex/.bun/install/cache/@oven/bun-windows-x64@1.4.2@@@1/bin/bun.exe`. Prepend its directory to process.env.PATH inside Bun before Bun.spawn for package scripts; PowerShell PATH alone previously selected global 1.3.14 in nested commands.
+- Bun 1.4.2 is available at `C:/Users/Alex/.bun/install/cache/@oven/bun-windows-x64@1.4.2@@@1/bin/bun.exe`. For package-script children pass `env: {...process.env, PATH: dirname(process.execPath) + ';' + process.env.PATH}` directly to `Bun.spawn`. Neither PowerShell PATH alone nor merely mutating process.env reliably selected the intended runtime; the explicit environment produced the trusted corrective gate.
 
 ## Resume instruction
 
-Read this ledger and the saved plan; verify current worktree/main-task state before proceeding. Preserve passing 3.6.4 release, fixture, production-copy, first-cutover backup, and continuity evidence. Complete the minimal confirmed CSP correction and its focused/affected checks, release 3.6.5 through the existing workflow, and validate the exact newly published digest. Production currently runs 3.6.4 with original scheduler/ingress/shared Watchtower restored and the app pinned/excluded. Capture fresh controls, repeat bounded gate/drain/stopped-writer backup and corrective cutover, then require real API/UI/assets/security-header/log/data-continuity acceptance for the new digest. Restore only controls changed for that cutover, verify bounded normal post-resume behavior, and complete cleanup/final evidence audit. Report live publishing unexercised if no natural delivery occurs during the bounded smoke; do not manufacture posts or wait through a soak. Do not mark the goal complete until the corrected deployed image satisfies every required acceptance item.
+Read this ledger and the saved plan; verify current worktree/main-task state. Preserve passing 3.6.4 and 3.6.5 release/image/production-copy/backup/continuity evidence. Production currently runs healthy pinned 3.6.5 with original scheduler/ingress controls restored, shared Watchtower running, and app updater exclusion retained. Finish only the confirmed video.cdn.bsky.app image-origin addition and isolated browser redirect regression, release planned 3.6.6, validate its native provenance/exact published image, then capture fresh controls and repeat the bounded drain/stopped-writer backup/cutover. Require actual ordinary API/UI/image/security-header/log/data continuity and restored post-resume acceptance for that final digest. Compare proxy headers to the verified original proxy baseline. The optional rejected standalone URL-extraction/fetch probe remains abandoned; normal authorized UI loading and its mandatory acceptance remain required. Retain protected recovery references, complete cleanup/final evidence audit, and report live posting unexercised if no natural delivery occurs during bounded smoke. No manufactured posts, observation soak, or completion claim before final acceptance.

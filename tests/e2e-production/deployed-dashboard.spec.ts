@@ -141,7 +141,10 @@ test('deployed authenticated dashboard serves real APIs and navigates without mu
           ),
         ),
       );
-      expect(imagesLoaded.every(Boolean), `Visible images on ${path} must finish loading successfully.`).toBe(true);
+      expect(
+        imagesLoaded.every(Boolean),
+        `Visible images on ${path} must finish loading successfully. Sanitized failures: ${JSON.stringify(failures)}`,
+      ).toBe(true);
     } finally {
       closing = true;
       await page.close();
