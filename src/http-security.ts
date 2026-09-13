@@ -54,7 +54,7 @@ export function applySecurityHeaders(_request: Request, response: Response, next
       "object-src 'none'",
       "script-src 'self'",
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: https://cdn.bsky.app https://*.bsky.social https://*.bsky.network",
+      "img-src 'self' data: https://cdn.bsky.app https://video.bsky.app https://*.bsky.social https://*.bsky.network",
       "font-src 'self' data:",
       "connect-src 'self' https://bsky.social https://*.bsky.social https://*.bsky.network https://cdn.bsky.app",
     ].join('; '),

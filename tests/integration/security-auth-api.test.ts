@@ -1,6 +1,6 @@
+import { expect, test } from 'bun:test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { expect, test } from 'bun:test';
 import { createTemporaryDataDir } from '../helpers/temporary-data-dir.js';
 
 test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening work together', async () => {
@@ -187,7 +187,24 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
     expect(csrfCookie).not.toContain('HttpOnly');
     expect(csrfCookie).toContain('SameSite=Lax');
     expect(csrfCookie).toContain('Secure');
-    expect(result.csp).toContain("script-src 'self'");
+    const directives = new Map<string, string[]>(
+      result.csp.split(';').map((directive: string) => {
+        const [name = '', ...sources] = directive.trim().split(/\s+/);
+        return [name, sources];
+      }),
+    );
+    // Video embed thumbnails render as images; allow their exact host without
+    // granting arbitrary HTTPS images or expanding scripts and API connections.
+    expect(directives.get('img-src')).toEqual([
+      "'self'",
+      'data:',
+      'https://cdn.bsky.app',
+      'https://video.bsky.app',
+      'https://*.bsky.social',
+      'https://*.bsky.network',
+    ]);
+    expect(directives.get('script-src')).toEqual(["'self'"]);
+    expect(directives.get('connect-src')).not.toContain('https://video.bsky.app');
     expect(result.noStore).toContain('no-store');
   } finally {
     temporary.cleanup();
