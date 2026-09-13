@@ -2,7 +2,7 @@
 
 Updated: 2026-09-13
 
-Status: execution authorized and active. Track implementation and acceptance evidence in `docs/maintenance-upgrade-progress.md`; this plan alone is not evidence of completion.
+Status: COMPLETE for v3.6.6. Implementation, deployment acceptance, final test-only CI, restored controls, and cleanup passed. See docs/maintenance-upgrade-progress.md for the final evidence, recovery references, and explicit live-posting coverage limitation.
 
 This is the complete workspace version of the conversation plan. It supersedes the earlier per-phase releases, canary, approval checkpoints, and observation windows. Phases organize implementation work; they do not introduce pauses or separate deployments.
 
