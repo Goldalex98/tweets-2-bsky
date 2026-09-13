@@ -2,7 +2,7 @@
 
 Cross-post from Twitter/X to Bluesky with threads, media, durable queues, and a web dashboard.
 
-Current release: app `3.6.5`, schema **v8** (`Source → Route → Destination → BlueskyAccount`), managed Bluesky
+Current release: app `3.6.6`, schema **v8** (`Source → Route → Destination → BlueskyAccount`), managed Bluesky
 accounts, content routing/moderation/dedup, webhook/API ingestion, digests, encrypted configuration, and
 WAL-consistent backup/restore. **Bun** is the only supported runtime and package manager (`bun.lock` only —
 never add `package-lock.json`). This repo pins Bun **1.4.2** via `packageManager`.
