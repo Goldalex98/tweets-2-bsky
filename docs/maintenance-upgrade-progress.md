@@ -10,7 +10,7 @@ Updated: 2026-09-13. Goal active. Implementation and independent reviews are com
 - Verified base: `origin/main` at `d824648569450d0dcadc42cf84a8b796195055a3`, published app 3.6.3.
 - Original checkout preserved: `codex/fix-long-form-repost-text` at `f81521e`. Original tracked changes had no Git-normalized content diff; no reset/stash/cleanup performed. This progress ledger is deliberately mirrored to both checkouts.
 - Base-to-old-HEAD difference: only release metadata in package.json and README.md.
-- No implementation commits, remote pushes, release, or application deployment yet. Validation currently applies to the working tree and local candidate image, not a final commit or published digest.
+- Implementation committed locally as `76c209cf12d75e2540e775a994959901df25d053` (`fix: harden delivery and upgrade non-AI runtime dependencies`). The reviewed implementation matches the locally tested source; only ledger updates followed. No remote push, release, or application deployment yet. Published-digest acceptance remains open.
 
 ## Ownership and current action
 
@@ -20,7 +20,8 @@ Updated: 2026-09-13. Goal active. Implementation and independent reviews are com
 | dependency_plan | Manifest/lockfile, Dockerfile, workflows, runtime checker, image validation | Implementation and local validation complete; native arm64 and published-image evidence pending |
 | pipeline_plan | Pipeline/database/services/adapters and related tests | Implementation and independent reviews complete |
 | deployment_plan | Frontend/config/browser runner and E2E | Implementation and local browser validation complete |
-| portainer_bridge | Private bridge helpers; this mirrored ledger | Bridge prepared and offline-checked; ledger refreshed from existing logs and main-task handoff |
+| portainer_bridge | Private deployment helpers | Portainer bridge and server-side protected snapshot wrapper prepared and offline-checked; no remote invocation |
+| cutover_controls | Read-only old-release quiescence review | Reviewed deployed 3.6.3 source at d824648; supported controls and observability limitations recorded below |
 
 Workers must not stage/commit/push. Main performs all remote mutations. Keep incomplete production acceptance open even though implementation and local checks pass.
 
@@ -44,12 +45,12 @@ Workers must not stage/commit/push. Main performs all remote mutations. Keep inc
 | 7: compiler/lint/frontend/CSS/icons | IMPLEMENTED / LOCAL PASS | Both typechecks/build and browser workflows pass; AI exclusion retained |
 | 8: real-backend, published-image, production smoke | PARTIAL | Local candidate readiness and network-isolated backend fixtures pass; published digest and live upgraded deployment untested |
 | Independent pipeline/config/secrets reviews | COMPLETE | Main-task handoff confirms implementation findings repaired and reviews complete |
-| Full frozen-install/check/audit gate | LOCAL PASS | Recorded exit 0 for both logs below; 369 unit + 59 integration + 13 release = 441 tests, zero failures; final commit identity still pending |
+| Full frozen-install/check/audit gate | LOCAL PASS | Recorded exit 0 for both logs below; 369 unit + 59 integration + 13 release = 441 tests, zero failures; implementation committed as 76c209c |
 | Mocked UI + real-backend integration | LOCAL PASS | Playwright 21 passed, 4 optional capture tests skipped; separate network-none backend run: 11 tests, 160 assertions, zero failures |
 | Fresh/current/legacy migration/restore/restart | FIXTURE PASS / LIVE COPY OPEN | 18 compiled image fixture stages cover six fixture configurations through seed/restart/restore; actual production copied-volume rehearsal remains pending |
 | amd64/arm64 native/container/Chromium | PARTIAL | Linux amd64 native SQLite/sharp and Chromium render/cleanup pass locally; native arm64 pending |
 | Exact published digest validation | OPEN | No release generated; local image tag tweets-2-bsky:release-validation is not published-image evidence |
-| Git push/release/registry manifests | OPEN | No commit/push; first establish both updater guards, then record release workflow/tag/version/registry evidence |
+| Git push/release/registry manifests | OPEN | Local commit 76c209c created with 90 explicitly reviewed paths, no secrets/artifacts staged, clean implementation worktree afterward; no push. Establish both updater guards before release-triggering push |
 | Production cutover/readiness/authenticated smoke | OPEN | Old production 3.6.3 healthy; upgraded application has not been deployed |
 | Repair loop and completion audit | OPEN | Required after published-image validation and actual deployment |
 
@@ -85,7 +86,25 @@ Production facts below are from the main task's verified remote investigation; t
 - Automatic approval review rejected transfer of production config, database, and encryption-key material to a local owner-only ignored folder because specific authorization for that sensitive transfer was absent. No transfer happened. The main task will validate the protected snapshot on the server against the published digest, keeping production data and secrets there; this validation remains open.
 - SSH credential existence is confirmed; the user still needs the separate Portainer setup command. No remote configuration, updater, or application changes have been made.
 - The live baseline snapshot is not a final cutover backup. Actual copied-volume rehearsal and a final quiesced, rollback-ready backup are still pending.
-- GitHub main was verified at d824648 with no remote mutation. Release-bearing commit, push, workflow success, generated tag/release, matching package/README version, and registry manifests remain pending.
+- GitHub main was verified at d824648 with no remote mutation. Release-bearing local commit 76c209c is ready; push, workflow success, generated tag/release, matching package/README version, and registry manifests remain pending.
+- Remote history refreshed after local commit: main still d824648, zero upstream-only commits, one local implementation commit. AI source diff against main remains empty.
+- The earlier browser tab is no longer available. A replacement production tab currently shows Sign in and is retained for handoff; authenticated post-upgrade acceptance still requires a valid user-provided session.
+- Private `test-results/deployment-access/server-copy-test.py` is prepared for the verified published digest. It runs only the image's existing copy/migrate/restart entrypoints with network disabled, no ports, read-only root, disposable labeled resources, and the snapshot mounted read-only. The encryption key stays in the server process environment. It verifies source fingerprints and app ID/image preservation, and reports cleanup failures explicitly. Python syntax and mocked isolation, timeout, ownership, hex/base64 key, optional `.jwt-secret`, and unknown-file checks pass. This is helper preparation, not actual production-copy acceptance.
+- Access revalidation across the last two goal turns found no Portainer credential file. Independent implementation, local commit, remote-history refresh, and deployment-helper preparation progressed; no release-triggering push is permitted until both updaters are controlled. Completion remains unproven.
+
+## Old-release cutover constraints
+
+The cutover reviewer inspected deployed ref `d824648569450d0dcadc42cf84a8b796195055a3`, not the new implementation. No production control has been changed.
+
+- The old release has no global maintenance/drain API or signal-driven graceful drain handler. A 60-second Docker stop timeout alone does not establish that publishing drained.
+- Gate external mutations and inbound ingestion at the existing reverse proxy, retain a private operator path, and verify no direct-port bypass. Inspect the actual proxy configuration before selecting its concrete gate; this remains open.
+- Capture original scheduler settings and top-level `revision`/`updatedAt` with `GET /api/settings/scheduler`. Update with `PATCH /api/settings/scheduler`, preserving `intervalMinutes` and supplying `enabled:false` plus the current revision; the response supplies the next revision. It prevents new scheduled sweeps but not an active sweep, accepted manual work, pending backfills, or pins.
+- Drain within the plan's ten-minute bound. Use fresh status/health/digest API results, durable queue/digest/backfill state, and sanitized sweep/task completion logs together. The earlier empty baseline is not proof of current quiescence.
+- Avoid destination state changes if unnecessary. `PATCH /api/destinations/:id/state` with current `revision` and `state:"paused"` preserves queue rows and prevents new queue claims, but it can cancel waiting backfills and discard pending pin work. Require those to be settled first and preserve each original state if this control is needed.
+- Destination pause does not stop armed digest jobs in the old release. Do not use digest deletion/cancellation or policy edits as a reversible pause.
+- Old post requests can outlive their 120-second Promise.race timeout; zero queue/active-job counters do not establish settled external work. Profile/follow HTTP operations and pending pins are not fully represented in status. Reconcile any timeout or ambiguous acceptance using deterministic record identities/checkpoints before delivery resumes.
+- Confirm the old container exited before the authoritative backup and replacement start. Preserve the latest queue/history/checkpoints; never restore the earlier baseline merely to make tests pass. Restore only operator settings actually changed, using current revisions, and reopen ingress after acceptance.
+- Authenticated old-version admin access is still required for supported scheduler controls. SSH-only reads of empty tables do not substitute for that access or prove a drain.
 
 ## Toolchain notes for resume
 
