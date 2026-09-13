@@ -99,7 +99,7 @@ export const ADD_ACCOUNT_STEPS = ['Sources', 'Create', 'Bluesky', 'Verify & Crea
 export const ADD_ACCOUNT_STEP_COUNT = ADD_ACCOUNT_STEPS.length;
 export const ACCOUNT_SEARCH_MIN_SCORE = 22;
 export const selectClassName =
-  'flex h-10 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+  'flex h-10 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
 /** Mirrors `parseSchedulerIntervalMinutes` in `src/scheduler-timing.ts`. */
 export const MIN_CHECK_INTERVAL_MINUTES = 1;

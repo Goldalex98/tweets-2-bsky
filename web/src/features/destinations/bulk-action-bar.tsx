@@ -20,7 +20,7 @@ export function BulkActionBar(props: BulkActionBarProps) {
   if (props.selectedCount === 0) return null;
   return (
     <section
-      className="sticky bottom-3 z-10 rounded-lg border bg-background/95 p-3 shadow-lg backdrop-blur"
+      className="sticky bottom-3 z-10 rounded-lg border bg-background/95 p-3 shadow-lg backdrop-blur-sm"
       aria-label="Bulk destination actions"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">

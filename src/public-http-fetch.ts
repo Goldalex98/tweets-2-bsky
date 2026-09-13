@@ -1,3 +1,4 @@
+import { assertDeliveryActive, deliverySignal } from './services/delivery-context.js';
 import {
   resolveWebhookTarget,
   sendPinnedHttpsRequest,
@@ -50,6 +51,7 @@ export async function fetchPublicHttps(
   let current = rawUrl;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
+    assertDeliveryActive();
     const resolved = await resolveWebhookTarget(current, false, lookup);
     const response = await send({
       target: resolved.target,
@@ -58,6 +60,7 @@ export async function fetchPublicHttps(
       method,
       headers: options.headers ?? {},
       timeoutMs,
+      signal: deliverySignal(),
       ...(options.maxResponseBytes !== undefined ? { maxResponseBytes: options.maxResponseBytes } : {}),
     });
     const next = redirectLocation(response, resolved.target);

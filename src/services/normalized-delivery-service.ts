@@ -1,11 +1,8 @@
+import { assertDeliveryActive, commitDeliveryState } from './delivery-context.js';
 import { createHash } from 'node:crypto';
 import type { QueueBatch } from '../db.js';
 import { createGenericPostPlan, type StrongRef } from '../generic-delivery.js';
-import {
-  type NormalizedMediaDescriptor,
-  type NormalizedPost,
-  validateNormalizedPost,
-} from '../normalized-post.js';
+import { type NormalizedMediaDescriptor, type NormalizedPost, validateNormalizedPost } from '../normalized-post.js';
 
 export interface NormalizedDeliveryCheckpoint {
   uri?: string;
@@ -58,35 +55,37 @@ export interface NormalizedDeliveryDependencies {
       parent?: StrongRef;
       tail: StrongRef;
     }): void;
-    finalize(record: {
-      twitter_id: string;
-      twitter_username: string;
-      bsky_identifier: string;
-      source_type: string;
-      external_post_id: string;
-      destination_id: string;
-      route_id?: string;
-      source_id: string;
-      source_created_at: number;
-      posted_at: number;
-      policy_version: number;
-      policy_snapshot?: string;
-      decision_version: number;
-      decision_trace?: string;
-      tweet_text: string;
-      bsky_uri: string;
-      bsky_cid: string;
-      bsky_root_uri: string;
-      bsky_root_cid: string;
-      bsky_tail_uri: string;
-      bsky_tail_cid: string;
-      status: 'migrated';
-    }, checkpointExternalPostId: string): void;
+    finalize(
+      record: {
+        twitter_id: string;
+        twitter_username: string;
+        bsky_identifier: string;
+        source_type: string;
+        external_post_id: string;
+        destination_id: string;
+        route_id?: string;
+        source_id: string;
+        source_created_at: number;
+        posted_at: number;
+        policy_version: number;
+        policy_snapshot?: string;
+        decision_version: number;
+        decision_trace?: string;
+        tweet_text: string;
+        bsky_uri: string;
+        bsky_cid: string;
+        bsky_root_uri: string;
+        bsky_root_cid: string;
+        bsky_tail_uri: string;
+        bsky_tail_cid: string;
+        status: 'migrated';
+      },
+      checkpointExternalPostId: string,
+    ): void;
   };
 }
 
-const contentHash = (text: string): string =>
-  createHash('sha256').update(text).digest('hex');
+const contentHash = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 function replyFor(post: NormalizedPost, destinationId: string, dependencies: NormalizedDeliveryDependencies) {
   if (!post.replyTo) return undefined;
@@ -111,8 +110,14 @@ function replyFor(post: NormalizedPost, destinationId: string, dependencies: Nor
 export class NormalizedDeliveryService {
   constructor(private readonly dependencies: NormalizedDeliveryDependencies) {}
 
-  async deliver(adapter: NormalizedDeliveryAdapter, batch: QueueBatch): Promise<void> {
+  async deliver(
+    adapter: NormalizedDeliveryAdapter,
+    batch: QueueBatch,
+    markAttempted?: (queueId: string) => void,
+  ): Promise<void> {
     for (const item of batch.items) {
+      assertDeliveryActive();
+      markAttempted?.(item.queue_id);
       const post = validateNormalizedPost(JSON.parse(item.tweet_json));
       const plan = createGenericPostPlan(
         post,
@@ -129,6 +134,7 @@ export class NormalizedDeliveryService {
       );
 
       for (const chunk of plan) {
+        assertDeliveryActive();
         const saved = checkpoints[chunk.index];
         if (saved?.completedAt && saved.uri && saved.cid) continue;
         const richText = await adapter.prepareText(chunk.text);
@@ -139,6 +145,7 @@ export class NormalizedDeliveryService {
         }> = [];
         let videoEmbed: Record<string, unknown> | undefined;
         for (const media of chunk.media) {
+          assertDeliveryActive();
           const buffer = await adapter.downloadMedia(media);
           if (buffer.length < 1 || buffer.length > media.sizeBytes) {
             throw new Error('Normalized media exceeded its declared size.');
@@ -151,18 +158,14 @@ export class NormalizedDeliveryService {
               $type: 'app.bsky.embed.video',
               video: await adapter.uploadVideo(buffer, media.url),
               alt: media.suppliedAlt ?? '',
-              ...(media.width && media.height
-                ? { aspectRatio: { width: media.width, height: media.height } }
-                : {}),
+              ...(media.width && media.height ? { aspectRatio: { width: media.width, height: media.height } } : {}),
             };
           } else {
             if (videoEmbed) throw new Error('Bluesky delivery cannot mix video and image embeds.');
             imageEmbeds.push({
               alt: media.suppliedAlt ?? '',
               image: await adapter.uploadImage(buffer, media.mimeType),
-              ...(media.width && media.height
-                ? { aspectRatio: { width: media.width, height: media.height } }
-                : {}),
+              ...(media.width && media.height ? { aspectRatio: { width: media.width, height: media.height } } : {}),
             });
           }
         }
@@ -178,6 +181,7 @@ export class NormalizedDeliveryService {
           chunk.reply?.parent ??
           prior?.tail ??
           (prior?.uri && prior?.cid ? { uri: prior.uri, cid: prior.cid } : undefined);
+        assertDeliveryActive();
         const response = await adapter.publish({
           destinationId: batch.destination_id,
           externalPostId: item.twitter_id,
@@ -199,16 +203,18 @@ export class NormalizedDeliveryService {
             ...(root && parent ? { reply: { root, parent } } : {}),
           },
         });
-        this.dependencies.checkpoints.recordSuccess({
-          destinationId: batch.destination_id,
-          externalPostId: item.twitter_id,
-          chunkIndex: chunk.index,
-          uri: response.uri,
-          cid: response.cid,
-          root: root ?? response,
-          parent,
-          tail: response,
-        });
+        commitDeliveryState(() =>
+          this.dependencies.checkpoints.recordSuccess({
+            destinationId: batch.destination_id,
+            externalPostId: item.twitter_id,
+            chunkIndex: chunk.index,
+            uri: response.uri,
+            cid: response.cid,
+            root: root ?? response,
+            parent,
+            tail: response,
+          }),
+        );
         checkpoints = this.dependencies.checkpoints.list(batch.destination_id, item.twitter_id);
       }
 
@@ -217,32 +223,36 @@ export class NormalizedDeliveryService {
       if (!first?.uri || !first.cid || !last?.uri || !last.cid) {
         throw new Error('Normalized delivery checkpoint is incomplete.');
       }
-      this.dependencies.checkpoints.finalize(
-        {
-          twitter_id: item.twitter_id,
-          twitter_username: post.sourceId,
-          bsky_identifier: batch.bsky_identifier,
-          source_type: post.sourceType,
-          external_post_id: post.externalId,
-          destination_id: batch.destination_id,
-          route_id: item.route_id,
-          source_id: post.sourceId,
-          source_created_at: Date.parse(post.createdAt),
-          posted_at: this.dependencies.clock.now(),
-          policy_version: item.policy_version,
-          policy_snapshot: item.policy_snapshot,
-          decision_version: item.decision_version,
-          decision_trace: item.decision_trace,
-          tweet_text: post.text,
-          bsky_uri: first.uri,
-          bsky_cid: first.cid,
-          bsky_root_uri: first.root?.uri ?? first.uri,
-          bsky_root_cid: first.root?.cid ?? first.cid,
-          bsky_tail_uri: last.uri,
-          bsky_tail_cid: last.cid,
-          status: 'migrated',
-        },
-        item.twitter_id,
+      const firstRef = { uri: first.uri, cid: first.cid };
+      const lastRef = { uri: last.uri, cid: last.cid };
+      commitDeliveryState(() =>
+        this.dependencies.checkpoints.finalize(
+          {
+            twitter_id: item.twitter_id,
+            twitter_username: post.sourceId,
+            bsky_identifier: batch.bsky_identifier,
+            source_type: post.sourceType,
+            external_post_id: post.externalId,
+            destination_id: batch.destination_id,
+            route_id: item.route_id,
+            source_id: post.sourceId,
+            source_created_at: Date.parse(post.createdAt),
+            posted_at: this.dependencies.clock.now(),
+            policy_version: item.policy_version,
+            policy_snapshot: item.policy_snapshot,
+            decision_version: item.decision_version,
+            decision_trace: item.decision_trace,
+            tweet_text: post.text,
+            bsky_uri: firstRef.uri,
+            bsky_cid: firstRef.cid,
+            bsky_root_uri: first.root?.uri ?? firstRef.uri,
+            bsky_root_cid: first.root?.cid ?? firstRef.cid,
+            bsky_tail_uri: lastRef.uri,
+            bsky_tail_cid: lastRef.cid,
+            status: 'migrated',
+          },
+          item.twitter_id,
+        ),
       );
     }
   }

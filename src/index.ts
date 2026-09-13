@@ -1,3 +1,22 @@
+import {
+  prepareExternalThumbnail,
+  downloadVideoVariant,
+  waitForVideoProcessing,
+  VIDEO_MAX_BYTES,
+  VIDEO_MAX_DURATION_MS,
+  VIDEO_PROCESSING_TIMEOUT_MS,
+} from './media-delivery-policy.js';
+import {
+  assertDeliveryActive,
+  commitDeliveryState,
+  withDeliveryDeadline,
+  deliveryFetch,
+  deliverySignal,
+  deliverySleep,
+  stopDelivery,
+} from './services/delivery-context.js';
+import { fetchBlueskyVideoUpload, VIDEO_UPLOAD_TIMEOUT_MS } from './adapters/bluesky-video-request.js';
+import { blockedBlueskyDestinationIds } from './services/bluesky-mutation-guard.js';
 import 'dotenv/config';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -364,9 +383,9 @@ function saveProcessedTweet(
     status: entry.migrated || (entry.uri && entry.cid) ? 'migrated' : entry.skipped ? 'skipped' : 'failed',
   } as const;
   if (checkpointed && record.status === 'migrated') {
-    deliveryCheckpointService.finalize(record);
+    commitDeliveryState(() => deliveryCheckpointService.finalize(record));
   } else {
-    dbService.saveTweet(record);
+    commitDeliveryState(() => dbService.saveTweet(record));
   }
 }
 
@@ -459,6 +478,7 @@ const formatDurationMs = (ms: number): string => {
 };
 
 const xRateGovernor = new XRateGovernor({
+  clock: { now: () => Date.now(), sleep: deliverySleep },
   minGapMs: SCRAPER_MIN_GAP_MS,
   jitterMs: SCRAPER_JITTER_MS,
   maxRequestsPerWindow: SCRAPER_MAX_REQUESTS_PER_WINDOW,
@@ -510,7 +530,15 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   const existingCookies = sessionCookies.get(sessionKey);
   if (!existingScraper || forceReset || existingCookies?.authToken !== authToken || existingCookies?.ct0 !== ct0) {
     console.log(`🔄 Initializing Twitter scraper with ${useBackupCredentials ? 'BACKUP' : 'PRIMARY'} credentials...`);
-    const scraper = new Scraper();
+    const scraper = new Scraper({
+      fetch: (input, init) =>
+        deliveryFetch(input, {
+          ...init,
+          signal: deliverySignal(
+            AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(30_000)]),
+          ),
+        }),
+    });
     await scraper.setCookies([`auth_token=${authToken}`, `ct0=${ct0}`]);
     scraperSessions.set(sessionKey, scraper);
     sessionCookies.set(sessionKey, {
@@ -614,6 +642,7 @@ async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<P
     await acquireScraperSlot();
     const res = await axios.get(url, {
       timeout: 15000,
+      signal: deliverySignal(),
       headers: {
         authorization: `Bearer ${TWITTER_WEB_BEARER}`,
         cookie: `auth_token=${credentials.authToken}; ct0=${credentials.ct0}`,
@@ -792,7 +821,11 @@ interface DownloadedMedia {
 // of RAM — with 5 subbranches downloading in parallel that risks OOM.
 const MAX_MEDIA_DOWNLOAD_BYTES = 320 * 1024 * 1024;
 
-async function downloadMedia(url: string, maxDurationMs = 120000): Promise<DownloadedMedia> {
+async function downloadMedia(
+  url: string,
+  maxDurationMs = 120000,
+  maxResponseBytes = MAX_MEDIA_DOWNLOAD_BYTES,
+): Promise<DownloadedMedia> {
   const resolved = await resolveWebhookTarget(url, false);
   const response = await sendPinnedHttpsRequest({
     target: resolved.target,
@@ -801,7 +834,8 @@ async function downloadMedia(url: string, maxDurationMs = 120000): Promise<Downl
     method: 'GET',
     headers: { 'user-agent': 'tweets-2-bsky-media/1' },
     timeoutMs: Math.min(30_000, maxDurationMs),
-    maxResponseBytes: MAX_MEDIA_DOWNLOAD_BYTES,
+    maxResponseBytes,
+    signal: deliverySignal(),
   });
   if (response.status !== 200) {
     throw new Error(`Media request returned HTTP ${response.status}.`);
@@ -814,7 +848,17 @@ async function downloadMedia(url: string, maxDurationMs = 120000): Promise<Downl
 
 const BLOB_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 
-async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: string): Promise<BlobRef> {
+export async function uploadToBluesky(
+  agent: BskyAgent,
+  buffer: Buffer,
+  mimeType: string,
+  purpose: 'image' | 'thumbnail' = 'image',
+): Promise<BlobRef> {
+  if (purpose === 'thumbnail') {
+    const thumbnail = await prepareExternalThumbnail(buffer);
+    buffer = thumbnail.buffer;
+    mimeType = thumbnail.mimeType;
+  }
   let finalBuffer = buffer;
   let finalMimeType = mimeType;
   // Bluesky accepts image blobs up to 2MB; stay slightly under for safety.
@@ -894,7 +938,7 @@ async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: strin
   }
 
   const { data } = await withTimeout(
-    agent.uploadBlob(finalBuffer, { encoding: finalMimeType }),
+    () => agent.uploadBlob(finalBuffer, { encoding: finalMimeType }),
     BLOB_UPLOAD_TIMEOUT_MS,
     `Blob upload timed out after ${Math.round(BLOB_UPLOAD_TIMEOUT_MS / 1000)}s`,
   );
@@ -968,7 +1012,7 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
     try {
       await page.waitForSelector('iframe', { timeout: 10000 });
       // Small extra wait for images inside iframe
-      await new Promise((r) => setTimeout(r, 2000));
+      await deliverySleep(2000);
     } catch {
       console.warn('[SCREENSHOT] ⚠️ Timeout waiting for tweet iframe, taking screenshot anyway.');
     }
@@ -993,56 +1037,17 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
 }
 
 async function pollForVideoProcessing(jobId: string): Promise<BlobRef> {
-  console.log('[VIDEO] ⏳ Polling for processing completion (this can take a minute)...');
-  let attempts = 0;
-  let blob: BlobRef | undefined;
-
-  while (!blob) {
-    attempts++;
+  return waitForVideoProcessing(async (remainingMs) => {
     const statusUrl = new URL('https://video.bsky.app/xrpc/app.bsky.video.getJobStatus');
     statusUrl.searchParams.append('jobId', jobId);
-
-    let statusResponse: Response;
-    try {
-      statusResponse = await fetch(statusUrl, { signal: AbortSignal.timeout(30000) });
-    } catch (err) {
-      console.warn(`[VIDEO] ⚠️ Job status fetch errored (${(err as Error).message}), retrying...`);
-      if (attempts > 60) throw new Error('Video processing timed out after 5 minutes.');
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      continue;
-    }
-    if (!statusResponse.ok) {
-      console.warn(`[VIDEO] ⚠️ Job status fetch failed (${statusResponse.status}), retrying...`);
-      if (attempts > 60) throw new Error('Video processing timed out after 5 minutes.');
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      continue;
-    }
-
-    const statusData = (await statusResponse.json()) as VideoJobStatusResponse;
-    const state = statusData.jobStatus.state;
-    const progress = statusData.jobStatus.progress || 0;
-
-    console.log(`[VIDEO] 🔄 Job ${jobId}: ${state} (${progress}%)`);
-
-    if (statusData.jobStatus.blob) {
-      blob = statusData.jobStatus.blob;
-      console.log('[VIDEO] 🎉 Video processing complete! Blob ref obtained.');
-    } else if (state === 'JOB_STATE_FAILED') {
-      throw new Error(`Video processing failed: ${statusData.jobStatus.error || 'Unknown error'}`);
-    } else {
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-
-    if (attempts > 60) {
-      // ~5 minute timeout
-      throw new Error('Video processing timed out after 5 minutes.');
-    }
-  }
-  if (!blob) throw new Error('Video processing completed without a blob reference.');
-  return blob;
+    const response = await deliveryFetch(statusUrl, { signal: AbortSignal.timeout(Math.min(30_000, remainingMs)) });
+    if (!response.ok) return null;
+    const data = (await response.json()) as VideoJobStatusResponse;
+    return data.jobStatus;
+  });
 }
 
-async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<ExternalEmbedCard | null> {
+export async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<ExternalEmbedCard | null> {
   try {
     const response = await fetchPublicHttps(url, {
       method: 'GET',
@@ -1074,7 +1079,7 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<Externa
       }
       try {
         const { buffer, mimeType } = await downloadMedia(imageUrl);
-        thumbBlob = await uploadToBluesky(agent, buffer, mimeType);
+        thumbBlob = await uploadToBluesky(agent, buffer, mimeType, 'thumbnail');
       } catch {
         // Silently fail thumbnail upload
       }
@@ -1106,7 +1111,7 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<Externa
   }
 }
 
-async function buildSynthesizedQuoteCard(
+export async function buildSynthesizedQuoteCard(
   agent: BskyAgent,
   metadata: QuoteCardMetadata,
   dryRun: boolean,
@@ -1119,7 +1124,7 @@ async function buildSynthesizedQuoteCard(
   if (metadata.thumbnailUrl && !dryRun) {
     try {
       const { buffer, mimeType } = await downloadMedia(metadata.thumbnailUrl, 30_000);
-      external.thumb = await uploadToBluesky(agent, buffer, mimeType);
+      external.thumb = await uploadToBluesky(agent, buffer, mimeType, 'thumbnail');
     } catch (error) {
       console.warn(`Could not attach quoted-post card thumbnail: ${describeError(error)}`);
     }
@@ -1169,7 +1174,8 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
     uploadUrl.searchParams.append('name', sanitizedFilename);
 
     console.log(`[VIDEO] 📤 Uploading to ${uploadUrl.href}...`);
-    const uploadResponse = await fetch(uploadUrl, {
+    assertDeliveryActive();
+    const uploadResponse = await fetchBlueskyVideoUpload({ did, serviceUrl: agent.serviceUrl.href }, uploadUrl, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1177,7 +1183,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
       },
       body: new Blob([new Uint8Array(buffer)]),
       // Videos can be up to ~300MB; allow a generous window but never hang forever.
-      signal: AbortSignal.timeout(45 * 60 * 1000),
+      signal: deliverySignal(AbortSignal.timeout(VIDEO_UPLOAD_TIMEOUT_MS)),
     });
 
     if (!uploadResponse.ok) {
@@ -1311,6 +1317,7 @@ async function fetchUserTweets(
       let consecutiveProcessedCount = 0;
 
       for await (const t of generator) {
+        assertDeliveryActive();
         const tweet = mapScraperTweetToLocalTweet(t);
         const tweetId = tweet.id_str || tweet.id;
 
@@ -1379,7 +1386,7 @@ async function fetchUserTweets(
         if (transient && retries > 0) {
           const waitMs = 5000 * 2 ** (2 - retries);
           console.warn(`⚠️ [${username}] Transient X error (${errorMessage}). Retrying in ${formatDurationMs(waitMs)}.`);
-          await new Promise((r) => setTimeout(r, waitMs));
+          await deliverySleep(waitMs);
           continue;
         }
       }
@@ -1470,11 +1477,13 @@ async function processTweets(
   sessionKey = 'default',
   aiConfigOverride?: AIConfig,
   deliveryPolicy: DeliveryPolicy = LEGACY_DELIVERY_POLICY,
+  markAttempted?: (tweetId: string) => void,
 ): Promise<void> {
   // Filter tweets to ensure they're actually from this user
   const filteredTweets = tweets.filter((t) => {
     const authorScreenName = t.user?.screen_name?.toLowerCase();
     if (authorScreenName && authorScreenName !== twitterUsername.toLowerCase()) {
+      markAttempted?.(t.id_str || t.id || '');
       console.log(
         `[${twitterUsername}] ⏩ Skipping tweet ${t.id_str || t.id} - author is @${t.user?.screen_name}, not @${twitterUsername}`,
       );
@@ -1504,6 +1513,8 @@ async function processTweets(
   filteredTweets.reverse();
   let count = 0;
   for (const tweet of filteredTweets) {
+    assertDeliveryActive();
+    markAttempted?.(tweet.id_str || tweet.id || '');
     count++;
     const tweetId = tweet.id_str || tweet.id;
     if (!tweetId) continue;
@@ -1814,8 +1825,8 @@ async function processTweets(
         const variants = media.video_info?.variants || [];
         const duration = media.video_info?.duration_millis || 0;
 
-        if (duration > 180000) {
-          // 3 minutes
+        if (duration > VIDEO_MAX_DURATION_MS) {
+          // 10 minutes
           console.warn(`[${twitterUsername}] ⚠️ Video too long (${(duration / 1000).toFixed(1)}s). Fallback to link.`);
           const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
           if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
@@ -1826,66 +1837,34 @@ async function processTweets(
           continue;
         }
 
-        const mp4s = variants
-          .filter((v) => v.content_type === 'video/mp4')
-          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-
-        if (mp4s.length > 0) {
-          const firstVariant = mp4s[0];
-          if (firstVariant) {
-            const videoUrl = firstVariant.url;
-            try {
-              console.log(`[${twitterUsername}] 📥 Downloading video: ${videoUrl}`);
-              updateAppStatus({ message: `Downloading video: ${path.basename(videoUrl)}` });
-              const { buffer } = await downloadMedia(videoUrl, 30 * 60 * 1000);
-
-              // Bluesky accepts videos up to 300MB; stay slightly under for safety
-              // (280MiB = ~293.6M bytes, under the limit on either MB interpretation).
-              if (buffer.length <= 280 * 1024 * 1024) {
-                const filename = videoUrl.split('/').pop() || 'video.mp4';
-                if (dryRun) {
-                  console.log(
-                    `[${twitterUsername}] 🧪 [DRY RUN] Would upload video: ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`,
-                  );
-                  videoBlob = {
-                    ref: { toString: () => 'mock-video-blob' },
-                    mimeType: 'video/mp4',
-                    size: buffer.length,
-                  };
-                } else {
-                  updateAppStatus({ message: 'Uploading video to Bluesky...' });
-                  videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
-                }
-                videoAspectRatio = aspectRatio;
-                console.log(`[${twitterUsername}] ✅ Video upload process complete.`);
-                break; // Prioritize first video
-              }
-
-              console.warn(
-                `[${twitterUsername}] ⚠️ Video too large (${(buffer.length / 1024 / 1024).toFixed(2)}MB). Fallback to link.`,
-              );
-              const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
-              deliveryFallbacks.push({
-                kind: 'video-link',
-                reason: `Video too large (${(buffer.length / 1024 / 1024).toFixed(2)}MB)`,
-              });
-            } catch (err) {
-              const errMsg = (err as Error).message;
-              if (errMsg !== 'VIDEO_FALLBACK_503') {
-                console.error(`[${twitterUsername}] ❌ Failed video upload flow:`, errMsg);
-              }
-              const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
-              deliveryFallbacks.push({
-                kind: 'video-link',
-                reason:
-                  errMsg === 'VIDEO_FALLBACK_503'
-                    ? 'Video processing unavailable (503)'
-                    : `Video upload failed: ${errMsg}`,
-              });
-            }
+        try {
+          const { buffer, url: videoUrl } = await downloadVideoVariant(variants, duration, async (url) => {
+            updateAppStatus({ message: `Downloading video: ${path.basename(url)}` });
+            return (await downloadMedia(url, 30_000, VIDEO_MAX_BYTES)).buffer;
+          });
+          const filename = videoUrl.split('/').pop() || 'video.mp4';
+          if (dryRun) {
+            console.log(`[${twitterUsername}] 🧪 [DRY RUN] Would upload video: ${filename}`);
+            videoBlob = { ref: { toString: () => 'mock-video-blob' }, mimeType: 'video/mp4', size: buffer.length };
+          } else {
+            updateAppStatus({ message: 'Uploading video to Bluesky...' });
+            videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
           }
+          videoAspectRatio = aspectRatio;
+          console.log(`[${twitterUsername}] ✅ Video upload process complete.`);
+          break; // Prioritize first video.
+        } catch (error) {
+          assertDeliveryActive();
+          const message = describeError(error);
+          const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
+          if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+          deliveryFallbacks.push({
+            kind: 'video-link',
+            reason:
+              message === 'VIDEO_FALLBACK_503'
+                ? 'Video processing unavailable (503)'
+                : `Video upload failed: ${message}`,
+          });
         }
       }
     }
@@ -2148,7 +2127,7 @@ async function processTweets(
 
       const rt = new RichText({ text: chunk });
       try {
-        await withTimeout(rt.detectFacets(agent), 60000, 'Facet detection timed out');
+        await withTimeout(() => rt.detectFacets(agent), 60000, 'Facet detection timed out');
       } catch (facetErr) {
         console.warn(
           `[${twitterUsername}] ⚠️ Facet detection failed, posting with basic text:`,
@@ -2266,7 +2245,7 @@ async function processTweets(
           while (retries > 0) {
             try {
               response = await withTimeout(
-                postWithDeterministicRkey(agent, mapping, mapping.id, tweetId, i, postRecord),
+                () => postWithDeterministicRkey(agent, mapping, mapping.id, tweetId, i, postRecord),
                 120000,
                 'Post request timed out after 120s',
               );
@@ -2277,7 +2256,7 @@ async function processTweets(
               console.warn(
                 `[${twitterUsername}] ⚠️ Post failed (Socket/Network), retrying in 5s... (${retries} retries left)`,
               );
-              await new Promise((r) => setTimeout(r, 5000));
+              await deliverySleep(5000);
             }
           }
         }
@@ -2299,22 +2278,24 @@ async function processTweets(
 
         if (!dryRun) {
           const parent = postRecord.reply?.parent as { uri: string; cid: string } | undefined;
-          deliveryCheckpointService.recordSuccess({
-            destinationId: mapping.id,
-            externalPostId: tweetId,
-            chunkIndex: i,
-            uri: response.uri,
-            cid: response.cid,
-            root: currentPostInfo.root,
-            parent,
-            tail: { uri: response.uri, cid: response.cid },
-          });
+          commitDeliveryState(() =>
+            deliveryCheckpointService.recordSuccess({
+              destinationId: mapping.id,
+              externalPostId: tweetId,
+              chunkIndex: i,
+              uri: response.uri,
+              cid: response.cid,
+              root: currentPostInfo.root,
+              parent,
+              tail: { uri: response.uri, cid: response.cid },
+            }),
+          );
         }
 
         console.log(`[${twitterUsername}] ✅ Chunk ${i + 1} posted successfully.`);
 
         if (chunks.length > 1) {
-          await new Promise((r) => setTimeout(r, 3000));
+          await deliverySleep(3000);
         }
       } catch (err) {
         console.error(`[${twitterUsername}] ❌ Failed to post ${tweetId} (chunk ${i + 1}):`, err);
@@ -2359,7 +2340,7 @@ async function processTweets(
       processedCount: mirroredCount,
     });
     updateAppStatus({ state: 'pacing', message: `Pacing: Waiting ${wait / 1000}s...` });
-    await new Promise((r) => setTimeout(r, wait));
+    await deliverySleep(wait);
   }
 
   updateJob(mirrorJobId, null);
@@ -2562,7 +2543,7 @@ async function executeCanonicalXSourceSweep(
       try {
         // Discovery must not use any destination's history for early stopping.
         const tweets = await withTimeout(
-          fetchUserTweets(source.username, 50, undefined, `sweep-${source.id}`, true),
+          () => fetchUserTweets(source.username, 50, undefined, `sweep-${source.id}`, true),
           fetchTimeoutMs,
           `[${source.username}] Sweep fetch timed out after ${Math.round(fetchTimeoutMs / 1000)}s`,
         );
@@ -2896,6 +2877,7 @@ async function fetchBackfillTimeline(
   await acquireScraperSlot();
   const generator = client.getTweets(twitterUsername, fetchLimit);
   for await (const scraperTweet of generator) {
+    assertDeliveryActive();
     if (!ignoreCancellation) {
       if (!backfillStillRequested(mapping.id, requestId)) {
         console.log(`[${twitterUsername}] 🛑 Backfill cancelled.`);
@@ -3060,7 +3042,10 @@ const activePostDestinations = new Set<string>();
 function queueBatchTimeoutMs(itemCount: number): number {
   // Pacing plus media work make big batches legitimately slow; scale the
   // watchdog with batch size so it only catches genuine hangs.
-  return Math.max(resolveScheduledAccountTimeoutMs(), itemCount * 120_000);
+  return Math.max(
+    resolveScheduledAccountTimeoutMs(),
+    itemCount * (VIDEO_UPLOAD_TIMEOUT_MS + VIDEO_PROCESSING_TIMEOUT_MS + 5 * 60_000),
+  );
 }
 
 const normalizedDeliveryService = new NormalizedDeliveryService({
@@ -3088,6 +3073,7 @@ async function deliverNormalizedQueueItems(
   agent: BskyAgent,
   mapping: AccountMapping,
   batch: QueueBatch,
+  markAttempted: (queueId: string) => void,
 ): Promise<void> {
   await normalizedDeliveryService.deliver(
     createBlueskyNormalizedDeliveryAdapter({
@@ -3098,10 +3084,16 @@ async function deliverNormalizedQueueItems(
         postWithDeterministicRkey(agent, mapping, destinationId, externalPostId, chunkIndex, record),
     }),
     batch,
+    markAttempted,
   );
 }
 
-async function deliverPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionKey: string): Promise<void> {
+async function deliverPostBatch(
+  mapping: AccountMapping,
+  batch: QueueBatch,
+  sessionKey: string,
+  markAttempted: (queueId: string) => void,
+): Promise<void> {
   const snapshot = parsePolicySnapshot(batch.items[0]?.policy_snapshot);
   const effectiveMapping: AccountMapping = snapshot
     ? {
@@ -3137,7 +3129,7 @@ async function deliverPostBatch(mapping: AccountMapping, batch: QueueBatch, sess
 
   if (batch.items.every((item) => item.source_type !== 'x')) {
     await withTimeout(
-      deliverNormalizedQueueItems(agent, effectiveMapping, batch),
+      () => deliverNormalizedQueueItems(agent, effectiveMapping, batch, markAttempted),
       queueBatchTimeoutMs(batch.items.length),
       `[${batch.twitter_username}] Generic posting batch timed out`,
     );
@@ -3145,8 +3137,11 @@ async function deliverPostBatch(mapping: AccountMapping, batch: QueueBatch, sess
     const tweets: Tweet[] = [];
     for (const item of batch.items) {
       try {
-        tweets.push(JSON.parse(item.tweet_json) as Tweet);
+        const tweet = JSON.parse(item.tweet_json) as Tweet;
+        if (!tweet || !(tweet.id_str || tweet.id)) throw new Error('Queued tweet has no identity');
+        tweets.push(tweet);
       } catch {
+        markAttempted(item.queue_id);
         console.error(`${logPrefix} ⚠️ Corrupt queued payload for tweet ${item.twitter_id}; it will be retried out.`);
       }
     }
@@ -3156,19 +3151,24 @@ async function deliverPostBatch(mapping: AccountMapping, batch: QueueBatch, sess
     tweets.reverse();
 
     await withTimeout(
-      processTweets(
-        agent,
-        batch.twitter_username,
-        batch.bsky_identifier,
-        effectiveMapping,
-        tweets,
-        false,
-        undefined,
-        undefined,
-        sessionKey,
-        effectiveAiConfig,
-        deliveryPolicy,
-      ),
+      () =>
+        processTweets(
+          agent,
+          batch.twitter_username,
+          batch.bsky_identifier,
+          effectiveMapping,
+          tweets,
+          false,
+          undefined,
+          undefined,
+          sessionKey,
+          effectiveAiConfig,
+          deliveryPolicy,
+          (tweetId) => {
+            const item = batch.items.find((row) => row.twitter_id === tweetId);
+            if (item) markAttempted(item.queue_id);
+          },
+        ),
       queueBatchTimeoutMs(batch.items.length),
       `[${batch.twitter_username}] Posting batch timed out`,
     );
@@ -3177,6 +3177,8 @@ async function deliverPostBatch(mapping: AccountMapping, batch: QueueBatch, sess
 
 const digestWorkerService = new DigestWorkerService(
   {
+    settleWithOwnership: (destinationKey, settle) =>
+      destinationLeaseService.settleWithOwnership(destinationKey, RUNTIME_OWNER_ID, DESTINATION_LEASE_TTL_MS, settle),
     sleep: (durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)),
     getConfig,
     jobs: {
@@ -3185,7 +3187,10 @@ const digestWorkerService = new DigestWorkerService(
       arm: (destinationId, routeId, nextRunAt) => digestJobService.arm(destinationId, routeId, nextRunAt),
       claimNext: (excludedDestinationIds, resolveMaxEntries, acquireLease) => {
         if (isRestoreRestartRequired()) return null;
-        return digestJobService.claimNext(excludedDestinationIds, Date.now(), 200, resolveMaxEntries, acquireLease);
+        const blockedDestinationIds = new Set(excludedDestinationIds);
+        for (const id of blockedBlueskyDestinationIds(getConfig().destinations)) blockedDestinationIds.add(id);
+        digestJobService.resetProcessing();
+        return digestJobService.claimNext(blockedDestinationIds, Date.now(), 200, resolveMaxEntries, acquireLease);
       },
       checkpoint: (id, claimToken, checkpoint, contentHash) =>
         digestJobService.checkpoint(id, claimToken, checkpoint, contentHash),
@@ -3253,6 +3258,8 @@ const queueWorkerService = new DestinationQueueWorkerService(
       acquireLease?: (destinationKey: string) => boolean,
     ) => {
       if (isRestoreRestartRequired()) return null;
+      for (const id of blockedBlueskyDestinationIds(getConfig().destinations)) active.add(id);
+      postQueueService.resetProcessing();
       return postQueueService.claimNextBatch(
         active,
         allowed,
@@ -3279,7 +3286,12 @@ const queueWorkerService = new DestinationQueueWorkerService(
     },
     deleteByMappingId: (mappingId) => postQueueService.deleteByMappingId(mappingId),
     deliver: (mapping, batch, context) =>
-      deliverPostBatch(mapping, batch, context.mode === 'drain' ? 'one-shot-queue' : 'post-worker'),
+      deliverPostBatch(
+        mapping,
+        batch,
+        context.mode === 'drain' ? 'one-shot-queue' : 'post-worker',
+        context.markAttempted,
+      ),
     findSettlement: (item) => {
       const mapping =
         getConfig().mappings.find((candidate) => candidate.id === item.destination_id) ??
@@ -3296,6 +3308,9 @@ const queueWorkerService = new DestinationQueueWorkerService(
         ? void postQueueService.markDoneById(item.queue_id)
         : postQueueService.markDone(item.twitter_id, item.bsky_identifier),
     releaseForRetry: (item, error, maxAttempts) => postQueueService.releaseForRetry(item, error, maxAttempts),
+    deferUnattempted: (item, error, notBefore) => postQueueService.deferUnattempted(item, error, notBefore),
+    settleWithOwnership: (destinationKey, settle) =>
+      destinationLeaseService.settleWithOwnership(destinationKey, RUNTIME_OWNER_ID, DESTINATION_LEASE_TTL_MS, settle),
     describeError,
     classifyError: classifyQueueError,
     metrics: {
@@ -3365,6 +3380,7 @@ const queueWorkerService = new DestinationQueueWorkerService(
       if (settlement.skipped > 0) parts.push(`${settlement.skipped} skipped`);
       if (settlement.retrying > 0) parts.push(`${settlement.retrying} will retry`);
       if (settlement.parked > 0) parts.push(`${settlement.parked} parked as failed`);
+      if (settlement.deferred > 0) parts.push(`${settlement.deferred} deferred without an attempt`);
       logPipeline(
         'Queue',
         `${settlement.retrying + settlement.parked > 0 ? '⚠️' : '✅'} @${batch.twitter_username} → ${mapping.bskyIdentifier}: ` +
@@ -3475,6 +3491,7 @@ async function importHistory(
         const generator = client.getTweets(twitterUsername, fetchLimit);
 
         for await (const scraperTweet of generator) {
+          assertDeliveryActive();
           if (!ignoreCancellation) {
             if (!backfillStillRequested(mapping.id, requestId)) {
               console.log(`[${twitterUsername}] 🛑 Backfill cancelled.`);
@@ -4036,21 +4053,8 @@ async function maybeSyncMappingProfileInBackground(
   }
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
-  let timeoutHandle: NodeJS.Timeout | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => {
-      reject(new Error(timeoutMessage));
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timeoutHandle) {
-      clearTimeout(timeoutHandle);
-    }
-  }
+async function withTimeout<T>(operation: () => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  return withDeliveryDeadline(operation, timeoutMs, timeoutMessage);
 }
 
 async function runAccountTask(
@@ -4210,17 +4214,18 @@ async function runAccountTask(
               backfillRequestId: backfillReq.requestId,
             });
             await withTimeout(
-              importHistory(
-                twitterUsername,
-                mapping.bskyIdentifier,
-                limit,
-                dryRun,
-                false,
-                backfillReq.requestId,
-                sessionKey,
-                backfillDelivery,
-                bypassFilters,
-              ),
+              () =>
+                importHistory(
+                  twitterUsername,
+                  mapping.bskyIdentifier,
+                  limit,
+                  dryRun,
+                  false,
+                  backfillReq.requestId,
+                  sessionKey,
+                  backfillDelivery,
+                  bypassFilters,
+                ),
               backfillAccountTimeoutMs,
               `[${twitterUsername}] Backfill timed out after ${Math.round(backfillAccountTimeoutMs / 1000)}s`,
             );
@@ -4296,7 +4301,7 @@ async function runAccountTask(
             // Use fetchUserTweets with early stopping optimization
             // Increase limit slightly since we have early stopping now
             const tweets = await withTimeout(
-              fetchUserTweets(twitterUsername, 50, processedIds, sessionKey),
+              () => fetchUserTweets(twitterUsername, 50, processedIds, sessionKey),
               scheduledAccountTimeoutMs,
               `[${twitterUsername}] Scheduled fetch timed out after ${Math.round(scheduledAccountTimeoutMs / 1000)}s`,
             );
@@ -4335,17 +4340,18 @@ async function runAccountTask(
             );
             if (policyAccepted.length === 0) continue;
             await withTimeout(
-              processTweets(
-                agent,
-                twitterUsername,
-                destinationStorageKey,
-                mapping,
-                policyAccepted,
-                dryRun,
-                undefined,
-                undefined,
-                sessionKey,
-              ),
+              () =>
+                processTweets(
+                  agent,
+                  twitterUsername,
+                  destinationStorageKey,
+                  mapping,
+                  policyAccepted,
+                  dryRun,
+                  undefined,
+                  undefined,
+                  sessionKey,
+                ),
               scheduledAccountTimeoutMs,
               `[${twitterUsername}] Scheduled processing timed out after ${Math.round(scheduledAccountTimeoutMs / 1000)}s`,
             );
@@ -4395,6 +4401,7 @@ import {
   getSchedulerWakeSignal,
   recalculateNextCheckTime,
   startServer,
+  stopServer,
   updateAppStatus,
   updateJob,
   updateLastCheckTime,
@@ -4432,6 +4439,33 @@ function backfillStillRequested(destinationId: string, requestId?: string): bool
 }
 
 async function main(): Promise<void> {
+  let stopScheduler = () => {};
+  let schedulerRun: Promise<void> = Promise.resolve();
+  let shutdownStarted = false;
+  const handleShutdown = () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    stopScheduler();
+    stopDelivery();
+    const deadline = setTimeout(() => {
+      console.error('[Shutdown] Timed out draining; preserving durable work for recovery.');
+      process.exit(1);
+    }, 60_000);
+    void Promise.all([queueWorkerService.stop(), digestWorkerService.stop(), stopServer(), schedulerRun]).then(
+      () => {
+        clearTimeout(deadline);
+        destinationLeaseService.releaseOwner(RUNTIME_OWNER_ID);
+        process.exit(0);
+      },
+      (error) => {
+        console.error('[Shutdown] Failed to drain:', describeError(error));
+        process.exit(1);
+      },
+    );
+  };
+  process.once('SIGTERM', handleShutdown);
+  process.once('SIGINT', handleShutdown);
+
   const options = parseRuntimeOptions();
   if (options.bypassFilters && !options.dryRun) {
     throw new Error('--bypass-filters is only allowed with --dry-run.');
@@ -4583,7 +4617,8 @@ async function main(): Promise<void> {
   };
 
   if (options.runOnce || options.backfillMapping || options.dryRun) {
-    await runSingleCycle(getConfig());
+    schedulerRun = runSingleCycle(getConfig());
+    await schedulerRun;
     console.log(options.dryRun ? 'Dry run cycle complete. Exiting.' : 'Run-once cycle complete. Exiting.');
     process.exit(0);
   }
@@ -4719,7 +4754,9 @@ async function main(): Promise<void> {
       ),
     onSweepCompleted: () => updateAppStatus({ state: 'idle', message: 'Scheduled checks complete' }),
   });
-  await schedulerService.runForever();
+  stopScheduler = () => schedulerService.stop();
+  schedulerRun = schedulerService.runForever();
+  await schedulerRun;
 }
 
-main();
+if (import.meta.main) main();

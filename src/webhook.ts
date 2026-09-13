@@ -41,6 +41,7 @@ export interface PinnedRequest {
   body?: string;
   timeoutMs: number;
   maxResponseBytes?: number;
+  signal?: AbortSignal;
 }
 
 export interface PinnedResponse {
@@ -81,6 +82,10 @@ export function sendPinnedHttpsRequest(request: PinnedRequest): Promise<PinnedRe
         port: Number(request.target.port) || 443,
         path: `${request.target.pathname}${request.target.search}`,
         method: request.method,
+        signal: AbortSignal.any([
+          ...(request.signal ? [request.signal] : []),
+          AbortSignal.timeout(Math.max(1, request.timeoutMs)),
+        ]),
         servername: request.target.hostname,
         headers: { host: request.target.host, ...request.headers },
       },
@@ -131,12 +136,7 @@ const BLOCKED_HOSTNAMES = new Set(['localhost', 'localhost.localdomain']);
 
 function isBlockedWebhookHostname(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  return (
-    BLOCKED_HOSTNAMES.has(host) ||
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.endsWith('.local')
-  );
+  return BLOCKED_HOSTNAMES.has(host) || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local');
 }
 
 /** Bun may keep IPv6 brackets in `URL.hostname`; Node/WHATWG strip them. */
@@ -194,9 +194,7 @@ export async function resolveWebhookTarget(
   if (allowPrivate) return { target };
   const hostLiteral = unwrapIpLiteralHostname(target.hostname);
   const literalFamily = isIP(hostLiteral);
-  const addresses = literalFamily
-    ? [{ address: hostLiteral, family: literalFamily }]
-    : await resolver(target.hostname);
+  const addresses = literalFamily ? [{ address: hostLiteral, family: literalFamily }] : await resolver(target.hostname);
   if (addresses.length === 0 || addresses.some((entry) => isPrivateNetworkAddress(entry.address))) {
     throw new Error('Webhook URL resolves to a private network.');
   }
@@ -245,11 +243,7 @@ export class WebhookNotifier {
       try {
         // Re-resolve per attempt so a rotated record is honoured, then pin the
         // address that passed validation for this attempt's connection.
-        const resolved = await resolveWebhookTarget(
-          config.webhookUrl,
-          config.allowPrivate,
-          this.dependencies.lookup,
-        );
+        const resolved = await resolveWebhookTarget(config.webhookUrl, config.allowPrivate, this.dependencies.lookup);
         const response = await this.dependencies.send({
           target: resolved.target,
           ...(resolved.pinnedAddress ? { pinnedAddress: resolved.pinnedAddress } : {}),

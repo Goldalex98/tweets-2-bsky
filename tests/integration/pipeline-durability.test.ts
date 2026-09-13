@@ -5,6 +5,88 @@ import { createTemporaryDataDir } from '../helpers/temporary-data-dir.js';
 
 const dbModuleUrl = new URL('../../src/db.ts', import.meta.url).href;
 
+test('queue recovery respects a live destination lease and recovers after release', async () => {
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
+    const { postQueueService, destinationLeaseService } = await import(${dbModule});
+    postQueueService.enqueue([{ source_type: 'x', twitter_username: 'source', kind: 'scheduled',
+      tweet_json: '{}', policy_version: 1, twitter_id: '1', external_post_id: '1',
+      bsky_identifier: 'dest.example', mapping_id: 'mapping', destination_id: 'destination' }]);
+    const claimed = postQueueService.claimNextBatch(new Set(), new Set(['mapping']), () => 'destination', 1,
+      (key) => !!destinationLeaseService.acquire({ destinationKey: key, ownerId: 'owner', ttlMs: 30000 }));
+    const protectedCount = postQueueService.resetProcessing();
+    const protectedStatus = postQueueService.inspect({ destinationId: 'destination' })[0].status;
+    destinationLeaseService.release('destination', 'owner');
+    const recovered = postQueueService.resetProcessing();
+    const status = postQueueService.inspect({ destinationId: 'destination' })[0].status;
+    await Bun.write(${resultPath}, JSON.stringify({ protectedCount, protectedStatus, recovered, status }));
+  `,
+  );
+  expect(result).toEqual({ protectedCount: 0, protectedStatus: 'processing', recovered: 1, status: 'pending' });
+});
+
+test('unattempted queue deferral preserves retry budget, identity and policy', async () => {
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
+    const { postQueueService } = await import(${dbModule});
+    postQueueService.enqueue([{ source_type: 'x', twitter_username: 'source', kind: 'scheduled',
+      tweet_json: '{}', policy_version: 7, policy_snapshot: '{"immutable":true}',
+      twitter_id: '1', external_post_id: '1', bsky_identifier: 'dest.example',
+      mapping_id: 'mapping', destination_id: 'destination', route_id: 'route', source_id: 'source' }]);
+    const batch = postQueueService.claimNextBatch(new Set(), new Set(['mapping']), () => 'destination', 1);
+    const item = batch.items[0];
+    postQueueService.deferUnattempted(item, 'Bluesky login failed', Date.now() + 300000);
+    const after = postQueueService.inspect({ destinationId: 'destination' })[0];
+    await Bun.write(${resultPath}, JSON.stringify({ before: item, after }));
+  `,
+  );
+  expect(result.after.status).toBe('pending');
+  expect(result.after.attempts).toBe(result.before.attempts);
+  expect(result.after.queue_id).toBe(result.before.queue_id);
+  expect(result.after.policy_snapshot).toBe(result.before.policy_snapshot);
+  expect(result.after.policy_version).toBe(7);
+  expect(result.after.not_before).toBeGreaterThan(result.before.not_before);
+});
+
+test('database writes wait for a competing writer and fail after the bounded busy timeout', async () => {
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
+    const { destinationLeaseService } = await import(${dbModule});
+    const { DB_PATH } = await import(new URL('./storage-paths.ts', ${dbModule}).href);
+    const hold = async (duration) => {
+      const child = Bun.spawn([process.execPath, '--eval',
+        'import { Database } from "bun:sqlite"; const db = new Database(' + JSON.stringify(DB_PATH) + ');' +
+        'db.exec("BEGIN IMMEDIATE"); console.log("locked");' +
+        'await Bun.sleep(' + duration + '); db.exec("COMMIT"); db.close();'],
+        { stdout: 'pipe', stderr: 'pipe' });
+      const reader = child.stdout.getReader();
+      await reader.read();
+      reader.releaseLock();
+      return child;
+    };
+    const short = await hold(300);
+    const start = Date.now();
+    const lease = destinationLeaseService.acquire({ destinationKey: 'one', ownerId: 'one', ttlMs: 30000 });
+    const waited = Date.now() - start;
+    await short.exited;
+    const long = await hold(10000);
+    const blockedAt = Date.now();
+    let timedOut = false;
+    try { destinationLeaseService.acquire({ destinationKey: 'two', ownerId: 'two', ttlMs: 30000 }); }
+    catch (error) { timedOut = /locked|busy/i.test(String(error)); }
+    const elapsed = Date.now() - blockedAt;
+    long.kill();
+    await long.exited;
+    await Bun.write(${resultPath}, JSON.stringify({ acquired: !!lease, waited, timedOut, elapsed }));
+  `,
+  );
+  expect(result.acquired).toBe(true);
+  expect(result.waited).toBeGreaterThanOrEqual(150);
+  expect(result.timedOut).toBe(true);
+  expect(result.elapsed).toBeGreaterThanOrEqual(4500);
+  expect(result.elapsed).toBeLessThan(9000);
+}, 20000);
+
 /**
  * Runs `script` in a fresh Bun process against an isolated data directory, so
  * every case exercises real SQLite behaviour (including transactions) without
@@ -24,10 +106,7 @@ async function runInIsolatedDatabase(
       ],
       { env: temporary.env, stdout: 'pipe', stderr: 'pipe' },
     );
-    const [exitCode, stderr] = await Promise.all([
-      subprocess.exited,
-      new Response(subprocess.stderr).text(),
-    ]);
+    const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()]);
     expect(exitCode, stderr).toBe(0);
     return JSON.parse(fs.readFileSync(resultPath, 'utf8'));
   } finally {
@@ -36,7 +115,8 @@ async function runInIsolatedDatabase(
 }
 
 test('a digest run only marks the entries it rendered as delivered', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { digestEntryService, digestJobService } = await import(${dbModule});
     const post = (id) => ({
       sourceType: 'x',
@@ -79,7 +159,8 @@ test('a digest run only marks the entries it rendered as delivered', async () =>
       afterComplete,
       secondClaimEntryIds: second.entryIds,
     }));
-  `);
+  `,
+  );
 
   expect(result.claimedEntryIds).toEqual([1, 2]);
   expect(result.afterClaim).toEqual([
@@ -99,7 +180,8 @@ test('a digest run only marks the entries it rendered as delivered', async () =>
 });
 
 test('digest entries can be listed and released per job', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { digestEntryService, digestJobService } = await import(${dbModule});
     const post = (id) => ({
       sourceType: 'x', sourceId: 'source', externalId: id, text: 'entry ' + id,
@@ -121,7 +203,8 @@ test('digest entries can be listed and released per job', async () => {
     await Bun.write(${resultPath}, JSON.stringify({
       scopedToJob, scopedToOtherJob, released, statuses, retainedEntryIds,
     }));
-  `);
+  `,
+  );
 
   expect(result.scopedToJob).toEqual([1, 2]);
   expect(result.scopedToOtherJob).toEqual([]);
@@ -134,7 +217,8 @@ test('digest entries can be listed and released per job', async () => {
 });
 
 test('digest entries retain wrapper fallback provenance and expose its diagnostic', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { digestEntryService } = await import(${dbModule});
     digestEntryService.enqueue({
       destinationId: 'destination',
@@ -158,17 +242,21 @@ test('digest entries retain wrapper fallback provenance and expose its diagnosti
       provenance: entry.post.repostContentSource,
       diagnostics: entry.deliveryDiagnostics,
     }));
-  `);
+  `,
+  );
 
   expect(result.provenance).toBe('wrapper');
-  expect(result.diagnostics).toEqual([{
-    kind: 'repost-wrapper-fallback',
-    reason: 'The scraper did not provide nested repost content; wrapper text and the X status link were retained.',
-  }]);
+  expect(result.diagnostics).toEqual([
+    {
+      kind: 'repost-wrapper-fallback',
+      reason: 'The scraper did not provide nested repost content; wrapper text and the X status link were retained.',
+    },
+  ]);
 });
 
 test('backfill requests survive a process restart and a transient failure', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { backfillJobService } = await import(${dbModule});
     backfillJobService.upsert({
       id: 'request-1',
@@ -227,7 +315,8 @@ test('backfill requests survive a process restart and a transient failure', asyn
       retried,
       retriedStatus: backfillJobService.get('request-2').status,
     }));
-  `);
+  `,
+  );
 
   expect(result.claimedAttempts).toBe(1);
   expect(result.claimedUsernames).toEqual(['alice']);
@@ -250,7 +339,8 @@ test('backfill requests survive a process restart and a transient failure', asyn
 });
 
 test('destination leases are exclusive across processes, renewable, and expiring', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { destinationLeaseService } = await import(${dbModule});
     const first = destinationLeaseService.acquire({
       destinationKey: 'destination', ownerId: 'replica-a', ttlMs: 30000, now: 1000,
@@ -289,7 +379,8 @@ test('destination leases are exclusive across processes, renewable, and expiring
       afterRelease,
       releasedOwner,
     }));
-  `);
+  `,
+  );
 
   expect(result.firstOwner).toBe('replica-a');
   expect(result.contended).toBeNull();
@@ -305,7 +396,8 @@ test('destination leases are exclusive across processes, renewable, and expiring
 });
 
 test('a content fingerprint reservation records the candidate it allowed', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { duplicateFingerprintService } = await import(${dbModule});
     const base = {
       destinationId: 'destination',
@@ -344,7 +436,8 @@ test('a content fingerprint reservation records the candidate it allowed', async
       released,
       reusableAfterRelease: reusableAfterRelease.duplicate === null,
     }));
-  `);
+  `,
+  );
 
   expect(result.firstAllowed).toBe(true);
   expect(result.firstRecorded).toBe(true);
@@ -357,7 +450,8 @@ test('a content fingerprint reservation records the candidate it allowed', async
 });
 
 test('a queue claim takes a destination lease and every row keeps a stable queue id', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { postQueueService, destinationLeaseService } = await import(${dbModule});
     const base = {
       source_type: 'x',
@@ -421,7 +515,8 @@ test('a queue claim takes a destination lease and every row keeps a stable queue
       itemFoundByQueueId: item ? item.twitter_id : null,
       remainingCount: remaining.length,
     }));
-  `);
+  `,
+  );
 
   expect(result.generic).toBe(1);
   expect(result.rekeyedDuplicate).toBe(0);
@@ -437,7 +532,8 @@ test('a queue claim takes a destination lease and every row keeps a stable queue
 });
 
 test('native quote lookup can reuse a migrated X record from another destination', async () => {
-  const result = await runInIsolatedDatabase(({ dbModule, resultPath }) => `
+  const result = await runInIsolatedDatabase(
+    ({ dbModule, resultPath }) => `
     const { dbService } = await import(${dbModule});
     dbService.saveTweet({
       twitter_id: 'quoted-1', twitter_username: 'source', bsky_identifier: 'failed.example',
@@ -456,7 +552,8 @@ test('native quote lookup can reuse a migrated X record from another destination
     });
     const found = dbService.findMigratedXPost('quoted-1');
     await Bun.write(${resultPath}, JSON.stringify(found));
-  `);
+  `,
+  );
 
   expect(result).toMatchObject({
     destination_id: 'mirror-destination',

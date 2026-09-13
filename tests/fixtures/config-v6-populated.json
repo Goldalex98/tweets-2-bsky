@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 6,
+  "revision": 4,
+  "updatedAt": "2026-07-24T20:00:00.000Z",
+  "twitter": { "authToken": "<redacted>", "ct0": "<redacted>" },
+  "sources": [
+    { "id": "fixture-source", "type": "x", "username": "fixture", "enabled": true }
+  ],
+  "destinations": [
+    {
+      "id": "fixture-destination",
+      "storageKey": "original-fixture-storage",
+      "bskyIdentifier": "fixture.example",
+      "bskyPassword": "<redacted-app-password>",
+      "bskyServiceUrl": "https://bsky.social",
+      "bskyDid": "did:plc:fixture",
+      "enabled": false
+    }
+  ],
+  "routes": [
+    { "id": "fixture-route", "sourceId": "fixture-source", "destinationId": "fixture-destination", "enabled": false }
+  ],
+  "groups": [],
+  "users": [],
+  "scheduler": { "enabled": false, "intervalMinutes": 5, "runOnStartup": false },
+  "ai": { "enabled": false }
+}

@@ -1,11 +1,11 @@
 services:
   tweets-2-bsky:
-    image: ghcr.io/goldalex98/tweets-2-bsky:latest
+    image: ${TWEETS2BSKY_IMAGE:-ghcr.io/goldalex98/tweets-2-bsky:latest}
     pull_policy: always
 
     container_name: tweets-2-bsky
     restart: unless-stopped
-    stop_grace_period: 30s
+    stop_grace_period: 60s
 
     environment:
       NODE_ENV: production
@@ -35,7 +35,7 @@ services:
       - proxy
 
     labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.enable=${TWEETS2BSKY_AUTO_UPDATE:-true}"
 
 volumes:
   tweets2bsky_data:

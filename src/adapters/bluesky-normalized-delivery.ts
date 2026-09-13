@@ -1,4 +1,5 @@
 import { type BskyAgent, RichText } from '@atproto/api';
+import { assertDeliveryActive, deliverySignal } from '../services/delivery-context.js';
 import type { NormalizedDeliveryAdapter } from '../services/normalized-delivery-service.js';
 import { resolveWebhookTarget, sendPinnedHttpsRequest } from '../webhook.js';
 
@@ -28,6 +29,7 @@ export function createBlueskyNormalizedDeliveryAdapter(
       return { text: richText.text, facets: richText.facets };
     },
     downloadMedia: async (media) => {
+      assertDeliveryActive();
       const resolved = await resolveWebhookTarget(media.url, false);
       const response = await sendPinnedHttpsRequest({
         target: resolved.target,
@@ -37,6 +39,7 @@ export function createBlueskyNormalizedDeliveryAdapter(
         headers: { 'user-agent': 'tweets-2-bsky-media/1' },
         timeoutMs: 30_000,
         maxResponseBytes: media.sizeBytes,
+        signal: deliverySignal(),
       });
       if (response.status !== 200) {
         throw new Error(`Normalized media request returned HTTP ${response.status}.`);
@@ -52,10 +55,7 @@ export function createBlueskyNormalizedDeliveryAdapter(
     },
     uploadImage: dependencies.uploadImage,
     uploadVideo: (buffer, sourceUrl) =>
-      dependencies.uploadVideo(
-        buffer,
-        new URL(sourceUrl).pathname.split('/').pop() || 'video.mp4',
-      ),
+      dependencies.uploadVideo(buffer, new URL(sourceUrl).pathname.split('/').pop() || 'video.mp4'),
     publish: dependencies.publish,
   };
 }

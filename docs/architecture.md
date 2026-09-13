@@ -19,7 +19,7 @@ The application is a single Bun process with explicit runtime services:
 - `src/server.ts` provides the Express API, authentication, operational controls, and static web serving.
 - `web/` contains the React/Vite dashboard. A production build is served from `web/dist/`.
 
-No runtime service imports `src/server.ts`; server-owned scheduler controls are injected by `src/index.ts`, preventing a composition/server import cycle. `src/config-manager.ts` owns schema-v8 JSON configuration, compatibility projection, atomic writes, encryption, and optimistic revision metadata. `src/config/` contains schemas, normalization, migrations, projection, transfer, and domain services. `src/pipeline/` contains fetch/run orchestration. `src/storage-paths.ts` resolves the data directory at module load. `src/db.ts` assembles SQLite-backed services and applies ordered migrations from `src/db/migrations/` (through migration 011 for route initial-import state).
+No runtime service imports `src/server.ts`; server-owned scheduler controls are injected by `src/index.ts`, preventing a composition/server import cycle. `src/config-manager.ts` owns schema-v8 JSON configuration, compatibility projection, atomic writes, encryption, and optimistic revision metadata. `src/config/` contains schemas, normalization, migrations, projection, transfer, and domain services. `src/pipeline/` contains fetch/run orchestration. `src/storage-paths.ts` resolves the data directory at module load. `src/db.ts` assembles SQLite-backed services and applies ordered migrations from `src/db/migrations/` (through migration 012 for durable Bluesky account blocks).
 
 ### Identity model
 
@@ -29,7 +29,7 @@ The persisted canonical model is:
 Source -> Route -> Destination -> BlueskyAccount
 ```
 
-Sources own ingestion/fetch policy, routes own relationship/content/delivery policy, and destinations own destination-wide posting/profile policy plus identity fields (`bskyIdentifier`, `bskyDid`, `storageKey`). Posting credentials live on a managed `BlueskyAccount` linked by `Destination.bskyAccountId` (at most one destination per account). `AccountMapping` remains a runtime/API compatibility projection and is omitted from persisted v7 JSON. A one-source mapping may resolve its sole source, but aggregate profile and pin policies require explicit source selections.
+Sources own ingestion/fetch policy, routes own relationship/content/delivery policy, and destinations own destination-wide posting/profile policy plus identity fields (`bskyIdentifier`, `bskyDid`, `storageKey`). Posting credentials live on a managed `BlueskyAccount` linked by `Destination.bskyAccountId` (at most one destination per account). `AccountMapping` remains a runtime/API compatibility projection and is omitted from persisted v8 JSON. A one-source mapping may resolve its sole source, but aggregate profile and pin policies require explicit source selections.
 
 ### Daemon data flow
 
@@ -78,7 +78,7 @@ Every successful config write increments top-level `revision` and changes `updat
 
 ## Current Source/Destination/Route architecture
 
-Schema v7 separates concerns that were historically combined in `AccountMapping`:
+Schema v8 retains the managed-account separation introduced in v7 and adds initial-import policy at global and route scope. The identity model separates concerns that were historically combined in `AccountMapping`:
 
 ```text
 Source (X identity and source settings)

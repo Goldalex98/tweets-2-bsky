@@ -4,6 +4,9 @@ export interface BlueskyAccountHealth {
   lastFailureAt?: number;
   lastErrorCategory?: string;
   consecutiveFailures: number;
+  blockedReason?: 'AccountTakedown' | 'AccountDeactivated';
+  blockedAt?: number;
+  runtimeRevision?: number;
 }
 
 /**

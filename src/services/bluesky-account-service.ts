@@ -67,6 +67,9 @@ function toAccountView(config: AppConfig, account: BlueskyAccount): BlueskyAccou
           lastFailureAt: health.lastFailureAt,
           lastErrorCategory: health.lastErrorCategory,
           consecutiveFailures: health.consecutiveFailures,
+          blockedReason: health.blockedReason,
+          blockedAt: health.blockedAt,
+          runtimeRevision: health.runtimeRevision,
         }
       : null,
   });
@@ -97,6 +100,45 @@ export function listBlueskyAccountViews(config: AppConfig): BlueskyAccountView[]
 export function getBlueskyAccountView(config: AppConfig, accountId: string): BlueskyAccountView | undefined {
   const account = config.blueskyAccounts.find((candidate) => candidate.id === accountId);
   return account ? toAccountView(config, account) : undefined;
+}
+
+export class BlueskyAccountRuntimeConflict extends Error {
+  readonly code = 'BSKY_ACCOUNT_RUNTIME_CONFLICT';
+  constructor() {
+    super('Bluesky account runtime state changed; refresh before resuming.');
+  }
+}
+
+export async function resumeBlueskyAccount(
+  config: AppConfig,
+  accountId: string,
+  runtimeRevision: number,
+  assertCurrent: () => void,
+): Promise<BlueskyAccountView> {
+  const account = findBlueskyAccount(config, accountId);
+  if (!account) throw new Error('Bluesky account not found.');
+  const state = blueskyAccountRuntimeService.getBlock(accountId);
+  if (!state.blockedReason || state.runtimeRevision !== runtimeRevision) throw new BlueskyAccountRuntimeConflict();
+  const validation = await validateBlueskyCredentials({
+    bskyIdentifier: account.loginIdentifier,
+    bskyPassword: account.appPassword,
+    bskyServiceUrl: account.serviceUrl,
+  });
+  if (account.did && validation.did !== account.did)
+    throw new Error('Validated account DID differs from the linked identity.');
+  // No await may separate authorization/OCC recheck and the atomic runtime CAS.
+  assertCurrent();
+  if (!blueskyAccountRuntimeService.resume(accountId, runtimeRevision)) throw new BlueskyAccountRuntimeConflict();
+  clearCachedAgent({
+    bskyAccountId: account.id,
+    bskyIdentifier: account.loginIdentifier,
+    bskyPassword: account.appPassword,
+    bskyServiceUrl: account.serviceUrl,
+    bskyDid: account.did,
+    bskyCanonicalHandle: account.canonicalHandle,
+  });
+  blueskyAccountRuntimeService.recordSuccess(accountId, 'validate');
+  return toAccountView(config, account);
 }
 
 export async function createValidatedBlueskyAccount(
@@ -211,7 +253,9 @@ export async function rotateBlueskyAccountCredentials(
     account.id,
   );
   if (duplicate) {
-    throw new Error(`Credential identity conflicts with account ${duplicate.canonicalHandle ?? duplicate.loginIdentifier}.`);
+    throw new Error(
+      `Credential identity conflicts with account ${duplicate.canonicalHandle ?? duplicate.loginIdentifier}.`,
+    );
   }
   const index = config.blueskyAccounts.findIndex((entry) => entry.id === account.id);
   let updated: BlueskyAccount = {

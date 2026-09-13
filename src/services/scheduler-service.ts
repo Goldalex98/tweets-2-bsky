@@ -43,6 +43,7 @@ export interface SchedulerIterationResult {
  */
 export class SchedulerService<Config extends SchedulerRuntimeConfig, Backfill, PinSync> {
   private deferredScheduledRun = false;
+  private stopping = false;
   private lastWakeSignal: number;
   private startupRunPending: boolean;
 
@@ -72,8 +73,7 @@ export class SchedulerService<Config extends SchedulerRuntimeConfig, Backfill, P
     if (latestCommand) this.lastWakeSignal = latestCommand.sequence;
 
     const runNowRequested = commands.some((command) => command.kind === 'run-now');
-    const scheduledSweepWasDue =
-      config.scheduler.enabled && now >= this.dependencies.getNextCheckTime();
+    const scheduledSweepWasDue = config.scheduler.enabled && now >= this.dependencies.getNextCheckTime();
 
     const pinSyncs = this.dependencies.getPendingPinSyncs();
     await this.dependencies.processPinSyncs(pinSyncs, config);
@@ -133,15 +133,24 @@ export class SchedulerService<Config extends SchedulerRuntimeConfig, Backfill, P
     };
   }
 
-  async runForever(): Promise<never> {
-    while (true) {
-      await this.runIteration();
+  stop(): void {
+    this.stopping = true;
+  }
+
+  async runForever(): Promise<void> {
+    while (!this.stopping) {
+      try {
+        await this.runIteration();
+      } catch (error) {
+        if (!this.stopping) throw error;
+      }
     }
   }
 
   private async sleepWithWake(durationMs: number): Promise<void> {
     const end = this.dependencies.clock.now() + durationMs;
     while (this.dependencies.clock.now() < end) {
+      if (this.stopping) return;
       if (this.dependencies.getWakeSignal() > this.lastWakeSignal) return;
       const remainingMs = Math.max(0, end - this.dependencies.clock.now());
       await this.dependencies.sleep(Math.min(250, remainingMs));

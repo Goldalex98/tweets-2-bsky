@@ -1,8 +1,5 @@
 import { expect, test } from 'bun:test';
-import {
-  createGenericPostPlan,
-  deliverGenericPost,
-} from '../../src/generic-delivery.js';
+import { createGenericPostPlan, deliverGenericPost } from '../../src/generic-delivery.js';
 import type { NormalizedPost } from '../../src/normalized-post.js';
 
 const post: NormalizedPost = {
@@ -40,6 +37,6 @@ test('generic delivery resumes after completed chunks and threads remaining chun
     completed,
   );
   expect(calls).toHaveLength(plan.length - 1);
-  expect((calls[0]?.chunk as { reply?: { root: { uri: string } } }).reply?.root.uri).toBe('at://root');
+  expect((calls[0]?.chunk as { reply?: { root: { uri: string } } } | undefined)?.reply?.root.uri).toBe('at://root');
   expect(result).toHaveLength(plan.length);
 });

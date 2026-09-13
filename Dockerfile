@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.3.14-slim AS build
+FROM oven/bun:1.4.2-slim AS build
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN bun run build \
   && bun install --frozen-lockfile --production
 
 
-FROM oven/bun:1.3.14-slim AS runtime
+FROM oven/bun:1.4.2-slim AS runtime
 
 WORKDIR /app
 
@@ -48,6 +48,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/web/dist ./web/dist
 COPY --from=build /app/public ./public
+COPY --from=build /app/scripts/image-runtime-smoke.ts ./scripts/image-runtime-smoke.ts
+COPY --from=build /app/scripts/image-data-smoke.ts ./scripts/image-data-smoke.ts
+COPY --from=build /app/scripts/image-data-invariants.ts ./scripts/image-data-invariants.ts
+COPY --from=build /app/scripts/image-copied-volume-smoke.ts ./scripts/image-copied-volume-smoke.ts
+COPY --from=build /app/tests/fixtures/config-v*-*.json ./scripts/fixtures/
 
 RUN mkdir -p /app/data \
   && ln -sf /app/data/config.json /app/config.json

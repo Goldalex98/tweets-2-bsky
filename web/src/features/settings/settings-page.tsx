@@ -77,6 +77,7 @@ interface SettingsPageProps {
     busy: boolean;
     onCreate(form: BlueskyAccountFormState): Promise<unknown>;
     onValidate(account: BlueskyAccountView): Promise<unknown>;
+    onResume(account: BlueskyAccountView): Promise<unknown>;
     onRotate(account: BlueskyAccountView, password: string): Promise<unknown>;
     onDelete(account: BlueskyAccountView): Promise<unknown>;
     onManageDestination(destinationId: string): void;
@@ -207,6 +208,7 @@ export function SettingsPage(props: SettingsPageProps) {
             busy={props.blueskyAccounts.busy}
             onCreate={props.blueskyAccounts.onCreate}
             onValidate={props.blueskyAccounts.onValidate}
+            onResume={props.blueskyAccounts.onResume}
             onRotate={props.blueskyAccounts.onRotate}
             onDelete={props.blueskyAccounts.onDelete}
             onManageDestination={props.blueskyAccounts.onManageDestination}

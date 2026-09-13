@@ -1,5 +1,37 @@
 import { type Page, type Route, expect, test } from '@playwright/test';
 
+// Explicit capture mode keeps maintenance visual evidence separate from test artifacts.
+for (const width of [1440, 390]) {
+  for (const theme of ['light', 'dark']) {
+    test(`maintenance visual baseline ${width} ${theme}`, async ({ page }) => {
+      test.skip(!process.env.MAINTENANCE_VISUAL_DIR, 'Set MAINTENANCE_VISUAL_DIR to capture fixture screenshots.');
+      await page.setViewportSize({ width, height: 1000 });
+      await page.addInitScript((mode) => localStorage.setItem('theme-mode', mode), theme);
+      const mutations = await mockDashboard(page);
+      await page.goto('/');
+      await expect(page.getByRole('heading', { name: 'Overview', level: 1 })).toBeVisible();
+      const capture = async (screen: string) => {
+        await page.screenshot({
+          path: `${process.env.MAINTENANCE_VISUAL_DIR}/${width}-${theme}-${screen}.png`,
+          fullPage: true,
+          animations: 'disabled',
+        });
+      };
+      await capture('overview');
+      await page.getByRole('button', { name: 'Add Bluesky destination' }).click();
+      await expect(page.getByRole('dialog', { name: 'Create Bluesky Destination' })).toBeVisible();
+      await capture('destination-dialog');
+      await page.goto('/settings');
+      await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
+      await capture('settings');
+      await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: /^AI/ }).click();
+      await expect(page.getByText('Enable AI image alt text')).toBeVisible();
+      await capture('ai-settings');
+      expect(mutations).toHaveLength(0);
+    });
+  }
+}
+
 const version = { revision: 7, updatedAt: '2026-07-24T20:00:00.000Z' };
 const permissions = {
   viewAllMappings: true,
@@ -295,6 +327,62 @@ async function mockManagedAccounts(page: Page) {
   await page.route('**/api/bluesky-accounts', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     return json(route, managedAccounts);
+  });
+}
+
+for (const conflict of [false, true]) {
+  test(`blocked account requires explicit resume${conflict ? ' and refetches a runtime conflict' : ''}`, async ({ page }) => {
+    const unrelatedMutations = await mockDashboard(page);
+    let blocked = true;
+    let runtimeRevision = 3;
+    let reads = 0;
+    const resumes: Array<Record<string, unknown>> = [];
+    const account = () => ({
+      ...managedAccounts[0],
+      health: {
+        consecutiveFailures: 0,
+        runtimeRevision,
+        ...(blocked ? { blockedReason: 'AccountTakedown', blockedAt: 1_780_000_000_000 } : {}),
+      },
+    });
+    await page.route('**/api/bluesky-accounts**', async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (route.request().method() === 'GET' && path === '/api/bluesky-accounts') {
+        reads += 1;
+        return json(route, [account()]);
+      }
+      if (path.endsWith('/validate')) return json(route, { account: account(), profileChanged: false });
+      if (path.endsWith('/resume')) {
+        resumes.push(route.request().postDataJSON());
+        if (conflict && resumes.length === 1) {
+          runtimeRevision += 1;
+          return json(route, { code: 'BSKY_ACCOUNT_RUNTIME_CONFLICT', error: 'Account state changed. Refresh and retry.' }, 409);
+        }
+        blocked = false;
+        runtimeRevision += 1;
+        return json(route, { success: true, account: account(), profileChanged: false });
+      }
+      return route.fallback();
+    });
+    await page.goto('/settings?section=bluesky');
+    await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Bluesky accounts' }).click();
+    await expect(page.getByText('Posting blocked', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Test', exact: true }).click();
+    await expect(page.getByText('Bluesky account validated.', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Resume posting' })).toBeVisible();
+    expect(resumes).toHaveLength(0);
+    const priorReads = reads;
+    await page.getByRole('button', { name: 'Resume posting' }).click();
+    if (conflict) {
+      await expect.poll(() => reads).toBeGreaterThan(priorReads);
+      await expect(page.getByText('Posting blocked', { exact: true })).toBeVisible();
+      expect(resumes).toHaveLength(1);
+      await page.getByRole('button', { name: 'Resume posting' }).click();
+    }
+    await expect(page.getByRole('button', { name: 'Resume posting' })).toHaveCount(0);
+    expect(resumes[0]).toMatchObject({ revision: version.revision, runtimeRevision: 3 });
+    if (conflict) expect(resumes[1]).toMatchObject({ revision: version.revision, runtimeRevision: 4 });
+    expect(unrelatedMutations).toHaveLength(0);
   });
 }
 

@@ -4,6 +4,10 @@ A powerful tool to crosspost Tweets to Bluesky, supporting threads, videos, and 
 
 ## Troubleshooting
 
+### Managed account is blocked after credentials validate
+
+A provider takedown or deactivation is stored independently of destination pause/enabled state. Ordinary validation intentionally does not clear it. Resolve the provider restriction, then use Settings → Bluesky accounts → Resume. A runtime/configuration conflict means newer state was observed: refresh and review before explicitly retrying. Ingestion and retained queue work continue while posting is blocked; do not delete history, clear leases, or recreate the account to force delivery.
+
 ### Update Failures / Git Conflicts
 If `./update.sh` fails with "Pulling is not possible because you have unmerged files" or similar git errors:
 

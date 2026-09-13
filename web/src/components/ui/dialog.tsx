@@ -26,7 +26,9 @@ export function Dialog({
   if (!open) return null;
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: Pointer-only backdrop dismissal complements the nested dialog's keyboard Escape and focus handling.
     <div
+      role="presentation"
       className={cn(
         'fixed inset-0 z-50 flex bg-black/60 animate-backdrop-fade',
         variant === 'sheet'

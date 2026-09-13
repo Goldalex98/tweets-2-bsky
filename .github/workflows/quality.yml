@@ -1,7 +1,7 @@
 name: Quality
 
-# Default-branch pushes reach this suite through the Docker publish workflows,
-# which call it before building. A push trigger here would run it a third time.
+# Release and Docker publishers call this gate before creating public artifacts.
+# Keep this workflow independent of its callers to avoid dependency cycles.
 on:
   workflow_call:
   pull_request:
@@ -19,7 +19,12 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3.14'
+          bun-version: '1.4.2'
+
+      - name: Set up Node for release tooling and browser tests
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22.22.2'
 
       - name: Cache Bun packages
         uses: actions/cache@v6
@@ -36,6 +41,12 @@ jobs:
       # lockfile pins are how this project accumulated 68 advisories unnoticed.
       - name: Audit dependencies
         run: bun audit --audit-level=high
+
+      - name: Verify scraper compatibility
+        run: bun run verify:deps
+
+      - name: Rehearse release tooling under the pinned Node runtime
+        run: node scripts/release-toolchain-preflight.mjs
 
       - name: Check lint
         run: bun run lint:check

@@ -1,5 +1,6 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import type { QueueBatch, QueueItem } from '../../src/db.js';
+import { assertDeliveryActive, deliverySignal, withDeliveryDeadline } from '../../src/services/delivery-context.js';
 import {
   DestinationQueueWorkerService,
   type QueueWorkerDependencies,
@@ -87,11 +88,14 @@ function dependencies(
       },
       ...(options.leases ? { leases: options.leases } : {}),
       deleteByMappingId: (id) => events.push(`delete:${id}`),
-      deliver: options.delivery ?? (async () => {}),
+      deliver: async (_mapping, batch, context) => {
+        for (const item of batch.items) context.markAttempted(item.queue_id);
+        await options.delivery?.();
+      },
       findSettlement: (queueItem) => options.settlements?.get(queueItem.twitter_id) ?? null,
       markDone: (queueItem) => events.push(`done:${queueItem.twitter_id}`),
-      releaseForRetry: (queueItem, _error, maxAttempts) =>
-        events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`),
+      releaseForRetry: (queueItem, _error, maxAttempts) => events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`),
+      deferUnattempted: (queueItem, _error, notBefore) => events.push(`defer:${queueItem.twitter_id}:${notBefore}`),
       describeError: (error) => (error instanceof Error ? error.message : String(error)),
       classifyError: () => 'delivery',
       metrics: {
@@ -106,6 +110,188 @@ function dependencies(
 }
 
 describe('DestinationQueueWorkerService', () => {
+  test('direct drain renews beyond the original lease expiry without starting workers or shutdown', async () => {
+    let now = 0;
+    const ttl = 5 * 60_000;
+    let expiresAt = 0;
+    let finish: (() => void) | undefined;
+    let tick = () => {};
+    const timer = {} as ReturnType<typeof setInterval>;
+    const interval = spyOn(globalThis, 'setInterval').mockImplementation((callback, delay) => {
+      expect(delay).toBe(1000);
+      tick = () => callback();
+      return timer;
+    });
+    const clear = spyOn(globalThis, 'clearInterval').mockImplementation(() => {});
+    const harness = dependencies([batch([item('first')])], {
+      leases: {
+        heldByOthers: () => [],
+        acquire: () => {
+          expiresAt = now + ttl;
+          return true;
+        },
+        renew: () => {
+          if (now >= expiresAt) return false;
+          expiresAt = now + ttl;
+          return true;
+        },
+        release: () => {
+          expiresAt = 0;
+        },
+      },
+      settlements: new Map([['first', { status: 'migrated' }]]),
+      delivery: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    });
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+    const draining = service.drain();
+    try {
+      expect(service.isStarted).toBe(false);
+      for (now = 1000; now <= ttl + 60_000; now += 1000) {
+        tick();
+        // A competing owner cannot claim the still-running destination.
+        expect(expiresAt).toBeGreaterThan(now);
+      }
+      expect(service.activeDestinations.has('destination')).toBe(true);
+      finish?.();
+      await draining;
+      expect(harness.events).toContain('done:first');
+      expect(expiresAt).toBe(0);
+      expect(clear).toHaveBeenCalledWith(timer);
+    } finally {
+      finish?.();
+      await draining;
+      interval.mockRestore();
+      clear.mockRestore();
+    }
+  });
+
+  test('an earlier timeout cannot hide subsequent lease loss from settlement', async () => {
+    let ownsLease = true;
+    let finish: (() => void) | undefined;
+    const harness = dependencies([batch([item('first')])], {
+      leases: { heldByOthers: () => [], acquire: () => true, renew: () => ownsLease, release: () => {} },
+    });
+    harness.value.deliver = async (_mapping, batch, context) => {
+      context.markAttempted(batch.items[0]?.queue_id ?? '');
+      await withDeliveryDeadline(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+        5,
+        'deadline',
+      );
+    };
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+    service.scheduleAvailable();
+    await Bun.sleep(20);
+    ownsLease = false;
+    service.renewLeases();
+    finish?.();
+    await service.waitForIdle();
+    expect(
+      harness.events.some(
+        (event) => event.startsWith('defer:') || event.startsWith('retry:') || event.startsWith('done:'),
+      ),
+    ).toBe(false);
+  });
+
+  test('shutdown renews leases and waits for direct drain batches', async () => {
+    let renewals = 0;
+    let finish: (() => void) | undefined;
+    const harness = dependencies([batch([item('first')])], {
+      leases: {
+        heldByOthers: () => [],
+        acquire: () => true,
+        renew: () => {
+          renewals++;
+          return true;
+        },
+        release: () => {},
+      },
+    });
+    harness.value.deliver = async () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+    const draining = service.drain();
+    let stopped = false;
+    const stopping = service.stop().then(() => {
+      stopped = true;
+    });
+    await Bun.sleep(1100);
+    expect(renewals).toBeGreaterThan(0);
+    expect(stopped).toBe(false);
+    finish?.();
+    await Promise.all([stopping, draining]);
+    expect(stopped).toBe(true);
+  });
+
+  test('lease loss aborts delivery and stop prevents further claims until work settles', async () => {
+    let ownsLease = true;
+    let finish: (() => void) | undefined;
+    let signal: AbortSignal | undefined;
+    const harness = dependencies([batch([item('first')]), batch([item('second')])], {
+      leases: { heldByOthers: () => [], acquire: () => true, renew: () => ownsLease, release: () => {} },
+    });
+    harness.value.deliver = async () => {
+      signal = deliverySignal();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      assertDeliveryActive();
+    };
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+    expect(service.scheduleAvailable()).toBe(1);
+    ownsLease = false;
+    service.renewLeases();
+    expect(signal?.aborted).toBe(true);
+    expect(service.activeDestinations.has('destination')).toBe(true);
+    const stopped = service.stop();
+    expect(service.scheduleAvailable()).toBe(0);
+    finish?.();
+    await stopped;
+    expect(service.activeDestinations.size).toBe(0);
+    expect(harness.events.some((event) => event.startsWith('defer:') || event.startsWith('retry:'))).toBe(false);
+  });
+
+  test('login failure defers untouched rows without spending retry attempts', async () => {
+    const harness = dependencies([]);
+    harness.value.deliver = async () => {
+      throw new Error('Bluesky login failed');
+    };
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+    const result = await service.runBatch(
+      { id: 'destination', bskyIdentifier: 'destination.test' },
+      batch([item('one', 2), item('two')]),
+    );
+    expect(result).toMatchObject({ deferred: 2, retrying: 0, parked: 0 });
+    expect(harness.events).toContain('defer:one:300100');
+    expect(harness.events).toContain('defer:two:300100');
+    expect(harness.metrics.get('failed')).toBe(0);
+  });
+
+  test('partial batch failures charge attempted rows and defer untouched tail', async () => {
+    const harness = dependencies([], { settlements: new Map([['posted', { status: 'migrated' }]]) });
+    harness.value.deliver = async (_mapping, _batch, context) => {
+      context.markAttempted('queue-posted');
+      context.markAttempted('queue-corrupt');
+      throw new Error('Invalid payload');
+    };
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+    const result = await service.runBatch(
+      { id: 'destination', bskyIdentifier: 'destination.test' },
+      batch([item('posted'), item('corrupt', 2), item('tail', 2)]),
+    );
+    expect(result).toMatchObject({ posted: 1, parked: 1, deferred: 1, retrying: 0 });
+    expect(harness.events).toContain('retry:corrupt:3');
+    expect(harness.events).toContain('defer:tail:300100');
+  });
+
   test('serializes claims by canonical destination and always releases the lock', async () => {
     let finishDelivery!: () => void;
     const first = batch([item('one')]);
@@ -141,10 +327,7 @@ describe('DestinationQueueWorkerService', () => {
     });
     const service = new DestinationQueueWorkerService(harness.value, 1, 3);
 
-    const result = await service.runBatch(
-      { id: 'destination', bskyIdentifier: 'destination.test' },
-      batch(rows),
-    );
+    const result = await service.runBatch({ id: 'destination', bskyIdentifier: 'destination.test' }, batch(rows));
 
     expect(result).toMatchObject({ posted: 1, skipped: 1, retrying: 1, parked: 1 });
     expect(harness.events).toContain('done:posted');
@@ -165,10 +348,7 @@ describe('DestinationQueueWorkerService', () => {
     });
     const service = new DestinationQueueWorkerService(harness.value, 1, 3);
 
-    const result = await service.runBatch(
-      { id: 'destination', bskyIdentifier: 'destination.test' },
-      batch(rows),
-    );
+    const result = await service.runBatch({ id: 'destination', bskyIdentifier: 'destination.test' }, batch(rows));
 
     expect(result).toMatchObject({ posted: 1, skipped: 0, retrying: 0, parked: 0 });
     expect(harness.events).toContain('done:migrated');
@@ -183,9 +363,7 @@ describe('DestinationQueueWorkerService', () => {
     const staleItem = item('stale-skip', 0);
     const harness = dependencies([], {
       delivery: async () => {},
-      settlements: new Map([
-        ['stale-skip', { status: 'skipped', recordedAt: staleItem.enqueued_at - 1 }],
-      ]),
+      settlements: new Map([['stale-skip', { status: 'skipped', recordedAt: staleItem.enqueued_at - 1 }]]),
     });
     const service = new DestinationQueueWorkerService(harness.value, 1, 3);
 
@@ -203,9 +381,7 @@ describe('DestinationQueueWorkerService', () => {
     const freshItem = item('fresh-skip', 0);
     const harness = dependencies([], {
       delivery: async () => {},
-      settlements: new Map([
-        ['fresh-skip', { status: 'skipped', recordedAt: freshItem.enqueued_at + 1 }],
-      ]),
+      settlements: new Map([['fresh-skip', { status: 'skipped', recordedAt: freshItem.enqueued_at + 1 }]]),
     });
     const service = new DestinationQueueWorkerService(harness.value, 1, 3);
 
@@ -226,10 +402,7 @@ describe('DestinationQueueWorkerService', () => {
     });
     const service = new DestinationQueueWorkerService(harness.value, 1, 3);
 
-    const result = await service.runBatch(
-      { id: 'destination', bskyIdentifier: 'destination.test' },
-      batch(rows),
-    );
+    const result = await service.runBatch({ id: 'destination', bskyIdentifier: 'destination.test' }, batch(rows));
 
     expect(result).toMatchObject({ posted: 0, skipped: 1, retrying: 0, parked: 0 });
     expect(harness.events).toContain('done:unknown-timing');
@@ -241,8 +414,7 @@ function leaseTable() {
   const holders = new Map<string, string>();
   const events: string[] = [];
   const forReplica = (replica: string) => ({
-    heldByOthers: () =>
-      [...holders.entries()].filter(([, owner]) => owner !== replica).map(([key]) => key),
+    heldByOthers: () => [...holders.entries()].filter(([, owner]) => owner !== replica).map(([key]) => key),
     acquire: (key: string) => {
       const owner = holders.get(key);
       if (owner && owner !== replica) return false;

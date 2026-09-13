@@ -78,6 +78,7 @@ const db: DbLike = await (async () => {
 })();
 
 // Enable WAL mode for better concurrency
+db.exec('PRAGMA busy_timeout = 5000;');
 if (typeof db.pragma === 'function') {
   db.pragma('journal_mode = WAL');
 } else {
@@ -1379,6 +1380,14 @@ export const postQueueService = {
     return changesCount();
   },
 
+  // An unavailable account/batch must not exhaust rows that were never attempted.
+  deferUnattempted(item: QueueItem, error: unknown, notBefore: number): void {
+    const message = sanitizedErrorMessage(error);
+    db.prepare(
+      "UPDATE post_queue SET status = 'pending', not_before = ?, last_error = ?, error_category = ?, error_message = ?, updated_at = ? WHERE queue_id = ? AND status = 'processing'",
+    ).run(notBefore, message, classifyQueueError(error), message, Date.now(), item.queue_id);
+  },
+
   // Failed attempt: exponential backoff (5 min doubling, capped at 6h), then
   // terminal 'failed' after maxAttempts so a poison tweet can't retry forever.
   releaseForRetry(item: QueueItem, error: unknown, maxAttempts: number): void {
@@ -1404,7 +1413,10 @@ export const postQueueService = {
   // Crash recovery: anything left 'processing' by a previous run goes back to
   // pending. processed_tweets checks make re-runs idempotent.
   resetProcessing(): number {
-    db.prepare("UPDATE post_queue SET status = 'pending', updated_at = ? WHERE status = 'processing'").run(Date.now());
+    const now = Date.now();
+    db.prepare(
+      "UPDATE post_queue SET status = 'pending', updated_at = ? WHERE status = 'processing' AND NOT EXISTS (SELECT 1 FROM destination_leases WHERE destination_key = post_queue.destination_id AND expires_at > ?)",
+    ).run(now, now);
     return changesCount();
   },
 
@@ -1836,8 +1848,8 @@ export const destinationLeaseService = {
 
   renew(destinationKey: string, ownerId: string, ttlMs: number, now = Date.now()): boolean {
     db.prepare(
-      'UPDATE destination_leases SET renewed_at = ?, expires_at = ? WHERE destination_key = ? AND owner_id = ?',
-    ).run(now, now + Math.max(1_000, ttlMs), destinationKey, ownerId);
+      'UPDATE destination_leases SET renewed_at = ?, expires_at = ? WHERE destination_key = ? AND owner_id = ? AND expires_at > ?',
+    ).run(now, now + Math.max(1_000, ttlMs), destinationKey, ownerId, now);
     return changesCount() === 1;
   },
 
@@ -1852,6 +1864,18 @@ export const destinationLeaseService = {
   releaseOwner(ownerId: string): number {
     db.prepare('DELETE FROM destination_leases WHERE owner_id = ?').run(ownerId);
     return changesCount();
+  },
+
+  settleWithOwnership(destinationKey: string, ownerId: string, ttlMs: number, settle: () => void): boolean {
+    let settled = false;
+    db.transaction(() => {
+      // A conditional write verifies ownership and locks out a successor
+      // until all queue settlement writes commit together.
+      if (!this.renew(destinationKey, ownerId, ttlMs)) return;
+      settle();
+      settled = true;
+    })();
+    return settled;
   },
 
   get(destinationKey: string): DestinationLease | null {
@@ -2284,9 +2308,39 @@ export interface BlueskyAccountRuntimeState {
   lastErrorCategory?: string;
   lastErrorMessage?: string;
   consecutiveFailures: number;
+  blockedReason?: 'AccountTakedown' | 'AccountDeactivated';
+  blockedAt?: number;
+  runtimeRevision: number;
 }
 
 export const blueskyAccountRuntimeService = {
+  getBlock(accountId: string): Pick<BlueskyAccountRuntimeState, 'blockedReason' | 'blockedAt' | 'runtimeRevision'> {
+    const row = db
+      .prepare('SELECT reason, blocked_at, revision FROM bluesky_account_blocks WHERE account_id = ?')
+      .get(accountId) as Record<string, unknown> | undefined;
+    return {
+      blockedReason: row?.reason === 'AccountTakedown' || row?.reason === 'AccountDeactivated' ? row.reason : undefined,
+      blockedAt: optionalNumber(row?.blocked_at),
+      runtimeRevision: Number(row?.revision ?? 0),
+    };
+  },
+
+  block(accountId: string, reason: 'AccountTakedown' | 'AccountDeactivated'): void {
+    db.prepare(`INSERT INTO bluesky_account_blocks (account_id, reason, blocked_at, revision) VALUES (?, ?, ?, 1)
+      ON CONFLICT(account_id) DO UPDATE SET reason = excluded.reason, blocked_at = excluded.blocked_at, revision = bluesky_account_blocks.revision + 1`).run(
+      accountId,
+      reason,
+      Date.now(),
+    );
+  },
+
+  resume(accountId: string, expectedRevision: number): boolean {
+    db.prepare(
+      'UPDATE bluesky_account_blocks SET reason = NULL, blocked_at = NULL, revision = revision + 1 WHERE account_id = ? AND revision = ? AND reason IS NOT NULL',
+    ).run(accountId, expectedRevision);
+    return changesCount() === 1;
+  },
+
   get(accountId: string): BlueskyAccountRuntimeState | null {
     const row = db.prepare('SELECT * FROM bluesky_account_runtime_state WHERE account_id = ?').get(accountId) as
       | Record<string, unknown>
@@ -2300,8 +2354,11 @@ export const blueskyAccountRuntimeService = {
           lastErrorCategory: optionalText(row.last_error_category),
           lastErrorMessage: optionalText(row.last_error_message),
           consecutiveFailures: Number(row.consecutive_failures) || 0,
+          ...this.getBlock(accountId),
         }
-      : null;
+      : this.getBlock(accountId).runtimeRevision > 0
+        ? { accountId, consecutiveFailures: 0, ...this.getBlock(accountId) }
+        : null;
   },
 
   list(): BlueskyAccountRuntimeState[] {
@@ -2317,6 +2374,7 @@ export const blueskyAccountRuntimeService = {
     const now = Date.now();
     const state: BlueskyAccountRuntimeState = {
       accountId,
+      ...this.getBlock(accountId),
       lastValidatedAt: now,
       lastSuccessAt: now,
       lastFailureAt: this.get(accountId)?.lastFailureAt,
@@ -2342,6 +2400,7 @@ export const blueskyAccountRuntimeService = {
     const now = Date.now();
     const state: BlueskyAccountRuntimeState = {
       accountId,
+      ...this.getBlock(accountId),
       lastValidatedAt: now,
       lastSuccessAt: previous?.lastSuccessAt,
       lastFailureAt: now,
@@ -2602,12 +2661,11 @@ export const ingestionReplayService = {
     return inserted;
   },
 
-  claimIdempotency(input: {
-    sourceId: string;
-    idempotencyKey: string;
-    externalPostId: string;
-    now?: number;
-  }): { accepted: boolean; response?: unknown; conflict?: boolean } {
+  claimIdempotency(input: { sourceId: string; idempotencyKey: string; externalPostId: string; now?: number }): {
+    accepted: boolean;
+    response?: unknown;
+    conflict?: boolean;
+  } {
     db.prepare(`
       INSERT OR IGNORE INTO ingestion_idempotency (
         source_id, idempotency_key, external_post_id, created_at
@@ -3046,10 +3104,12 @@ export const digestJobService = {
 
   resetProcessing(now = Date.now()): number {
     db.transaction(() => {
-      db.prepare("UPDATE digest_entries SET status = 'pending', job_id = NULL WHERE status = 'claimed'").run();
       db.prepare(
-        "UPDATE digest_jobs SET status = 'scheduled', claimed_at = NULL, claim_token = NULL, updated_at = ? WHERE status = 'processing'",
+        "UPDATE digest_entries SET status = 'pending', job_id = NULL WHERE status = 'claimed' AND NOT EXISTS (SELECT 1 FROM destination_leases WHERE destination_key = digest_entries.destination_id AND expires_at > ?)",
       ).run(now);
+      db.prepare(
+        "UPDATE digest_jobs SET status = 'scheduled', claimed_at = NULL, claim_token = NULL, updated_at = ? WHERE status = 'processing' AND NOT EXISTS (SELECT 1 FROM destination_leases WHERE destination_key = digest_jobs.destination_id AND expires_at > ?)",
+      ).run(now, now);
     })();
     return changesCount();
   },

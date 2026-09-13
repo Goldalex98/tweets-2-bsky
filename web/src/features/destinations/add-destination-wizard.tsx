@@ -122,7 +122,7 @@ function SourcesStep(props: AddDestinationWizardProps) {
           id="new-twitter-sources"
           data-autofocus
           aria-describedby="new-twitter-sources-hint"
-          className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           value={props.sourceInput}
           onChange={(event) => props.onSourceInputChange(event.target.value)}
         />
@@ -145,7 +145,7 @@ function SourcesStep(props: AddDestinationWizardProps) {
             @{username}
             <button
               type="button"
-              className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               aria-label={`Remove @${username}`}
               onClick={() => props.onRemoveSource(username)}
             >
@@ -155,6 +155,7 @@ function SourcesStep(props: AddDestinationWizardProps) {
         ))}
       </ul>
       {props.parseSummary.invalid.map((entry, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: Duplicate invalid inputs are stateless diagnostics and require distinct keys.
         <p key={`${entry.input}-${index}`} role="alert" className="text-xs text-red-600">
           {entry.input}: {entry.reason}
         </p>

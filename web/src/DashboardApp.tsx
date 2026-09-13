@@ -1057,6 +1057,10 @@ export default function DashboardApp() {
       run(async () => {
         await blueskyAccounts.validateAccount(account);
       }, 'Bluesky account validated.'),
+    onResume: (account: Parameters<typeof blueskyAccounts.resumeAccount>[0]) =>
+      run(async () => {
+        await blueskyAccounts.resumeAccount(account);
+      }, 'Bluesky account posting resumed.'),
     onRotate: (account: Parameters<typeof blueskyAccounts.rotateCredentials>[0], password: string) =>
       run(async () => {
         await blueskyAccounts.rotateCredentials(account, password);
@@ -1070,7 +1074,7 @@ export default function DashboardApp() {
 
   return (
     <div className="min-h-screen bg-muted/20 text-foreground">
-      <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur-sm">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div>
             <p className="font-semibold">Tweets-2-Bsky</p>

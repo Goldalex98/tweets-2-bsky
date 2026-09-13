@@ -1,4 +1,5 @@
 import type { QueueBatch, QueueItem } from '../db.js';
+import { DestinationLeaseLostError, runWithDeliveryContext } from './delivery-context.js';
 
 export interface QueueWorkerDestination {
   id: string;
@@ -22,13 +23,11 @@ export interface QueueSettlement {
   skipped: number;
   retrying: number;
   parked: number;
+  deferred: number;
   error?: string;
 }
 
-export interface QueueWorkerDependencies<
-  Config extends QueueWorkerConfig,
-  Mapping extends QueueWorkerMapping,
-> {
+export interface QueueWorkerDependencies<Config extends QueueWorkerConfig, Mapping extends QueueWorkerMapping> {
   clock: { now(): number };
   sleep(durationMs: number): Promise<void>;
   getConfig(): Config;
@@ -54,7 +53,7 @@ export interface QueueWorkerDependencies<
   deliver(
     mapping: Mapping,
     batch: QueueBatch,
-    context: { mode: 'worker' | 'drain' },
+    context: { mode: 'worker' | 'drain'; markAttempted(queueId: string): void },
   ): Promise<void>;
   /**
    * `recordedAt` (epoch ms) is when the history row was written, if known.
@@ -68,6 +67,8 @@ export interface QueueWorkerDependencies<
   findSettlement(item: QueueItem): { status: string; recordedAt?: number } | null;
   markDone(item: QueueItem): void;
   releaseForRetry(item: QueueItem, error: string, maxAttempts: number): void;
+  deferUnattempted(item: QueueItem, error: string, notBefore: number): void;
+  settleWithOwnership?(destinationKey: string, settle: () => void): boolean;
   describeError(error: unknown): string;
   classifyError(error: unknown): string;
   metrics: {
@@ -78,14 +79,12 @@ export interface QueueWorkerDependencies<
   notifyParked(destinationId: string, parked: number, category: string): void;
   updateJob?(
     id: string,
-    patch:
-      | {
-          account: string;
-          target: string;
-          mappingId: string;
-          itemCount: number;
-        }
-      | null,
+    patch: {
+      account: string;
+      target: string;
+      mappingId: string;
+      itemCount: number;
+    } | null,
   ): void;
   onBatchStart?(mapping: Mapping, batch: QueueBatch): void;
   onBatchSettled?(mapping: Mapping, batch: QueueBatch, settlement: QueueSettlement): void;
@@ -116,8 +115,7 @@ function destinationClaimScope(config: QueueWorkerConfig): {
   }
   return {
     allowedMappingIds: new Set(destinationKeyByMappingId.keys()),
-    resolveDestinationKey: (mappingId) =>
-      destinationKeyByMappingId.get(mappingId) ?? `mapping:${mappingId}`,
+    resolveDestinationKey: (mappingId) => destinationKeyByMappingId.get(mappingId) ?? `mapping:${mappingId}`,
   };
 }
 
@@ -125,12 +123,12 @@ function destinationClaimScope(config: QueueWorkerConfig): {
  * Claims and settles durable queue batches. The active destination set may be
  * shared with digest workers, making destination serialization explicit.
  */
-export class DestinationQueueWorkerService<
-  Config extends QueueWorkerConfig,
-  Mapping extends QueueWorkerMapping,
-> {
+export class DestinationQueueWorkerService<Config extends QueueWorkerConfig, Mapping extends QueueWorkerMapping> {
   readonly activeDestinations: Set<string>;
   private started = false;
+  private stopping = false;
+  private readonly controllers = new Map<string, AbortController>();
+  private readonly lostOwnership = new Set<string>();
   private readonly running = new Set<Promise<void>>();
   private readonly leasedDestinations = new Set<string>();
 
@@ -180,18 +178,41 @@ export class DestinationQueueWorkerService<
     return batch;
   }
 
-  async runBatch(
-    mapping: Mapping,
-    batch: QueueBatch,
-    mode: 'worker' | 'drain' = 'worker',
-  ): Promise<QueueSettlement> {
+  async runBatch(mapping: Mapping, batch: QueueBatch, mode: 'worker' | 'drain' = 'worker'): Promise<QueueSettlement> {
     const startedAt = this.dependencies.clock.now();
     let batchError: string | undefined;
+    const attempted = new Set<string>();
+    const controller = new AbortController();
+    this.lostOwnership.delete(batch.destination_key);
+    this.controllers.set(batch.destination_key, controller);
     this.dependencies.onBatchStart?.(mapping, batch);
     try {
-      await this.dependencies.deliver(mapping, batch, { mode });
+      await runWithDeliveryContext(
+        {
+          controller,
+          commit: (operation) => {
+            const committed = this.dependencies.settleWithOwnership?.(batch.destination_key, operation);
+            if (committed === false) this.lostOwnership.add(batch.destination_key);
+            if (committed === undefined) operation();
+            return committed ?? true;
+          },
+          assertOwnership: () => {
+            if (
+              this.leasedDestinations.has(batch.destination_key) &&
+              !this.dependencies.leases?.renew(batch.destination_key)
+            ) {
+              this.lostOwnership.add(batch.destination_key);
+              controller.abort(new DestinationLeaseLostError());
+              controller.signal.throwIfAborted();
+            }
+          },
+        },
+        () => this.dependencies.deliver(mapping, batch, { mode, markAttempted: (id) => attempted.add(id) }),
+      );
     } catch (error) {
       batchError = this.dependencies.describeError(error);
+    } finally {
+      this.controllers.delete(batch.destination_key);
     }
 
     const settlement: QueueSettlement = {
@@ -199,38 +220,53 @@ export class DestinationQueueWorkerService<
       skipped: 0,
       retrying: 0,
       parked: 0,
+      deferred: 0,
       ...(batchError ? { error: batchError } : {}),
     };
     const retryError = batchError ?? 'Post delivery did not create a processed record.';
-    for (const item of batch.items) {
-      const record = this.dependencies.findSettlement(item);
-      // A `migrated` record is always terminal. Any other status only counts
-      // as settled when it was written after this item was enqueued; a
-      // record from before that (a stale skip left over from a prior cycle,
-      // e.g. the item this override-requeue is replacing) must not be
-      // treated as this delivery's outcome, or the item vanishes unposted.
-      const isStale =
-        record !== null &&
-        record.status !== 'migrated' &&
-        record.recordedAt !== undefined &&
-        record.recordedAt < item.enqueued_at;
-      if (record && !isStale) {
-        this.dependencies.markDone(item);
-        if (record.status === 'migrated') settlement.posted += 1;
-        else settlement.skipped += 1;
-        continue;
+    // A successor may already own these rows. Never settle or requeue its claim.
+    if (this.leasedDestinations.has(batch.destination_key) && !this.dependencies.leases?.renew(batch.destination_key))
+      this.lostOwnership.add(batch.destination_key);
+    if (this.lostOwnership.has(batch.destination_key)) return settlement;
+    const settleRows = () => {
+      for (const item of batch.items) {
+        const record = this.dependencies.findSettlement(item);
+        // A `migrated` record is always terminal. Any other status only counts
+        // as settled when it was written after this item was enqueued; a
+        // record from before that (a stale skip left over from a prior cycle,
+        // e.g. the item this override-requeue is replacing) must not be
+        // treated as this delivery's outcome, or the item vanishes unposted.
+        const isStale =
+          record !== null &&
+          record.status !== 'migrated' &&
+          record.recordedAt !== undefined &&
+          record.recordedAt < item.enqueued_at;
+        if (record && !isStale) {
+          this.dependencies.markDone(item);
+          if (record.status === 'migrated') settlement.posted += 1;
+          else settlement.skipped += 1;
+          continue;
+        }
+        if (!attempted.has(item.queue_id)) {
+          this.dependencies.deferUnattempted(item, retryError, this.dependencies.clock.now() + 5 * 60 * 1000);
+          settlement.deferred += 1;
+          continue;
+        }
+        this.dependencies.releaseForRetry(item, retryError, this.maxAttempts);
+        if (item.attempts + 1 >= this.maxAttempts) settlement.parked += 1;
+        else settlement.retrying += 1;
       }
-      this.dependencies.releaseForRetry(item, retryError, this.maxAttempts);
-      if (item.attempts + 1 >= this.maxAttempts) settlement.parked += 1;
-      else settlement.retrying += 1;
-    }
+    };
+    if (this.dependencies.settleWithOwnership) {
+      if (!this.dependencies.settleWithOwnership(batch.destination_key, settleRows)) return settlement;
+    } else settleRows();
 
     this.dependencies.metrics.increment('posted', settlement.posted);
     this.dependencies.metrics.increment('skipped', settlement.skipped);
     this.dependencies.metrics.increment('retries', settlement.retrying);
     this.dependencies.metrics.increment('failed', settlement.parked);
     this.dependencies.metrics.observe('postDurationMs', this.dependencies.clock.now() - startedAt);
-    if (settlement.retrying + settlement.parked > 0) {
+    if (settlement.retrying + settlement.parked + settlement.deferred > 0) {
       const category = this.dependencies.classifyError(retryError);
       this.dependencies.recordDestinationFailure(mapping.id, category, retryError);
       if (settlement.parked > 0) {
@@ -251,10 +287,16 @@ export class DestinationQueueWorkerService<
   /** Keeps leases for in-flight batches alive while a slow batch is delivering. */
   renewLeases(): void {
     if (!this.dependencies.leases) return;
-    for (const key of this.leasedDestinations) this.dependencies.leases.renew(key);
+    for (const key of this.leasedDestinations) {
+      if (!this.dependencies.leases.renew(key)) {
+        this.lostOwnership.add(key);
+        this.controllers.get(key)?.abort(new DestinationLeaseLostError());
+      }
+    }
   }
 
   scheduleAvailable(): number {
+    if (this.stopping) return 0;
     const config = this.dependencies.getConfig();
     const scope = destinationClaimScope(config);
     let launched = 0;
@@ -300,24 +342,33 @@ export class DestinationQueueWorkerService<
   }
 
   async drain(): Promise<void> {
-    while (true) {
-      const config = this.dependencies.getConfig();
-      const scope = destinationClaimScope(config);
-      const batch = this.claimBatch(scope);
-      if (!batch) return;
-      const mapping = this.dependencies.findMapping(config, batch.mapping_id);
-      if (!mapping) {
-        this.releaseLease(batch.destination_key);
-        this.dependencies.deleteByMappingId(batch.mapping_id);
-        continue;
+    // CLI drains do not start runForever; keep ownership while requests settle.
+    const renewal = this.startLeaseRenewal();
+    try {
+      while (!this.stopping) {
+        const config = this.dependencies.getConfig();
+        const scope = destinationClaimScope(config);
+        const batch = this.claimBatch(scope);
+        if (!batch) return;
+        const mapping = this.dependencies.findMapping(config, batch.mapping_id);
+        if (!mapping) {
+          this.releaseLease(batch.destination_key);
+          this.dependencies.deleteByMappingId(batch.mapping_id);
+          continue;
+        }
+        this.activeDestinations.add(batch.destination_key);
+        const running = this.runBatch(mapping, batch, 'drain').then(() => undefined);
+        this.running.add(running);
+        try {
+          await running;
+        } finally {
+          this.running.delete(running);
+          this.activeDestinations.delete(batch.destination_key);
+          this.releaseLease(batch.destination_key);
+        }
       }
-      this.activeDestinations.add(batch.destination_key);
-      try {
-        await this.runBatch(mapping, batch, 'drain');
-      } finally {
-        this.activeDestinations.delete(batch.destination_key);
-        this.releaseLease(batch.destination_key);
-      }
+    } finally {
+      clearInterval(renewal);
     }
   }
 
@@ -327,8 +378,29 @@ export class DestinationQueueWorkerService<
     void this.runForever();
   }
 
-  private async runForever(): Promise<never> {
-    while (true) {
+  async stop(): Promise<void> {
+    this.stopping = true;
+    for (const controller of this.controllers.values()) controller.abort(new Error('Queue worker is stopping'));
+    const renewal = this.startLeaseRenewal();
+    try {
+      await this.waitForIdle();
+    } finally {
+      clearInterval(renewal);
+    }
+  }
+
+  private startLeaseRenewal(): ReturnType<typeof setInterval> {
+    return setInterval(() => {
+      try {
+        this.renewLeases();
+      } catch (error) {
+        this.dependencies.onWorkerError?.(error);
+      }
+    }, 1000);
+  }
+
+  private async runForever(): Promise<void> {
+    while (!this.stopping) {
       let launched = 0;
       try {
         this.renewLeases();

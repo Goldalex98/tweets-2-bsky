@@ -1,0 +1,98 @@
+# Maintenance upgrade progress
+
+Updated: 2026-09-13. Goal active. Implementation and independent reviews are complete; release, native arm64 validation, published-image acceptance, and production acceptance remain incomplete.
+
+## Execution identity
+
+- Plan: `docs/maintenance-upgrade-plan.md`.
+- Implementation worktree: `C:/Users/Alex/Projects/tweets-2-bsky/.worktrees/maintenance-upgrade`.
+- Implementation branch: `codex/maintenance-upgrade`.
+- Verified base: `origin/main` at `d824648569450d0dcadc42cf84a8b796195055a3`, published app 3.6.3.
+- Original checkout preserved: `codex/fix-long-form-repost-text` at `f81521e`. Original tracked changes had no Git-normalized content diff; no reset/stash/cleanup performed. This progress ledger is deliberately mirrored to both checkouts.
+- Base-to-old-HEAD difference: only release metadata in package.json and README.md.
+- No implementation commits, remote pushes, release, or application deployment yet. Validation currently applies to the working tree and local candidate image, not a final commit or published digest.
+
+## Ownership and current action
+
+| Agent | Owned work | Current action |
+| --- | --- | --- |
+| Main orchestrator | Integration, deployment discovery, Git/release/deploy, final verification | Obtain pending Portainer credential; guard both production updaters before push; copied-volume rehearsal, release, and production acceptance |
+| dependency_plan | Manifest/lockfile, Dockerfile, workflows, runtime checker, image validation | Implementation and local validation complete; native arm64 and published-image evidence pending |
+| pipeline_plan | Pipeline/database/services/adapters and related tests | Implementation and independent reviews complete |
+| deployment_plan | Frontend/config/browser runner and E2E | Implementation and local browser validation complete |
+| portainer_bridge | Private bridge helpers; this mirrored ledger | Bridge prepared and offline-checked; ledger refreshed from existing logs and main-task handoff |
+
+Workers must not stage/commit/push. Main performs all remote mutations. Keep incomplete production acceptance open even though implementation and local checks pass.
+
+## Phase ledger
+
+| Requirement | State | Evidence / next action |
+| --- | --- | --- |
+| 0: isolated source baseline | PASS | Fetch and worktree creation exited 0; base d824648 |
+| 0: original work preservation | PASS | Original Git-normalized diff empty; original AI blob equals HEAD; no destructive checkout cleanup |
+| 0: fixture screenshots | PASS | Frozen baseline: 4 Playwright tests, 16 desktop/mobile light/dark captures under test-results/maintenance-baseline |
+| 0: production target/digest/data/key/backups | PARTIAL | Target, stack, image digest, volume, identity fingerprint, and protected WAL-consistent baseline snapshot verified by main; copied-volume rehearsal and final quiesced backup remain pending |
+| 0: prevent accidental updater deployment | OPEN | Git auto-update every 15 minutes and Watchtower polling every 3600 seconds are still enabled; both must be guarded before any release-triggering push |
+| 0: schema documentation alignment | IMPLEMENTED | AGENTS/README/architecture/Cursor identity mirror corrected to v8; historical v7 migration section retained |
+| 1: all original security advisories | LOCAL PASS | Frozen install completed without changes; audit reports zero vulnerabilities across 724 packages |
+| 1: release prerequisites and exact-image/native smoke | PARTIAL | Local release validation passed; native arm64 and exact published image remain open |
+| 2: retry/deferred semantics and SQLite busy wait | IMPLEMENTED / LOCAL PASS | Implementation and reviews complete; included in full 441-test gate |
+| 3: cancellation/leases/recovery/shutdown/scraper deadlines | IMPLEMENTED / LOCAL PASS | Implementation and reviews complete; included in full gate and isolated runtime fixtures |
+| 4: account block migration/API/resume/mutation gates | IMPLEMENTED / LOCAL PASS | Migration012 and block/resume persistence, API, and mutation gates pass full gate and network-isolated real-backend checks |
+| 5: thumbnail limit and ten-minute video | IMPLEMENTED / LOCAL PASS | Implementation and reviews complete; full gate passes |
+| 6: clients/Bun/native database/CLI | IMPLEMENTED / LOCAL PASS | Full Bun 1.4.2 gate; Linux amd64 SQLite/sharp/Chromium smoke and fixture stages pass; native arm64 remains open |
+| 7: compiler/lint/frontend/CSS/icons | IMPLEMENTED / LOCAL PASS | Both typechecks/build and browser workflows pass; AI exclusion retained |
+| 8: real-backend, published-image, production smoke | PARTIAL | Local candidate readiness and network-isolated backend fixtures pass; published digest and live upgraded deployment untested |
+| Independent pipeline/config/secrets reviews | COMPLETE | Main-task handoff confirms implementation findings repaired and reviews complete |
+| Full frozen-install/check/audit gate | LOCAL PASS | Recorded exit 0 for both logs below; 369 unit + 59 integration + 13 release = 441 tests, zero failures; final commit identity still pending |
+| Mocked UI + real-backend integration | LOCAL PASS | Playwright 21 passed, 4 optional capture tests skipped; separate network-none backend run: 11 tests, 160 assertions, zero failures |
+| Fresh/current/legacy migration/restore/restart | FIXTURE PASS / LIVE COPY OPEN | 18 compiled image fixture stages cover six fixture configurations through seed/restart/restore; actual production copied-volume rehearsal remains pending |
+| amd64/arm64 native/container/Chromium | PARTIAL | Linux amd64 native SQLite/sharp and Chromium render/cleanup pass locally; native arm64 pending |
+| Exact published digest validation | OPEN | No release generated; local image tag tweets-2-bsky:release-validation is not published-image evidence |
+| Git push/release/registry manifests | OPEN | No commit/push; first establish both updater guards, then record release workflow/tag/version/registry evidence |
+| Production cutover/readiness/authenticated smoke | OPEN | Old production 3.6.3 healthy; upgraded application has not been deployed |
+| Repair loop and completion audit | OPEN | Required after published-image validation and actual deployment |
+
+## Verified local validation evidence
+
+Existing logs were inspected without rerunning the checks. Main-task handoff records exit 0 for each process.
+
+- `test-results/maintenance-final-check.log`: dependency compatibility, lint, both typechecks, unit/integration/release tests, and build. Lines 915–918: 369 unit tests pass; lines 1035–1038: 59 integration tests pass; lines 1061–1064: 13 release tests pass. Total: 441, zero failures. Vite build completes at the end of the log.
+- `test-results/maintenance-release-validation.log`: frozen install checked 606 installs across 819 packages without changes; line 6 reports zero vulnerabilities across 724 audited packages. Lines 118–119: 4 optional capture tests skipped, 21 Playwright tests passed. Line 120: Linux x64 native modules and Chromium render/cleanup pass. Lines 122–149: 18 compiled migration/backup continuity stages, including populated v6 and current v8 fixtures. Lines 182–185: 11 backend tests, zero failures, 160 assertions. Lines 186–187 confirm no external network, running-container readiness, and completed release validation.
+- Local candidate image ID: `sha256:e3c8b943586a50cf58e7dbb8b5f1050ac6ef89284d13bb8489dd785747c4152c` (main-task handoff). This local image ID does not establish a registry manifest digest.
+- The local release harness prints “Published image readiness” for its supplied local image tag. This is candidate-image validation only; the exact registry digest is still an open acceptance requirement.
+
+## AI exclusion baseline
+
+- `src/ai-manager.ts` Git blob: `ccdd0b9b906e92219b1f4caacf28f61827e6b70b`.
+- Implementation worktree file SHA256: `49A9354146492DE261E825F36D39A257F019E492228A63BFFF09A3BDB8579B57`.
+- Direct SDK manifest: `@google/generative-ai` `^0.24.1`; resolved artifact/integrity unchanged.
+- Main-task handoff confirms AI implementation remains unchanged and no live AI calls were made. Prior preservation checks found 4 AI UI screenshot pairs pixel-identical and the shared mocked AI regression batch passing.
+- Raw parent AI hash differs because of checkout line endings; use Git-normalized content for preservation alongside the implementation byte hash.
+
+## Production evidence and remaining access work
+
+Production facts below are from the main task's verified remote investigation; this ledger update performs no remote commands.
+
+- Production app 3.6.3 is healthy. Earlier public checks returned `/healthz` 200 with database OK, scheduler running, and restartRequired false; `/readyz` 200 ready. Authenticated production UI showed AI off. Old-version health does not satisfy upgraded-deployment acceptance.
+- SSH access now works through the ignored owner-only helper with Windows-user DPAPI credentials, six-hour freshness enforcement, and existing verified known_hosts. Do not print credential contents or invoke askpass independently. Main owns credential lifecycle and all remote actions.
+- Portainer is version 2.39.5. Its installed public TLS certificate is trusted explicitly over verified SSH; no browser security bypass is required. The Portainer credential handoff is still pending.
+- Existing Git-managed Compose stack: ID 2, name `tweets2bsky`, endpoint ID 3, project path `/data/compose/2`, entry point `docker-compose.portainer.yml`. Container: `tweets-2-bsky`. Existing persistent volume: `tweets2bsky_data`.
+- Running old image digest: `sha256:7755e700137b1bdb7fdd69a924f7f18f148f73a4d5e147ba6ecce97c71e9de88`.
+- Two automatic deployment mechanisms remain enabled: Portainer Git polling every 15 minutes; Watchtower-enabled container label with Watchtower polling every 3600 seconds. Guard both before push. The prepared Portainer metadata-only disable action must not redeploy the old app.
+- Protected WAL-consistent live baseline snapshot: `/home/ubuntu/.local/state/tweets2bsky-maintenance/baseline-20260913T134653Z/snapshot`. Baseline config schema 8; database version 11. Counts: queue 0, processed 8930, checkpoints 12705, digest entries 0, jobs 0.
+- Baseline identity fingerprint: `8c723dac2bfa545e553d7b455aea046cfcd209b6fd77c3b6469ccc959744bea0`. No secret values belong in this ledger.
+- Automatic approval review rejected transfer of production config, database, and encryption-key material to a local owner-only ignored folder because specific authorization for that sensitive transfer was absent. No transfer happened. The main task will validate the protected snapshot on the server against the published digest, keeping production data and secrets there; this validation remains open.
+- SSH credential existence is confirmed; the user still needs the separate Portainer setup command. No remote configuration, updater, or application changes have been made.
+- The live baseline snapshot is not a final cutover backup. Actual copied-volume rehearsal and a final quiesced, rollback-ready backup are still pending.
+- GitHub main was verified at d824648 with no remote mutation. Release-bearing commit, push, workflow success, generated tag/release, matching package/README version, and registry manifests remain pending.
+
+## Toolchain notes for resume
+
+- Docker Desktop 29.6.2 is available; local candidate container tests passed.
+- Official Node 22.22.2 Windows executable is in ignored test artifacts, verified against nodejs.org SHASUMS. Exact release-toolchain rehearsal exited 0; global Node unchanged.
+- Bun 1.4.2 is available at `C:/Users/Alex/.bun/install/cache/@oven/bun-windows-x64@1.4.2@@@1/bin/bun.exe`. Prepend its directory to process.env.PATH inside Bun before Bun.spawn for package scripts; PowerShell PATH alone previously selected global 1.3.14 in nested commands.
+
+## Resume instruction
+
+Read this ledger and the saved plan; inspect current worktree and main-task status. Continue open acceptance work without repeating completed local exploration or tests unless code changes or new failures justify it. Establish both updater guards before push. Record final commit and exact image digest, prove native arm64, rehearse the protected production snapshot on the server against the published digest, take the final quiesced backup, deploy through the existing stack, and verify live readiness, authenticated behavior, data/identity preservation, and rollback artifacts. Do not mark the goal complete until every required release and production acceptance item is proven.

@@ -1,10 +1,10 @@
 ---
-description: Schema v7 Source/Route/Destination/BlueskyAccount identity and credential ownership
+description: Schema v8 Source/Route/Destination/BlueskyAccount identity and credential ownership
 globs: src/config/**/*.ts,src/**/bluesky*.ts,src/mapping-helpers.ts,src/secret-storage.ts,web/src/features/bluesky-accounts/**/*,web/src/features/destinations/**/*,web/src/api/types.ts
 alwaysApply: false
 ---
 
-# Identity model (schema v7)
+# Identity model (schema v8)
 
 Canonical persisted model:
 

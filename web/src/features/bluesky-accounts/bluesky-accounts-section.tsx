@@ -22,6 +22,7 @@ interface BlueskyAccountsSectionProps {
   busy: boolean;
   onCreate(form: BlueskyAccountFormState): Promise<unknown>;
   onValidate(account: BlueskyAccountView): Promise<unknown>;
+  onResume(account: BlueskyAccountView): Promise<unknown>;
   onRotate(account: BlueskyAccountView, password: string): Promise<unknown>;
   onDelete(account: BlueskyAccountView): Promise<unknown>;
   onManageDestination?(destinationId: string): void;
@@ -131,7 +132,8 @@ export function BlueskyAccountsSection(props: BlueskyAccountsSectionProps) {
           {filtered.map((account) => {
             const handle = account.canonicalHandle || account.loginIdentifier;
             const errorCategory = account.health?.lastErrorCategory;
-            const healthLabel = errorCategory
+            const blockedReason = account.health?.blockedReason;
+            const healthLabel = blockedReason ? 'Posting blocked' : errorCategory
               ? errorCategory === 'did-mismatch'
                 ? 'DID mismatch'
                 : errorCategory === 'bsky-auth'
@@ -140,7 +142,7 @@ export function BlueskyAccountsSection(props: BlueskyAccountsSectionProps) {
               : account.credentialConfigured
                 ? 'Ready'
                 : 'Missing password';
-            const healthDanger = Boolean(errorCategory);
+            const healthDanger = Boolean(blockedReason || errorCategory);
             return (
               <div key={account.id} className="space-y-3 rounded-lg border p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -163,6 +165,12 @@ export function BlueskyAccountsSection(props: BlueskyAccountsSectionProps) {
                     </Badge>
                   </div>
                 </div>
+                {blockedReason ? (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    Bluesky reported this account as {blockedReason === 'AccountTakedown' ? 'taken down' : 'deactivated'}.
+                    {' '}Pending work is retained. Resolve the account issue, then resume posting. Testing credentials alone keeps posting blocked.
+                  </p>
+                ) : null}
                 <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
                   <Input
                     type="password"
@@ -183,6 +191,11 @@ export function BlueskyAccountsSection(props: BlueskyAccountsSectionProps) {
                       <RefreshCw className="mr-1 h-3.5 w-3.5" />
                       Test
                     </Button>
+                    {blockedReason ? (
+                      <Button size="sm" disabled={props.busy} onClick={() => void props.onResume(account)}>
+                        Resume posting
+                      </Button>
+                    ) : null}
                     <Button
                       size="sm"
                       variant="outline"

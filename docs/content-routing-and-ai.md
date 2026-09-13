@@ -1,7 +1,7 @@
 # Content routing, moderation, deduplication, and AI
 
 Since schema v5, Image Alt Text is an explicit opt-in and there is an
-explicit moderation dry-run flag (current schema is **v7**). Its provider,
+explicit moderation dry-run flag (current schema is **v8**). Its provider,
 model, optional base URL, output limit, purpose, and privacy description are
 stored in `ai`. Destination overrides can inherit, enable, or disable it.
 Translation, summarization, cleanup/rewrite, and hashtag suggestions have

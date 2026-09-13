@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import axios from 'axios';
 import api, { type ConfigVersion, isConfigConflict, withConfigVersion } from '../../api/client';
 import { createLatestRequestTracker } from '../../lib/latest-request';
 import type { BlueskyAccountFormState, BlueskyAccountView } from './types';
@@ -71,7 +72,11 @@ export function useBlueskyAccounts({ authenticated, onError }: UseBlueskyAccount
       try {
         return await mutation();
       } catch (mutationError) {
-        if (isConfigConflict(mutationError)) await refresh();
+        if (
+          isConfigConflict(mutationError) ||
+          (axios.isAxiosError(mutationError) && mutationError.response?.status === 409 &&
+            mutationError.response.data?.code === 'BSKY_ACCOUNT_RUNTIME_CONFLICT')
+        ) await refresh();
         throw mutationError;
       }
     },
@@ -120,6 +125,27 @@ export function useBlueskyAccounts({ authenticated, onError }: UseBlueskyAccount
         const updated = normalizeAccount(response.data.account);
         rememberVersion(updated);
         setAccounts((current) => current.map((entry) => (entry.id === account.id ? updated : entry)));
+        return updated;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [rememberVersion, withConflictRefresh],
+  );
+
+  const resumeAccount = useCallback(
+    async (account: BlueskyAccountView) => {
+      setBusy(true);
+      try {
+        const response = await withConflictRefresh(() =>
+          api.post<{ account: BlueskyAccountView }>(
+            `/api/bluesky-accounts/${account.id}/resume`,
+            withConfigVersion({ runtimeRevision: account.health?.runtimeRevision ?? 0 }, configVersionFromAccount(account)),
+          ),
+        );
+        const updated = normalizeAccount(response.data.account);
+        rememberVersion(updated);
+        setAccounts((current) => current.map((entry) => entry.id === account.id ? updated : entry));
         return updated;
       } finally {
         setBusy(false);
@@ -177,6 +203,7 @@ export function useBlueskyAccounts({ authenticated, onError }: UseBlueskyAccount
     refresh,
     createAccount,
     validateAccount,
+    resumeAccount,
     rotateCredentials,
     deleteAccount,
   };

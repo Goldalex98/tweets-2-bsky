@@ -1,3 +1,4 @@
+import { managedBlueskyFetch } from './services/bluesky-mutation-guard.js';
 import { BskyAgent, RichText } from '@atproto/api';
 import type { BlobRef } from '@atproto/api';
 import { Scraper, type Profile as TwitterProfile } from '@the-convocation/twitter-scraper';
@@ -206,10 +207,7 @@ const normalizeBskyServiceUrl = (value?: string): string => {
 type GraphemeSegmenter = {
   segment(input: string): Iterable<{ segment: string }>;
 };
-type GraphemeSegmenterConstructor = new (
-  locale: string,
-  options: { granularity: 'grapheme' },
-) => GraphemeSegmenter;
+type GraphemeSegmenterConstructor = new (locale: string, options: { granularity: 'grapheme' }) => GraphemeSegmenter;
 
 const getGraphemeSegments = (value: string): string[] => {
   const SegmenterCtor = (Intl as typeof Intl & { Segmenter?: GraphemeSegmenterConstructor }).Segmenter;
@@ -600,7 +598,10 @@ const loginBlueskyAgent = async (args: {
   }
 
   const serviceUrl = normalizeBskyServiceUrl(args.bskyServiceUrl);
-  const agent = new BskyAgent({ service: serviceUrl });
+  const agent = new BskyAgent({
+    service: serviceUrl,
+    fetch: managedBlueskyFetch({ bskyIdentifier: identifier, bskyServiceUrl: serviceUrl }),
+  });
   await agent.login({ identifier, password });
 
   const sessionResponse = await agent.com.atproto.server.getSession();
@@ -938,7 +939,10 @@ export const syncBlueskyProfileFromTwitter = async (args: {
     };
   }
 
-  const agent = new BskyAgent({ service: bsky.serviceUrl });
+  const agent = new BskyAgent({
+    service: bsky.serviceUrl,
+    fetch: managedBlueskyFetch({ bskyIdentifier: args.bskyIdentifier, bskyServiceUrl: bsky.serviceUrl }),
+  });
   await agent.login({
     identifier: args.bskyIdentifier,
     password: args.bskyPassword,

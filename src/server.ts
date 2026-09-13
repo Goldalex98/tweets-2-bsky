@@ -36,6 +36,7 @@ import {
   listBlueskyAccountViews,
   rotateBlueskyAccountCredentials,
   validateExistingBlueskyAccount,
+  resumeBlueskyAccount,
 } from './services/bluesky-account-service.js';
 import {
   applyValidatedAccountIdentity,
@@ -2558,13 +2559,15 @@ app.use(
       );
     },
     canMutateAccount: (requester, accountId) => {
+      const currentUser = getConfig().users.find((entry) => entry.id === requester.id);
+      if (!currentUser) return false;
       const user: AuthenticatedUser = {
         id: requester.id,
-        isAdmin: requester.isAdmin,
-        permissions: requester.isAdmin
-          ? ADMIN_USER_PERMISSIONS
-          : (getConfig().users.find((entry) => entry.id === requester.id)?.permissions ??
-            getDefaultUserPermissions('user')),
+        isAdmin: currentUser.role === 'admin',
+        permissions:
+          currentUser.role === 'admin'
+            ? ADMIN_USER_PERMISSIONS
+            : (currentUser.permissions ?? getDefaultUserPermissions('user')),
       };
       return canMutateBlueskyAccount(getConfig(), user, accountId, {
         canManageAllMappings: canManageAllMappings(user),
@@ -2584,6 +2587,8 @@ app.use(
         saveCanonicalConfig,
       ),
     validateAccount: (config, accountId) => validateExistingBlueskyAccount(config, accountId, saveCanonicalConfig),
+    resumeAccount: resumeBlueskyAccount,
+    isRestoreRestartRequired,
     rotateCredentials: (config, input) => rotateBlueskyAccountCredentials(config, input, saveCanonicalConfig),
     deleteAccount: (config, accountId) => deleteBlueskyAccount(config, accountId, saveCanonicalConfig),
     sendSafeError,
@@ -6483,8 +6488,18 @@ app.use((_req, res) => {
   res.sendFile(path.join(staticAssetsDir, 'index.html'));
 });
 
+let httpServer: ReturnType<typeof app.listen> | undefined;
+
+export function stopServer(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!httpServer) return resolve();
+    httpServer.close((error) => (error ? reject(error) : resolve()));
+    httpServer.closeIdleConnections();
+  });
+}
+
 export function startServer() {
-  app.listen(PORT, HOST, () => {
+  httpServer = app.listen(PORT, HOST, () => {
     console.log(`🚀 Web interface running at http://localhost:${PORT}`);
     if (HOST === '127.0.0.1' || HOST === '::1' || HOST === 'localhost') {
       console.log(`🔒 Bound to ${HOST} (local-only). Use Tailscale Serve or a reverse proxy for remote access.`);

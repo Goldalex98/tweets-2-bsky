@@ -95,7 +95,7 @@ export function AttributionPolicyFields({ idPrefix, form, sourceCount, onFormCha
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
-          className="h-4 w-4 accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className="h-4 w-4 accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           checked={attribution.rootPostsOnly}
           onChange={(event) => updateAttribution({ rootPostsOnly: event.target.checked })}
         />
@@ -104,7 +104,7 @@ export function AttributionPolicyFields({ idPrefix, form, sourceCount, onFormCha
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
-          className="h-4 w-4 accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className="h-4 w-4 accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           checked={attribution.linkSource}
           onChange={(event) => updateAttribution({ linkSource: event.target.checked })}
         />
@@ -113,7 +113,7 @@ export function AttributionPolicyFields({ idPrefix, form, sourceCount, onFormCha
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
-          className="h-4 w-4 accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className="h-4 w-4 accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           checked={form.postingPolicy.appendOriginalPostLink}
           onChange={(event) =>
             onFormChange((current) => ({
@@ -231,7 +231,7 @@ export function ProfileMutationField({
         <input
           id={checkboxId}
           type="checkbox"
-          className="mt-1 h-4 w-4 shrink-0 accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className="mt-1 h-4 w-4 shrink-0 accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           aria-describedby={descriptionId}
           checked={allowed}
           onChange={(event) =>

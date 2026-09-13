@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { QueueBatch, QueueItem } from '../../src/db.js';
+import { DestinationLeaseLostError, runWithDeliveryContext } from '../../src/services/delivery-context.js';
 import {
   type NormalizedDeliveryCheckpoint,
   NormalizedDeliveryService,
@@ -36,6 +37,43 @@ function queueItem(): QueueItem {
 }
 
 describe('NormalizedDeliveryService', () => {
+  test('late remote success after lease loss cannot finalize a successor queue claim', async () => {
+    const controller = new AbortController();
+    const events: string[] = [];
+    const service = new NormalizedDeliveryService({
+      clock: { now: () => 1000 },
+      findProcessedReply: () => null,
+      checkpoints: {
+        initialize: () => [],
+        list: () => [],
+        recordSuccess: () => events.push('checkpoint'),
+        finalize: () => events.push('finalize'),
+      },
+    });
+    const adapter = {
+      prepareText: async (text: string) => ({ text }),
+      downloadMedia: async () => Buffer.alloc(0),
+      uploadImage: async () => ({}),
+      uploadVideo: async () => ({}),
+      publish: async () => {
+        controller.abort(new DestinationLeaseLostError());
+        return { uri: 'at://redacted/post/one', cid: 'redacted-cid' };
+      },
+    };
+    const queued = {
+      mapping_id: 'destination',
+      bsky_identifier: 'destination.test',
+      destination_id: 'destination',
+      destination_key: 'destination',
+      twitter_username: 'source',
+      items: [queueItem()],
+    };
+    await expect(
+      runWithDeliveryContext({ controller, assertOwnership() {} }, () => service.deliver(adapter, queued)),
+    ).rejects.toThrow('Destination lease was lost');
+    expect(events).toEqual([]);
+  });
+
   test('resumes incomplete chunks and finalizes the checkpointed thread', async () => {
     const events: string[] = [];
     let checkpoints: NormalizedDeliveryCheckpoint[] = [

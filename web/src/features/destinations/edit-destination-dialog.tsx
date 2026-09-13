@@ -241,11 +241,11 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
             </div>
           </aside>
 
-          <div
+          <section
             ref={sectionPanelRef}
             tabIndex={-1}
             aria-label={`${SECTION_ITEMS.find((item) => item.id === activeSection)?.label ?? 'Section'} settings`}
-            className="min-h-0 overflow-y-auto p-5 outline-none"
+            className="min-h-0 overflow-y-auto p-5 outline-hidden"
           >
             {props.mapping && activeSection === 'overview' ? (
               <div className="space-y-5">
@@ -331,7 +331,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                         @{username}
                         <button
                           type="button"
-                          className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                          className="rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                           aria-label={`Remove @${username}`}
                           disabled={props.busy}
                           onClick={() => props.onRemoveSource(username)}
@@ -342,6 +342,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                     ))}
                   </div>
                   {props.parseSummary.invalid.map((entry, index) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: Duplicate invalid inputs are stateless diagnostics and require distinct keys.
                     <p key={`${entry.input}-${index}`} role="alert" className="text-xs text-red-600">
                       {entry.input}: {entry.reason}
                     </p>
@@ -477,7 +478,7 @@ export function EditDestinationDialog(props: EditDestinationDialogProps) {
                 </div>
               </div>
             ) : null}
-          </div>
+          </section>
         </div>
 
         <footer className="flex shrink-0 justify-end gap-2 border-t p-5">

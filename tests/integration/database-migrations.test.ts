@@ -141,6 +141,7 @@ test('upgrades a representative legacy database twice idempotently', async () =>
       { version: 9, name: 'delivery-diagnostics', applied_at: expect.any(Number) },
       { version: 10, name: 'bluesky-account-runtime-state', applied_at: expect.any(Number) },
       { version: 11, name: 'route-initial-import-state', applied_at: expect.any(Number) },
+      { version: 12, name: 'bluesky-account-blocks', applied_at: expect.any(Number) },
     ]);
     expect(second.migrations).toEqual(migrations);
     expect(first.initialImportState).toEqual({

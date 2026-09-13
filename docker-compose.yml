@@ -4,9 +4,10 @@
 # Generate: openssl rand -hex 32
 services:
   tweets-2-bsky:
-    image: ghcr.io/goldalex98/tweets-2-bsky:latest
+    image: ${TWEETS2BSKY_IMAGE:-ghcr.io/goldalex98/tweets-2-bsky:latest}
     container_name: tweets-2-bsky
     restart: unless-stopped
+    stop_grace_period: 60s
     ports:
       - "3000:3000"
     environment:

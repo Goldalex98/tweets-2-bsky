@@ -193,6 +193,7 @@ function FeedPostCard({
       </div>
       <p className="mb-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
         {segments.map((segment, index) => {
+          // biome-ignore lint/suspicious/noArrayIndexKey: Segment positions are fixed within an immutable published record and may contain repeated text.
           if (segment.type === 'text') return <span key={`${post.bskyUri}-${index}`}>{segment.text}</span>;
           const tone =
             segment.type === 'mention'
@@ -200,6 +201,7 @@ function FeedPostCard({
               : segment.type === 'tag'
                 ? 'text-indigo-600 dark:text-indigo-300'
                 : 'text-sky-600 dark:text-sky-300';
+          // biome-ignore lint/suspicious/noArrayIndexKey: Segment positions are fixed within an immutable published record and may contain repeated links.
           return <a key={`${post.bskyUri}-${index}`} className={cn('hover:underline', tone)} href={segment.href} target="_blank" rel="noreferrer">{segment.text}</a>;
         })}
       </p>
@@ -209,6 +211,7 @@ function FeedPostCard({
             const href = media.url || media.thumb;
             if (!href) return null;
             return (
+              // biome-ignore lint/suspicious/noArrayIndexKey: Attachment order is immutable per record; the same image can occur twice.
               <a key={`${post.bskyUri}-media-${index}`} className="block overflow-hidden rounded-lg border border-border/70 bg-muted" href={href} target="_blank" rel="noreferrer">
                 {media.thumb || media.type === 'image' ? (
                   <img className="h-56 w-full object-cover" src={media.thumb || media.url} alt={media.alt || media.title || 'Bluesky media'} loading="lazy" />

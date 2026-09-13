@@ -19,7 +19,7 @@ in `.agents/skills/`.
 - Human reference: use `docs/architecture.md`, `docs/operations.md`, and the
   other focused documents under `docs/` for deeper behavior and runbooks.
 
-## Identity (schema v7)
+## Identity (schema v8)
 
 The canonical persisted model is:
 

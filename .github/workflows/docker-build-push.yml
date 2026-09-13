@@ -139,7 +139,24 @@ jobs:
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.platform }}
           outputs: type=image,name=${{ needs.plan.outputs.image }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: Export digest
+      - name: Set up Bun for exact-image verification
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+
+      # Each matrix job is native to its architecture. Digests are not handed
+      # to the tag-promotion job until the actual artifact passes runtime tests.
+      - name: Verify fresh image native modules, Chromium, and readiness
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: bun scripts/validate-image.ts --image "$IMAGE"
+
+      - name: Verify isolated real-backend API fixtures in the candidate runtime
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: bun scripts/container-backend-tests.ts --image "$IMAGE"
+
+      - name: Export verified digest
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { BskyAgent } from '@atproto/api';
 import { getConfig } from './config-manager.js';
+import { assertDeliveryActive } from './services/delivery-context.js';
+import { isBlueskyAccountBlocked, managedBlueskyFetch } from './services/bluesky-mutation-guard.js';
 import { blueskyAccountRuntimeService, runtimeStateService } from './db.js';
 import { getCanonicalDestinationKey, normalizeBlueskyServiceUrl } from './mapping-helpers.js';
 
@@ -44,10 +46,7 @@ export function clearCachedAgent(mapping: AgentMappingIdentity): void {
  * leaves the destination permanently broken until the process restarts, since
  * `getAgent` keeps handing back the dead agent.
  */
-export function invalidateCachedAgentOnAuthFailure(
-  mapping: AgentMappingIdentity,
-  errorCategory: string,
-): boolean {
+export function invalidateCachedAgentOnAuthFailure(mapping: AgentMappingIdentity, errorCategory: string): boolean {
   if (errorCategory !== 'bsky-auth') return false;
   const before = activeAgents.size;
   clearCachedAgentsForIdentity(mapping);
@@ -64,11 +63,13 @@ export async function getAgent(mapping: {
   bskyCanonicalHandle?: string;
 }): Promise<BskyAgent | null> {
   const serviceUrl = mapping.bskyServiceUrl || 'https://bsky.social';
+  if (isBlueskyAccountBlocked(mapping.bskyAccountId))
+    throw new Error('Bluesky account is blocked; explicit resume is required.');
   const cacheKey = agentCacheKey(mapping);
   const existing = activeAgents.get(cacheKey);
   if (existing) return existing;
 
-  const agent = new BskyAgent({ service: serviceUrl });
+  const agent = new BskyAgent({ service: serviceUrl, fetch: managedBlueskyFetch(mapping) });
   try {
     await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
     activeAgents.set(cacheKey, agent);
@@ -76,6 +77,7 @@ export async function getAgent(mapping: {
     if (mapping.bskyAccountId) blueskyAccountRuntimeService.recordSuccess(mapping.bskyAccountId, 'login');
     return agent;
   } catch (err) {
+    assertDeliveryActive();
     const message = err instanceof Error ? err.message : String(err);
     if (mapping.id) {
       runtimeStateService.recordDestinationFailure(mapping.id, 'login', message);

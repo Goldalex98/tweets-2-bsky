@@ -1,3 +1,4 @@
+import { assertDeliveryActive, commitDeliveryState, runWithDeliveryContext } from './delivery-context.js';
 import type { DigestPolicy } from '../config/schemas.js';
 import type { DigestEntry, DigestJob } from '../db.js';
 import type { DigestChunk, DigestPreview } from '../digest.js';
@@ -80,12 +81,7 @@ export interface DigestWorkerDependencies<
     ): DigestJob | null;
     checkpoint(id: string, claimToken: string, checkpoint: number, contentHash: string): boolean;
     releaseEntries(id: string, claimToken: string, entryIds: readonly number[]): boolean;
-    complete(
-      id: string,
-      claimToken: string,
-      nextRunAt: number,
-      deliveredEntryIds?: readonly number[],
-    ): boolean;
+    complete(id: string, claimToken: string, nextRunAt: number, deliveredEntryIds?: readonly number[]): boolean;
     fail(id: string, claimToken: string, error: unknown): boolean;
   };
   entries: {
@@ -129,6 +125,7 @@ export interface DigestWorkerDependencies<
     release(destinationId: string): void;
   };
   onWorkerError?(error: unknown): void;
+  settleWithOwnership?(destinationKey: string, settle: () => void): boolean;
 }
 
 export interface DigestSnapshotCohort {
@@ -181,6 +178,8 @@ export class DigestWorkerService<
   Mapping extends DigestWorkerMapping,
 > {
   private started = false;
+  private stopping = false;
+  private readonly controllers = new Map<string, AbortController>();
   private readonly running = new Set<Promise<void>>();
   private readonly leasedDestinations = new Set<string>();
 
@@ -204,7 +203,9 @@ export class DigestWorkerService<
   /** Keeps leases for in-flight digest runs alive while a slow run delivers. */
   renewLeases(): void {
     if (!this.dependencies.leases) return;
-    for (const id of this.leasedDestinations) this.dependencies.leases.renew(id);
+    for (const id of this.leasedDestinations) {
+      if (!this.dependencies.leases.renew(id)) this.controllers.get(id)?.abort(new Error('Destination lease was lost'));
+    }
   }
 
   /** Excludes destinations locked in this process and by other replicas. */
@@ -241,11 +242,7 @@ export class DigestWorkerService<
     for (const route of config.routes) {
       if (route.delivery?.mode !== 'digest' || !route.delivery.digest.enabled) continue;
       if (!jobs.some((job) => job.routeId === route.id)) {
-        this.dependencies.jobs.arm(
-          route.destinationId,
-          route.id,
-          this.dependencies.nextRun(route.delivery.digest),
-        );
+        this.dependencies.jobs.arm(route.destinationId, route.id, this.dependencies.nextRun(route.delivery.digest));
       }
     }
   }
@@ -257,11 +254,7 @@ export class DigestWorkerService<
     const destination = config.destinations.find((candidate) => candidate.id === job.destinationId);
     const mapping = config.mappings.find((candidate) => candidate.id === job.destinationId);
     if (route?.delivery?.mode !== 'digest' || !destination || !mapping) {
-      this.dependencies.jobs.fail(
-        job.id,
-        job.claimToken,
-        new Error('Digest route or destination is unavailable.'),
-      );
+      this.dependencies.jobs.fail(job.id, job.claimToken, new Error('Digest route or destination is unavailable.'));
       return;
     }
 
@@ -279,12 +272,7 @@ export class DigestWorkerService<
         })
         .filter((entry) => entry.jobId === job.id && job.entryIds.includes(entry.id));
       if (claimed.length === 0) {
-        this.dependencies.jobs.complete(
-          job.id,
-          job.claimToken,
-          this.dependencies.nextRun(route.delivery.digest),
-          [],
-        );
+        this.dependencies.jobs.complete(job.id, job.claimToken, this.dependencies.nextRun(route.delivery.digest), []);
         return;
       }
 
@@ -315,6 +303,7 @@ export class DigestWorkerService<
         })),
       );
       for (const chunk of preview.chunks) {
+        assertDeliveryActive();
         const saved = checkpoints[chunk.index];
         if (saved?.completedAt && saved.uri && saved.cid) continue;
         const prior = checkpoints[chunk.index - 1];
@@ -323,9 +312,7 @@ export class DigestWorkerService<
           (checkpoints[0]?.uri && checkpoints[0]?.cid
             ? { uri: checkpoints[0].uri, cid: checkpoints[0].cid }
             : undefined);
-        const parent =
-          prior?.tail ??
-          (prior?.uri && prior?.cid ? { uri: prior.uri, cid: prior.cid } : undefined);
+        const parent = prior?.tail ?? (prior?.uri && prior?.cid ? { uri: prior.uri, cid: prior.cid } : undefined);
         const response = await session.publish({
           destinationId: destination.id,
           runKey,
@@ -333,16 +320,18 @@ export class DigestWorkerService<
           createdAt: new Date(job.nextRunAt + chunk.index).toISOString(),
           ...(root && parent ? { reply: { root, parent } } : {}),
         });
-        this.dependencies.checkpoints.recordSuccess({
-          destinationId: destination.id,
-          externalPostId: runKey,
-          chunkIndex: chunk.index,
-          uri: response.uri,
-          cid: response.cid,
-          root: root ?? response,
-          parent,
-          tail: response,
-        });
+        commitDeliveryState(() =>
+          this.dependencies.checkpoints.recordSuccess({
+            destinationId: destination.id,
+            externalPostId: runKey,
+            chunkIndex: chunk.index,
+            uri: response.uri,
+            cid: response.cid,
+            root: root ?? response,
+            parent,
+            tail: response,
+          }),
+        );
         if (!this.dependencies.jobs.checkpoint(job.id, job.claimToken, chunk.index + 1, chunk.contentHash)) {
           throw new Error('Digest checkpoint claim was lost.');
         }
@@ -367,22 +356,40 @@ export class DigestWorkerService<
 
   /** Caps a claim at the route's configured digest size. */
   private maxEntriesFor(job: DigestJob): number {
-    const route = this.dependencies
-      .getConfig()
-      .routes.find((candidate) => candidate.id === job.routeId);
+    const route = this.dependencies.getConfig().routes.find((candidate) => candidate.id === job.routeId);
     return route?.delivery?.digest.maxEntries ?? 1;
   }
 
   scheduleNext(): boolean {
+    if (this.stopping) return false;
     const job = this.claimJob();
     if (!job) return false;
     this.activeDestinations.add(job.destinationId);
-    const running = this.execute(job)
+    const controller = new AbortController();
+    this.controllers.set(job.destinationId, controller);
+    const running = runWithDeliveryContext(
+      {
+        controller,
+        commit: (operation) => {
+          const committed = this.dependencies.settleWithOwnership?.(job.destinationId, operation);
+          if (committed === undefined) operation();
+          return committed ?? true;
+        },
+        assertOwnership: () => {
+          if (this.leasedDestinations.has(job.destinationId) && !this.dependencies.leases?.renew(job.destinationId)) {
+            controller.abort(new Error('Destination lease was lost'));
+            controller.signal.throwIfAborted();
+          }
+        },
+      },
+      () => this.execute(job),
+    )
       .catch((error) => this.dependencies.onWorkerError?.(error))
       .finally(() => {
         this.activeDestinations.delete(job.destinationId);
         this.releaseLease(job.destinationId);
         this.running.delete(running);
+        this.controllers.delete(job.destinationId);
       });
     this.running.add(running);
     return true;
@@ -399,8 +406,25 @@ export class DigestWorkerService<
     void this.runForever();
   }
 
-  private async runForever(): Promise<never> {
-    while (true) {
+  async stop(): Promise<void> {
+    this.stopping = true;
+    for (const controller of this.controllers.values()) controller.abort(new Error('Digest worker is stopping'));
+    const renewal = setInterval(() => {
+      try {
+        this.renewLeases();
+      } catch (error) {
+        this.dependencies.onWorkerError?.(error);
+      }
+    }, 1000);
+    try {
+      await this.waitForIdle();
+    } finally {
+      clearInterval(renewal);
+    }
+  }
+
+  private async runForever(): Promise<void> {
+    while (!this.stopping) {
       try {
         this.renewLeases();
         this.scheduleNext();

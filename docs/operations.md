@@ -24,6 +24,10 @@ Rotating an app password updates the encrypted account secret, evicts the cached
 
 Deleting an account that is still linked to a destination returns `409` — reassign that destination to another account (destination editor → Overview → Posting account) or delete the destination first.
 
+A structured Bluesky takedown/deactivation response durably blocks that managed account. Its destinations remain enabled and source ingestion continues, but queue/digest claims and external profile, label, pin, follow, and post mutations are blocked. Ordinary authentication failures do not imply permanent suspension. The reason and time appear in the existing account panel.
+
+After resolving the provider restriction, use the explicit **Resume** action. Resume validates credentials read-only and checks both configuration and runtime revisions, permissions, and pending-restore state before clearing the block. A successful ordinary **Validate** or credential rotation does not resume posting. Stale runtime/configuration results require refreshing and deliberately retrying; the dashboard does not replay the action automatically. This operational block lives in SQLite, separate from canonical JSON and the destination enabled setting.
+
 ## Bulk destination actions
 
 From the destinations list, select up to 50 destinations and apply pause/resume (`/api/destinations/bulk/state`), folder moves (`/api/destinations/bulk/folder`), or backfill (`/api/destinations/bulk/backfill`). Backfill requires typing `BACKFILL <n>` where `<n>` is the selected count. Bulk mutations use the same config revision OCC as single edits.
@@ -67,6 +71,10 @@ See [platform rate limits](rate-limits.md) for what these defaults are sized aga
 ## Queue, checkpoints, and health
 
 Discovery writes durable SQLite queue entries before Bluesky delivery. Thread checkpoints resume at the first missing chunk after restart. Pending items can be cancelled, failed items retried or cleared, and processing items are immutable.
+
+Authentication failure before an item is attempted defers it for five minutes without consuming its retry budget. Attempted failures retain exponential backoff and parking; malformed payloads count as attempts. Deferral preserves the queue's policy snapshot and checkpoints. SQLite waits up to five seconds for ordinary write contention before reporting a busy failure.
+
+Delivery deadlines cancel scoped work and retain destination ownership until that work settles. Losing a destination lease aborts the old owner and prevents further publication; crash recovery respects live leases. Shutdown stops new claims, cancels/drains active workers, and preserves unsettled durable rows for restart. An uncancellable provider operation may keep the destination occupied until settlement or process termination. Do not clear a live lease or start a second writer to force progress.
 
 `GET /healthz` and `GET /readyz` are redacted public probes. Authenticated `/api/health/details` includes queue, scheduler, source, destination, cookie-slot, and digest state without secret values. Admin metrics are available at `/api/metrics`; Prometheus output requires `ENABLE_PROMETHEUS_METRICS=true`.
 
