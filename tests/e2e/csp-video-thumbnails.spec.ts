@@ -81,7 +81,9 @@ test('video thumbnails follow the allowed CDN redirect while other image origins
     await expect(page.getByAltText('Denied video thumbnail')).toHaveJSProperty('complete', true);
     await expect(page.getByAltText('Denied video thumbnail')).toHaveJSProperty('naturalWidth', 0);
     await expect.poll(() => violations).toEqual([{ directive: 'img-src', host: 'video.bsky.app' }]);
-    expect(routed.sort()).toEqual([original, redirected, deniedOriginal].sort());
+    // Chromium may repeat a thumbnail request; require every expected hop, not
+    // a fixed request count. Unexpected URLs are still recorded and rejected.
+    expect([...new Set(routed)].sort()).toEqual([original, redirected, deniedOriginal].sort());
     // The denied redirect must be stopped by CSP before reaching routing/network.
     expect(unexpected).toEqual([]);
     expect(interceptionErrors).toEqual([]);
