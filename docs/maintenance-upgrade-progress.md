@@ -1,6 +1,6 @@
 # Maintenance upgrade progress
 
-Updated: 2026-09-13. Goal active. Implementation and independent reviews are complete; release, native arm64 validation, published-image acceptance, and production acceptance remain incomplete.
+Updated: 2026-09-13. Execution resumed after Portainer login setup. Implementation and independent reviews are complete; release, native arm64 validation, published-image acceptance, and production acceptance remain incomplete.
 
 ## Execution identity
 
@@ -16,7 +16,7 @@ Updated: 2026-09-13. Goal active. Implementation and independent reviews are com
 
 | Agent | Owned work | Current action |
 | --- | --- | --- |
-| Main orchestrator | Integration, deployment discovery, Git/release/deploy, final verification | Obtain pending Portainer credential; guard both production updaters before push; copied-volume rehearsal, release, and production acceptance |
+| Main orchestrator | Integration, deployment discovery, Git/release/deploy, final verification | Updater guards established; push integrated changes, verify release images, then copied-volume rehearsal and production acceptance |
 | dependency_plan | Manifest/lockfile, Dockerfile, workflows, runtime checker, image validation | Implementation and local validation complete; native arm64 and published-image evidence pending |
 | pipeline_plan | Pipeline/database/services/adapters and related tests | Implementation and independent reviews complete |
 | deployment_plan | Frontend/config/browser runner and E2E | Implementation and local browser validation complete |
@@ -33,7 +33,7 @@ Workers must not stage/commit/push. Main performs all remote mutations. Keep inc
 | 0: original work preservation | PASS | Original Git-normalized diff empty; original AI blob equals HEAD; no destructive checkout cleanup |
 | 0: fixture screenshots | PASS | Frozen baseline: 4 Playwright tests, 16 desktop/mobile light/dark captures under test-results/maintenance-baseline |
 | 0: production target/digest/data/key/backups | PARTIAL | Target, stack, image digest, volume, identity fingerprint, and protected WAL-consistent baseline snapshot verified by main; copied-volume rehearsal and final quiesced backup remain pending |
-| 0: prevent accidental updater deployment | OPEN | Git auto-update every 15 minutes and Watchtower polling every 3600 seconds are still enabled; both must be guarded before any release-triggering push |
+| 0: prevent accidental updater deployment | GUARDED | Portainer stack2 Git auto-update disabled with metadata-only API; verified same healthy app ID/image. Watchtower stopped and original running state recorded. Old container still names latest but cannot be changed by either updater; exact Compose digest reference will be set during cutover |
 | 0: schema documentation alignment | IMPLEMENTED | AGENTS/README/architecture/Cursor identity mirror corrected to v8; historical v7 migration section retained |
 | 1: all original security advisories | LOCAL PASS | Frozen install completed without changes; audit reports zero vulnerabilities across 724 packages |
 | 1: release prerequisites and exact-image/native smoke | PARTIAL | Local release validation passed; native arm64 and exact published image remain open |
@@ -77,24 +77,31 @@ Production facts below are from the main task's verified remote investigation; t
 
 - Production app 3.6.3 is healthy. Earlier public checks returned `/healthz` 200 with database OK, scheduler running, and restartRequired false; `/readyz` 200 ready. Authenticated production UI showed AI off. Old-version health does not satisfy upgraded-deployment acceptance.
 - SSH access now works through the ignored owner-only helper with Windows-user DPAPI credentials, six-hour freshness enforcement, and existing verified known_hosts. Do not print credential contents or invoke askpass independently. Main owns credential lifecycle and all remote actions.
-- Portainer is version 2.39.5. Its installed public TLS certificate is trusted explicitly over verified SSH; no browser security bypass is required. The Portainer credential handoff is still pending.
+- Portainer is version 2.39.5. Its installed public TLS certificate is trusted explicitly over verified SSH; no browser security bypass is required. The Portainer credential handoff is complete and authenticated inspection succeeded.
 - Existing Git-managed Compose stack: ID 2, name `tweets2bsky`, endpoint ID 3, project path `/data/compose/2`, entry point `docker-compose.portainer.yml`. Container: `tweets-2-bsky`. Existing persistent volume: `tweets2bsky_data`.
 - Running old image digest: `sha256:7755e700137b1bdb7fdd69a924f7f18f148f73a4d5e147ba6ecce97c71e9de88`.
-- Two automatic deployment mechanisms remain enabled: Portainer Git polling every 15 minutes; Watchtower-enabled container label with Watchtower polling every 3600 seconds. Guard both before push. The prepared Portainer metadata-only disable action must not redeploy the old app.
+- Discovered two automatic deployment mechanisms: Portainer Git polling every 15 minutes and Watchtower polling every 3600 seconds. Both are now guarded as recorded below; neither guard redeployed the old app.
 - Protected WAL-consistent live baseline snapshot: `/home/ubuntu/.local/state/tweets2bsky-maintenance/baseline-20260913T134653Z/snapshot`. Baseline config schema 8; database version 11. Counts: queue 0, processed 8930, checkpoints 12705, digest entries 0, jobs 0.
 - Baseline identity fingerprint: `8c723dac2bfa545e553d7b455aea046cfcd209b6fd77c3b6469ccc959744bea0`. No secret values belong in this ledger.
 - Automatic approval review rejected transfer of production config, database, and encryption-key material to a local owner-only ignored folder because specific authorization for that sensitive transfer was absent. No transfer happened. The main task will validate the protected snapshot on the server against the published digest, keeping production data and secrets there; this validation remains open.
-- SSH credential existence is confirmed; the user still needs the separate Portainer setup command. No remote configuration, updater, or application changes have been made.
+- SSH and Portainer authentication work. Only updater controls have changed; the production application remains on its original image and configuration.
 - The live baseline snapshot is not a final cutover backup. Actual copied-volume rehearsal and a final quiesced, rollback-ready backup are still pending.
 - GitHub main was verified at d824648 with no remote mutation. Release-bearing local commit 76c209c is ready; push, workflow success, generated tag/release, matching package/README version, and registry manifests remain pending.
 - Remote history refreshed after local commit: main still d824648, zero upstream-only commits, one local implementation commit. AI source diff against main remains empty.
 - The earlier browser tab is no longer available. A replacement production tab currently shows Sign in and is retained for handoff; authenticated post-upgrade acceptance still requires a valid user-provided session.
 - Private `test-results/deployment-access/server-copy-test.py` is prepared for the verified published digest. It runs only the image's existing copy/migrate/restart entrypoints with network disabled, no ports, read-only root, disposable labeled resources, and the snapshot mounted read-only. The encryption key stays in the server process environment. It verifies source fingerprints and app ID/image preservation, and reports cleanup failures explicitly. Python syntax and mocked isolation, timeout, ownership, hex/base64 key, optional `.jwt-secret`, and unknown-file checks pass. This is helper preparation, not actual production-copy acceptance.
-- Access revalidation across the last two goal turns found no Portainer credential file. Independent implementation, local commit, remote-history refresh, and deployment-helper preparation progressed; no release-triggering push is permitted until both updaters are controlled. Completion remains unproven.
+- Access revalidation across three consecutive goal turns found no Portainer credential file, including the final existence-only check. All delegated work is terminal; the implementation and latest committed evidence are 76c209c and 7986a97. Independent local work and helper preparation are finished. The goal is blocked until user-supplied Portainer authentication is available; no release-triggering push is permitted until both updaters are controlled. Completion remains unproven. Resume the full release/deployment/acceptance scope after access is supplied; do not repeat completed suites without a relevant change or failure.
 
 ## Old-release cutover constraints
 
-The cutover reviewer inspected deployed ref `d824648569450d0dcadc42cf84a8b796195055a3`, not the new implementation. No production control has been changed.
+### Access and updater guard after user handoff
+
+- Portainer Inspect succeeded using the supplied login; existing stack/environment/volume/source match the discovered target.
+- `DisableAutoUpdate` succeeded; stack state fingerprint `703d728faea304c2aff9882684c8c611019f1d3e87bf211aa79addfd2d10d781`. API verification confirmed the existing app ID/image unchanged and healthy, with AutoUpdate null.
+- Verified Watchtower belongs to `container-updater`, image `nickfedor/watchtower:latest`, and was running. Stopped only that updater; confirmed it exited and the app remained healthy on the original image. Restore the shared updater after the deployed app has its explicit false Watchtower label.
+- The previous access-blocked audit is historical. Authenticated application-session setup, release/published-image tests, proxy quiescence, final backup, and actual deployment remain open.
+
+The cutover reviewer inspected deployed ref `d824648569450d0dcadc42cf84a8b796195055a3`, not the new implementation. Application scheduler/destination/ingestion controls have not been changed.
 
 - The old release has no global maintenance/drain API or signal-driven graceful drain handler. A 60-second Docker stop timeout alone does not establish that publishing drained.
 - Gate external mutations and inbound ingestion at the existing reverse proxy, retain a private operator path, and verify no direct-port bypass. Inspect the actual proxy configuration before selecting its concrete gate; this remains open.
