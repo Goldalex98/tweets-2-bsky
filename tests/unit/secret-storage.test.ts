@@ -71,8 +71,14 @@ describe('configuration secret encryption', () => {
       process.env.CONFIG_ENCRYPTION_KEY = KEY;
       expect(() => assertProductionEncryptionConfigured()).not.toThrow();
     } finally {
-      process.env.NODE_ENV = previousNodeEnv;
-      process.env.CONFIG_ENCRYPTION_KEY = previousKey;
+      // Assigning undefined to process.env stores the string "undefined" on
+      // Linux. Delete absent entries so later tests and children stay isolated.
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousKey === undefined) delete process.env.CONFIG_ENCRYPTION_KEY;
+      else process.env.CONFIG_ENCRYPTION_KEY = previousKey;
     }
+    expect(process.env.NODE_ENV).toBe(previousNodeEnv);
+    expect(process.env.CONFIG_ENCRYPTION_KEY).toBe(previousKey);
   });
 });

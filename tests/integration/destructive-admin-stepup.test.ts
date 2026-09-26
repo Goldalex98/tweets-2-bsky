@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test } from 'bun:test';
 import { createTemporaryDataDir } from '../helpers/temporary-data-dir.js';
 
@@ -7,12 +8,32 @@ test('destructive admin actions require typed confirmation and current password'
   const temporary = createTemporaryDataDir();
   const resultPath = path.join(temporary.path, 'destructive-stepup-result.json');
   const serverModuleUrl = new URL('../../src/server.ts', import.meta.url).href;
+  const updateScriptPath = fileURLToPath(new URL('../../update.sh', import.meta.url));
   try {
     const subprocess = Bun.spawn(
       [
         process.execPath,
         '--eval',
         `
+          const { mock } = await import('bun:test');
+          const { EventEmitter } = await import('node:events');
+          const childProcess = { ...await import('node:child_process') };
+          const updateSpawns = [];
+          // Exercise the authorization and launch path without running the real
+          // updater, which resets Git, writes .env, and starts application processes.
+          mock.module('node:child_process', () => ({
+            ...childProcess,
+            spawn(command, args, options) {
+              if (command !== 'bash' || args.length !== 1 || args[0] !== ${JSON.stringify(updateScriptPath)}) {
+                throw new Error('Unexpected test subprocess');
+              }
+              updateSpawns.push({ command, args, cwd: options.cwd, detached: options.detached });
+              const child = new EventEmitter();
+              child.pid = process.pid;
+              child.unref = () => child;
+              return child;
+            },
+          }));
           const { app } = await import(${JSON.stringify(serverModuleUrl)});
           const listener = app.listen(0, '127.0.0.1');
           await new Promise((resolve) => listener.once('listening', resolve));
@@ -86,6 +107,7 @@ test('destructive admin actions require typed confirmation and current password'
               headers: bearer,
               body: JSON.stringify({ confirmation: 'RUN_UPDATE' }),
             });
+            const updateSpawnsBeforeAuthorization = updateSpawns.length;
             const updateOk = await request('/api/update', {
               method: 'POST',
               headers: {
@@ -148,6 +170,8 @@ test('destructive admin actions require typed confirmation and current password'
               updateNoPasswordCode: updateNoPassword.body?.error?.code,
               updateAuthPassed: ![401, 403].includes(updateOk.status),
               updateStatus: updateOk.status,
+              updateSpawnsBeforeAuthorization,
+              updateSpawns,
               resetNoConfirm: resetNoConfirm.status,
               resetNoConfirmCode: resetNoConfirm.body?.error?.code,
               resetNoPassword: resetNoPassword.status,
@@ -176,6 +200,11 @@ test('destructive admin actions require typed confirmation and current password'
     expect(result.updateNoPassword).toBe(401);
     expect(result.updateNoPasswordCode).toBe('REAUTHENTICATION_FAILED');
     expect(result.updateAuthPassed).toBe(true);
+    expect(result.updateStatus).toBe(200);
+    expect(result.updateSpawnsBeforeAuthorization).toBe(0);
+    expect(result.updateSpawns).toEqual([
+      { command: 'bash', args: [updateScriptPath], cwd: path.dirname(updateScriptPath), detached: true },
+    ]);
     expect(result.resetNoConfirm).toBe(403);
     expect(result.resetNoConfirmCode).toBe('CONFIRMATION_REQUIRED');
     expect(result.resetNoPassword).toBe(401);
