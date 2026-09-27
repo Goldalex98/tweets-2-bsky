@@ -24,7 +24,7 @@ jobs:
       - name: Set up Node for release tooling and browser tests
         uses: actions/setup-node@v7
         with:
-          node-version: '22.22.2'
+          node-version: '24.21.0'
 
       - name: Cache Bun packages
         uses: actions/cache@v6
