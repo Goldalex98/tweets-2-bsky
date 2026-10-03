@@ -26,6 +26,7 @@ import {
 } from './backup-service.js';
 import { assertProductionEncryptionConfigured } from './secret-storage.js';
 import { clearCachedAgent, deleteAllPosts } from './bsky.js';
+import { DestinationBusyError } from './destination-maintenance.js';
 import { previewTextCapability, testAIProvider } from './ai-manager.js';
 import { contentSha256 } from './content-dedup.js';
 import { contentPolicyMetadataForPost, evaluateContentPolicy } from './content-policy.js';
@@ -5243,6 +5244,10 @@ app.post(
         message: `Deleted ${deletedCount} posts from ${mapping.bskyIdentifier} and cleared local cache.`,
       });
     } catch (err) {
+      if (err instanceof DestinationBusyError) {
+        res.status(409).json({ error: err.message, code: 'DESTINATION_BUSY' });
+        return;
+      }
       console.error('Failed to delete all posts:', sanitizeForDiagnostics(err));
       sendSafeError(res, 500, 'DELETE_ALL_POSTS_FAILED', err);
     }

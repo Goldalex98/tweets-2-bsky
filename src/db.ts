@@ -1916,6 +1916,16 @@ export const destinationLeaseService = {
     db.prepare('DELETE FROM destination_leases WHERE expires_at <= ?').run(now);
     return changesCount();
   },
+
+  /** Drops leases left by earlier owners sharing `prefix`, such as this host before a restart. */
+  releaseOwnersWithPrefix(prefix: string, keepOwnerId: string): number {
+    db.prepare("DELETE FROM destination_leases WHERE substr(owner_id, 1, length(?)) = ? AND owner_id != ?").run(
+      prefix,
+      prefix,
+      keepOwnerId,
+    );
+    return changesCount();
+  },
 };
 
 // ============================================================================

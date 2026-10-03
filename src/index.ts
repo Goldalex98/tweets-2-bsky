@@ -2337,7 +2337,13 @@ async function processTweets(
   updateJob(mirrorJobId, null);
 }
 
-import { blueskyLoginBackoffMs, getAgent, invalidateCachedAgentOnAuthFailure } from './bsky.js';
+import {
+  blueskyLoginBackoffMs,
+  destinationMaintenance,
+  getAgent,
+  invalidateCachedAgentOnAuthFailure,
+} from './bsky.js';
+import { DestinationBusyError, DestinationMaintenanceRunner, DetachedTaskRunner } from './destination-maintenance.js';
 
 // ============================================================================
 // Fetch Sweep + Post Queue Workers (daemon mode)
@@ -2677,7 +2683,7 @@ async function executeCanonicalXSourceSweep(
       const rawTweets = posts
         .map((post) => rawTweetByPost.get(`${source.id}\0${post.externalId}`))
         .filter((tweet): tweet is Tweet => Boolean(tweet));
-      await maybeSyncPinnedTweetFromTimeline(mapping, source.username, rawTweets, false, getMappingLogPrefix(mapping));
+      startTimelinePinSync(mapping, source.username, rawTweets);
       const policySnapshot = serializePolicySnapshot(createPolicySnapshot({ destination, route, ai: config.ai }));
       const digestMode = route.delivery?.mode === 'digest' && route.delivery.digest.enabled;
       const inserted = digestMode
@@ -2752,17 +2758,31 @@ const xSourceSweepService = new XSourceSweepService({
   listSourceStates: () => runtimeStateService.listSources(),
   saveSourceState: (state) => runtimeStateService.saveSource(state),
   executeCanonical: executeCanonicalXSourceSweep,
+  // Profile and daily pin sync write to Bluesky, so they run beside the sweep
+  // instead of inside it; a slow login or upload never delays X discovery.
   runHousekeeping: async (config) => {
-    for (const mapping of config.mappings) {
-      if (!mapping.enabled) continue;
-      const logPrefix = getMappingLogPrefix(mapping);
-      try {
-        await maybeSyncMappingProfileInBackground(mapping, false, logPrefix);
-        await maybeSyncPinnedTweetDaily(mapping, false, 'sweep-1', logPrefix);
-      } catch (error) {
-        console.error(`${logPrefix} ❌ Daily sync failed: ${describeError(error)}`);
+    detachedMaintenance.start('housekeeping', async () => {
+      for (const { id } of config.mappings) {
+        if (shutdownRequested) return;
+        // The run can outlast the sweep's config, so a password rotated or a
+        // destination disabled meanwhile is picked up before writing.
+        const mapping = getConfig().mappings.find((candidate) => candidate.id === id);
+        if (!mapping?.enabled) continue;
+        const logPrefix = getMappingLogPrefix(mapping);
+        // The daily pin check and a timeline pin sync must not both write the
+        // pin: wait out a running one, and keep new ones off this mapping.
+        housekeepingMappingIds.add(id);
+        try {
+          await detachedMaintenance.settle((key) => key === `pin:${id}`);
+          await maybeSyncMappingProfileInBackground(mapping, false, logPrefix);
+          await maybeSyncPinnedTweetDaily(mapping, false, 'sweep-1', logPrefix);
+        } catch (error) {
+          console.error(`${logPrefix} ❌ Daily sync failed: ${describeError(error)}`);
+        } finally {
+          housekeepingMappingIds.delete(id);
+        }
       }
-    }
+    });
   },
   getQueueCounts: () => postQueueService.getCounts(),
   incrementMetric: (name, amount = 1) => metricsService.increment(name, amount),
@@ -3816,6 +3836,42 @@ async function applyPinnedTweet(
   return true;
 }
 
+const detachedMaintenance = new DetachedTaskRunner((key, error) =>
+  logPipeline('Sweep', `❌ Background task ${key} failed: ${describeError(error)}`, true),
+);
+const isLeaseHoldingTask = (key: string): boolean => key.startsWith('pin:');
+// Mappings whose daily profile and pin sync is running; timeline pin syncs skip them.
+const housekeepingMappingIds = new Set<string>();
+let shutdownRequested = false;
+
+/**
+ * Mirrors a pin change seen in a fetched timeline without making the sweep
+ * wait for the Bluesky login and write. The write takes the destination lease
+ * so it never interleaves with a delivery; a busy destination is retried on a
+ * later sweep, since the pin stays unrecorded until it is applied.
+ */
+function startTimelinePinSync(mapping: AccountMapping, twitterUsername: string, tweets: Tweet[]): void {
+  const pinned = tweets.find((tweet) => tweet.isPin);
+  const pinnedTweetId = pinned ? pinned.id_str || pinned.id : undefined;
+  if (!pinnedTweetId || pinnedTweetId === mapping.lastPinnedTweetId) return;
+  const pinSource = resolvePinSourceForMapping(mapping, 'pin-sync-scheduled');
+  if (!pinSource || pinSource.toLowerCase() !== twitterUsername.toLowerCase()) return;
+  if (housekeepingMappingIds.has(mapping.id)) return;
+  const logPrefix = getMappingLogPrefix(mapping);
+  detachedMaintenance.start(`pin:${mapping.id}`, async () => {
+    const current = getConfig().mappings.find((candidate) => candidate.id === mapping.id);
+    if (!current?.enabled) return;
+    try {
+      await destinationMaintenance.run(current.id, () =>
+        maybeSyncPinnedTweetFromTimeline(current, twitterUsername, tweets, false, logPrefix),
+      );
+    } catch (error) {
+      if (error instanceof DestinationBusyError) return;
+      throw error;
+    }
+  });
+}
+
 // Zero-extra-request pin sync: the timeline fetch already marks the pinned
 // tweet (isPin), so scheduled cycles can mirror pin changes for free.
 async function maybeSyncPinnedTweetFromTimeline(
@@ -4441,16 +4497,26 @@ async function main(): Promise<void> {
   const handleShutdown = () => {
     if (shutdownStarted) return;
     shutdownStarted = true;
+    shutdownRequested = true;
     stopScheduler();
     stopDelivery();
     const deadline = setTimeout(() => {
       console.error('[Shutdown] Timed out draining; preserving durable work for recovery.');
       process.exit(1);
     }, 60_000);
-    void Promise.all([queueWorkerService.stop(), digestWorkerService.stop(), stopServer(), schedulerRun]).then(
+    void Promise.all([
+      queueWorkerService.stop(),
+      digestWorkerService.stop(),
+      stopServer(),
+      schedulerRun,
+      // Housekeeping holds no lease and stops between mappings; only the short
+      // lease-holding pin writes are waited for.
+      detachedMaintenance.settle(isLeaseHoldingTask),
+    ]).then(
       () => {
         clearTimeout(deadline);
         destinationLeaseService.releaseOwner(RUNTIME_OWNER_ID);
+        destinationLeaseService.releaseOwner(destinationMaintenance.ownerId);
         process.exit(0);
       },
       (error) => {
@@ -4607,6 +4673,9 @@ async function main(): Promise<void> {
       await runMappingsWithSubbranches(cycleConfig.mappings, true, 'run-once');
     } else {
       await runFetchSweep(cycleConfig);
+      // Finish the sweep's pin and profile writes first, as when they ran inside
+      // it: a pin sync's lease would make the drain skip that destination.
+      await detachedMaintenance.settle();
       await drainDurableQueue(cycleConfig);
     }
     updateAppStatus({ state: 'idle', message: options.dryRun ? 'Dry run cycle complete' : 'Run-once cycle complete' });
@@ -4644,6 +4713,10 @@ async function main(): Promise<void> {
     logPipeline('Queue', `♻️ Recovered ${recoveredBackfills} interrupted backfill job(s).`);
   }
   destinationLeaseService.releaseOwner(RUNTIME_OWNER_ID);
+  destinationLeaseService.releaseOwnersWithPrefix(
+    DestinationMaintenanceRunner.hostOwnerPrefix,
+    destinationMaintenance.ownerId,
+  );
   destinationLeaseService.purgeExpired();
   startPostWorkers();
 
