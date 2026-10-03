@@ -60,7 +60,7 @@
     "ip-address": "10.7.3"
   },
   "dependencies": {
-    "@atproto/api": "0.20.44",
+    "@atproto/api": "0.23.0",
     "@google/generative-ai": "^0.24.1",
     "@the-convocation/twitter-scraper": "^0.22.3",
     "axios": "1.20.0",
