@@ -55,6 +55,7 @@ test('the destination editor can repoint a destination at another managed accoun
 });
 
 test('source edits stay isolated and credentials leave the destination editor', () => {
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: matches the template literal in the hook's source text
   expect(destinationHookSource).toContain('/sources/${encodeURIComponent(username)}');
   expect(destinationHookSource).not.toContain('/credentials');
   expect(destinationDialogSource).not.toContain('type="password"');

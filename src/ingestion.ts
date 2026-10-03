@@ -44,7 +44,7 @@ export function routeNormalizedPost(
   const source = config.sources.find(
     (candidate) => candidate.id === post.sourceId && candidate.type === post.sourceType,
   );
-  if (!source || !source.enabled) throw new Error('Normalized post source is unknown or disabled.');
+  if (!source?.enabled) throw new Error('Normalized post source is unknown or disabled.');
   const routes = config.routes.filter(
     (route) => route.sourceId === source.id && route.enabled && !route.relationship.sourcePaused,
   );

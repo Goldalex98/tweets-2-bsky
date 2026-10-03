@@ -36,6 +36,7 @@ import { fetchPublicHttps } from './public-http-fetch.js';
 import { isRestoreRestartRequired } from './backup-service.js';
 import { resolveWebhookTarget, sendPinnedHttpsRequest } from './webhook.js';
 import { AsyncSemaphore } from './async-semaphore.js';
+import { normalizeAltText, orderMediaForUpload, shouldDropCardLinkFromText } from './media-policy.js';
 import {
   BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS,
   BSKY_POST_RETRY_DELAY_MS,
@@ -1813,6 +1814,8 @@ async function processTweets(
 
     console.log(`[${twitterUsername}] 🖼️ Found ${mediaEntities.length} media entities.`);
 
+    // Every media link leaves the text, including media skipped below once a
+    // video has been embedded.
     for (const media of mediaEntities) {
       if (media.url) {
         mediaLinksToRemove.push(media.url);
@@ -1824,7 +1827,9 @@ async function processTweets(
       if (media.source === 'card' && media.media_url_https) {
         mediaLinksToRemove.push(media.media_url_https);
       }
+    }
 
+    for (const media of orderMediaForUpload(mediaEntities)) {
       let aspectRatio: AspectRatio | undefined;
       if (media.sizes?.large) {
         aspectRatio = { width: media.sizes.large.w, height: media.sizes.large.h };
@@ -1853,28 +1858,44 @@ async function processTweets(
             blob = await uploadToBluesky(agent, buffer, mimeType);
           }
 
+          // The image is already uploaded, so an alt-text failure must not fall
+          // through to the retry below and upload it a second time.
           let altText = media.ext_alt_text;
           if (!altText && isAltTextConfigured(mapping.aiOverrides, aiConfigOverride)) {
-            console.log(`[${twitterUsername}] 🤖 Generating alt text via AI provider...`);
-            // Use original tweet text for context, not the modified/cleaned one
-            const altTextContext = buildAltTextContext(tweet, tweetText, tweetMap);
-            altText = await generateAltText(buffer, mimeType, altTextContext, {
-              overrides: mapping.aiOverrides,
-              config: aiConfigOverride,
-            });
-            if (altText) console.log(`[${twitterUsername}] ✅ Alt text generated: ${altText.substring(0, 50)}...`);
+            try {
+              console.log(`[${twitterUsername}] 🤖 Generating alt text via AI provider...`);
+              // Use original tweet text for context, not the modified/cleaned one
+              const altTextContext = buildAltTextContext(tweet, tweetText, tweetMap);
+              altText = await generateAltText(buffer, mimeType, altTextContext, {
+                overrides: mapping.aiOverrides,
+                config: aiConfigOverride,
+              });
+              if (altText) console.log(`[${twitterUsername}] ✅ Alt text generated: ${altText.substring(0, 50)}...`);
+            } catch (altError) {
+              assertDeliveryActive();
+              console.warn(`[${twitterUsername}] ⚠️ Alt text generation failed: ${describeError(altError)}`);
+            }
           }
 
-          images.push({ alt: altText || 'Image from Twitter', image: blob, aspectRatio });
+          images.push({ alt: normalizeAltText(altText), image: blob, aspectRatio });
           console.log(`[${twitterUsername}] ✅ Image uploaded.`);
         } catch (err) {
+          assertDeliveryActive();
           console.error(`[${twitterUsername}] ❌ High quality upload failed:`, (err as Error).message);
           try {
             console.log(`[${twitterUsername}] 🔄 Retrying with standard quality...`);
             updateAppStatus({ message: 'Retrying with standard quality...' });
             const { buffer, mimeType } = await downloadMedia(url);
-            const blob = await uploadToBluesky(agent, buffer, mimeType);
-            images.push({ alt: media.ext_alt_text || 'Image from Twitter', image: blob, aspectRatio });
+            let blob: EmbedBlobRef;
+            if (dryRun) {
+              console.log(
+                `[${twitterUsername}] 🧪 [DRY RUN] Would upload image (${(buffer.length / 1024).toFixed(2)} KB)`,
+              );
+              blob = { ref: { toString: () => 'mock-blob' }, mimeType, size: buffer.length };
+            } else {
+              blob = await uploadToBluesky(agent, buffer, mimeType);
+            }
+            images.push({ alt: normalizeAltText(media.ext_alt_text), image: blob, aspectRatio });
             console.log(`[${twitterUsername}] ✅ Image uploaded on retry.`);
           } catch (retryErr) {
             console.error(`[${twitterUsername}] ❌ Retry also failed:`, (retryErr as Error).message);
@@ -2051,17 +2072,15 @@ async function processTweets(
         if (linkToEmbed) {
           // Optimization: If text is too long, but removing the link makes it fit, do it!
           // The link will be present in the embed card anyway.
-          if (text.length > 300 && text.includes(linkToEmbed)) {
-            const lengthWithoutLink = text.length - linkToEmbed.length;
-            // Allow some buffer (e.g. whitespace cleanup might save 1-2 chars)
-            if (lengthWithoutLink <= 300) {
-              console.log(
-                `[${twitterUsername}] 📏 Optimizing: Removing link ${linkToEmbed} from text to avoid threading (Card will embed it).`,
-              );
-              text = text.replace(linkToEmbed, '').trim();
-              // Clean up potential double punctuation/spaces left behind
-              text = text.replace(/\s\.$/, '.').replace(/\s\s+/g, ' ');
-            }
+          // Bluesky counts graphemes, so emoji and accented text are measured
+          // the way the limit is enforced.
+          if (shouldDropCardLinkFromText(text, linkToEmbed)) {
+            console.log(
+              `[${twitterUsername}] 📏 Optimizing: Removing link ${linkToEmbed} from text to avoid threading (Card will embed it).`,
+            );
+            text = text.replace(linkToEmbed, '').trim();
+            // Clean up potential double punctuation/spaces left behind
+            text = text.replace(/\s\.$/, '.').replace(/\s\s+/g, ' ');
           }
 
           console.log(`[${twitterUsername}] 🃏 Fetching link card for: ${linkToEmbed}`);
@@ -2676,7 +2695,7 @@ async function executeCanonicalXSourceSweep(
         queued = postQueueService.getQueuedExternalPostIdSet(destination.id);
         queuedIdsByDestination.set(destination.id, queued);
       }
-      if (queued.has(tweetId) || Boolean(dbService.getPost(tweetId, destination.id))) return true;
+      if (queued.has(tweetId) || dbService.getPost(tweetId, destination.id)) return true;
       const routePolicy = route.duplicateSuppression;
       const destinationPolicy = destination.duplicateSuppression;
       const policy = routePolicy.enabled ? routePolicy : destinationPolicy;
@@ -3833,7 +3852,8 @@ async function setBlueskyPinnedPost(
     if (ref) {
       profile.pinnedPost = { uri: ref.uri, cid: ref.cid };
     } else {
-      // biome-ignore lint/performance/noDelete: the key must be absent from the atproto record; an explicit undefined could still trip lexicon validation
+      // The key must be absent from the atproto record; an explicit undefined
+      // could still trip lexicon validation.
       delete profile.pinnedPost;
     }
     return profile;
@@ -3885,7 +3905,7 @@ async function applyPinnedTweet(
     }
     return true;
   }
-  if (!record || record.status !== 'migrated' || !record.bsky_uri || !record.bsky_cid) {
+  if (record?.status !== 'migrated' || !record.bsky_uri || !record.bsky_cid) {
     console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} is not mirrored yet. Pin sync deferred.`);
     return false;
   }
@@ -4041,7 +4061,7 @@ async function syncPinnedTweetViaProfile(
       pinnedTweetId,
       mapping,
     );
-    if (!record || record.status !== 'migrated') {
+    if (record?.status !== 'migrated') {
       console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} not mirrored yet. Backfilling it now...`);
       await acquireScraperSlot();
       const rawPinned = await scraper.getTweet(pinnedTweetId);
@@ -4083,7 +4103,7 @@ async function syncPinnedTweetViaProfile(
       }
     }
 
-    if (!dryRun && (!record || record.status !== 'migrated')) {
+    if (!dryRun && record?.status !== 'migrated') {
       return `Pinned tweet ${pinnedTweetId} could not be mirrored (it may be a retweet or an external reply).`;
     }
 
@@ -4814,7 +4834,7 @@ async function main(): Promise<void> {
       for (const pinSync of pendingPinSyncs) {
         const mapping = findMappingById(cycleConfig.mappings, pinSync.id);
         clearPinSync(pinSync.id);
-        if (!mapping || !mapping.enabled) continue;
+        if (!mapping?.enabled) continue;
         const logPrefix = getMappingLogPrefix(mapping);
         try {
           updateAppStatus({ state: 'processing', message: `Syncing pinned tweet for ${mapping.bskyIdentifier}...` });

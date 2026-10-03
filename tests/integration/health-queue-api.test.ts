@@ -225,7 +225,7 @@ test('health is redacted and queue operations are permission scoped with active 
             const skipRecordAfterFailedOverride = dbService.getPost('503', mapping.id);
             const restoredCreatedAtMs = skipRecordAfterFailedOverride?.created_at
               ? Date.parse(
-                  /(?:Z|[+-]\d{2}:?\d{2})$/.test(skipRecordAfterFailedOverride.created_at)
+                  /(?:Z|[+-]\\d{2}:?\\d{2})$/.test(skipRecordAfterFailedOverride.created_at)
                     ? skipRecordAfterFailedOverride.created_at
                     : skipRecordAfterFailedOverride.created_at.replace(' ', 'T') + 'Z',
                 )

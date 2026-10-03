@@ -1876,7 +1876,7 @@ program
   .description('Preview a digest without publishing')
   .action((routeId: string) => {
     const route = getConfig().routes.find((candidate) => candidate.id === routeId);
-    if (!route?.delivery || route.delivery.mode !== 'digest') throw new Error('Digest route not found.');
+    if (route?.delivery?.mode !== 'digest') throw new Error('Digest route not found.');
     console.log(
       JSON.stringify(
         buildDigestPreview(
@@ -1896,7 +1896,7 @@ program
     await requireCliAdminReauthentication();
     const config = getConfig();
     const route = config.routes.find((candidate) => candidate.id === routeId);
-    if (!route?.delivery || route.delivery.mode !== 'digest') throw new Error('Digest route not found.');
+    if (route?.delivery?.mode !== 'digest') throw new Error('Digest route not found.');
     console.log(JSON.stringify(digestJobService.arm(route.destinationId, route.id, Date.now()), null, 2));
   });
 

@@ -2128,7 +2128,7 @@ export const backfillJobService = {
   }): BackfillJob | null {
     const now = input.now ?? Date.now();
     const job = this.get(input.id);
-    if (!job || job.status !== 'processing' || job.claimToken !== input.claimToken) return null;
+    if (job?.status !== 'processing' || job.claimToken !== input.claimToken) return null;
     const maxAttempts = input.maxAttempts ?? 8;
     const terminal = input.retryable === false || job.attempts >= maxAttempts;
     const backoff = Math.min(60_000 * 2 ** Math.max(0, job.attempts - 1), 6 * 60 * 60_000);
@@ -3071,7 +3071,7 @@ export const digestJobService = {
 
   releaseEntries(id: string, claimToken: string, entryIds: readonly number[]): boolean {
     const job = this.get(id);
-    if (!job || job.status !== 'processing' || job.claimToken !== claimToken) return false;
+    if (job?.status !== 'processing' || job.claimToken !== claimToken) return false;
     if (entryIds.length > 0) {
       const marks = entryIds.map(() => '?').join(',');
       db.prepare(
@@ -3104,7 +3104,7 @@ export const digestJobService = {
     let completed = false;
     db.transaction(() => {
       const job = this.get(id);
-      if (!job || job.status !== 'processing' || job.claimToken !== claimToken) return;
+      if (job?.status !== 'processing' || job.claimToken !== claimToken) return;
       if (deliveredEntryIds) {
         if (deliveredEntryIds.length > 0) {
           const marks = deliveredEntryIds.map(() => '?').join(',');
@@ -3134,7 +3134,7 @@ export const digestJobService = {
 
   fail(id: string, claimToken: string, error: unknown, maxAttempts = 5, now = Date.now()): boolean {
     const job = this.get(id);
-    if (!job || job.status !== 'processing' || job.claimToken !== claimToken) return false;
+    if (job?.status !== 'processing' || job.claimToken !== claimToken) return false;
     const attempts = job.attempts + 1;
     const terminal = attempts >= maxAttempts;
     const backoff = Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 6 * 60 * 60_000);
