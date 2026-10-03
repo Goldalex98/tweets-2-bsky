@@ -94,7 +94,9 @@ function dependencies(
       },
       findSettlement: (queueItem) => options.settlements?.get(queueItem.twitter_id) ?? null,
       markDone: (queueItem) => events.push(`done:${queueItem.twitter_id}`),
-      releaseForRetry: (queueItem, _error, maxAttempts) => events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`),
+      releaseForRetry: (queueItem, _error, maxAttempts) => {
+        events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`);
+      },
       deferUnattempted: (queueItem, _error, notBefore) => events.push(`defer:${queueItem.twitter_id}:${notBefore}`),
       describeError: (error) => (error instanceof Error ? error.message : String(error)),
       classifyError: () => 'delivery',
@@ -346,7 +348,10 @@ describe('DestinationQueueWorkerService', () => {
         throw new Error('Rate Limit Exceeded');
       },
     });
-    harness.value.classifyError = () => 'bsky-rate-limit';
+    harness.value.releaseForRetry = (queueItem, _error, maxAttempts) => {
+      harness.events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`);
+      return 'retrying';
+    };
     const service = new DestinationQueueWorkerService(harness.value, 1, 3);
 
     const result = await service.runBatch(

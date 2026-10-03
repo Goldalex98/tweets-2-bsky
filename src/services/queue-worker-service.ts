@@ -66,7 +66,8 @@ export interface QueueWorkerDependencies<Config extends QueueWorkerConfig, Mappi
    */
   findSettlement(item: QueueItem): { status: string; recordedAt?: number } | null;
   markDone(item: QueueItem): void;
-  releaseForRetry(item: QueueItem, error: string, maxAttempts: number): void;
+  /** Returns the row's outcome when the store knows it (a rate limit can defer without spending an attempt). */
+  releaseForRetry(item: QueueItem, error: string, maxAttempts: number): 'retrying' | 'parked' | void;
   deferUnattempted(item: QueueItem, error: string, notBefore: number): void;
   settleWithOwnership?(destinationKey: string, settle: () => void): boolean;
   describeError(error: unknown): string;
@@ -228,7 +229,6 @@ export class DestinationQueueWorkerService<Config extends QueueWorkerConfig, Map
     if (this.leasedDestinations.has(batch.destination_key) && !this.dependencies.leases?.renew(batch.destination_key))
       this.lostOwnership.add(batch.destination_key);
     if (this.lostOwnership.has(batch.destination_key)) return settlement;
-    const rateLimited = this.dependencies.classifyError(retryError) === 'bsky-rate-limit';
     const settleRows = () => {
       for (const item of batch.items) {
         const record = this.dependencies.findSettlement(item);
@@ -253,10 +253,10 @@ export class DestinationQueueWorkerService<Config extends QueueWorkerConfig, Map
           settlement.deferred += 1;
           continue;
         }
-        this.dependencies.releaseForRetry(item, retryError, this.maxAttempts);
-        // releaseForRetry defers a rate-limited row without spending an attempt.
-        if (!rateLimited && item.attempts + 1 >= this.maxAttempts) settlement.parked += 1;
-        else settlement.retrying += 1;
+        const outcome = this.dependencies.releaseForRetry(item, retryError, this.maxAttempts);
+        if ((outcome ?? (item.attempts + 1 >= this.maxAttempts ? 'parked' : 'retrying')) === 'parked') {
+          settlement.parked += 1;
+        } else settlement.retrying += 1;
       }
     };
     if (this.dependencies.settleWithOwnership) {

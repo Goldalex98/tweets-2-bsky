@@ -1391,7 +1391,7 @@ export const postQueueService = {
 
   // Failed attempt: exponential backoff (5 min doubling, capped at 6h), then
   // terminal 'failed' after maxAttempts so a poison tweet can't retry forever.
-  releaseForRetry(item: QueueItem, error: unknown, maxAttempts: number): void {
+  releaseForRetry(item: QueueItem, error: unknown, maxAttempts: number): 'retrying' | 'parked' {
     const attempts = item.attempts + 1;
     const now = Date.now();
     const errorMessage = sanitizedErrorMessage(error);
@@ -1403,25 +1403,30 @@ export const postQueueService = {
     // reset without spending an attempt, so a long limit cannot park a backlog.
     // After a day of limits the row falls through to the normal attempt path,
     // so a permanent cap still ends in a parked row the operator can see.
-    const rateLimitedForMs = item.first_failure_at === undefined ? 0 : now - item.first_failure_at;
+    // first_failure_at only counts when the last failure was also a rate limit;
+    // a row with a mixed history may reach the cap early, which just restores
+    // the normal attempt path.
+    const rateLimitedForMs =
+      item.error_category === 'bsky-rate-limit' && item.first_failure_at !== undefined ? now - item.first_failure_at : 0;
     if (category === 'bsky-rate-limit' && rateLimitedForMs < 24 * 60 * 60 * 1000) {
       const resetAtMs = parseRateLimitResetMs(error, now) ?? now + 15 * 60 * 1000;
       const notBefore = Math.min(Math.max(resetAtMs, now + 60 * 1000), now + 6 * 60 * 60 * 1000);
       db.prepare(
         `UPDATE post_queue SET status = 'pending', not_before = ?, last_error = ?, error_category = ?, error_message = ?, first_failure_at = COALESCE(first_failure_at, ?), last_failure_at = ?, updated_at = ? WHERE ${identity.clause}`,
       ).run(notBefore, errorMessage, category, errorMessage, now, now, now, ...identity.params);
-      return;
+      return 'retrying';
     }
     if (attempts >= maxAttempts) {
       db.prepare(
         `UPDATE post_queue SET status = 'failed', attempts = ?, last_error = ?, error_category = ?, error_message = ?, first_failure_at = COALESCE(first_failure_at, ?), last_failure_at = ?, updated_at = ? WHERE ${identity.clause}`,
       ).run(attempts, errorMessage, category, errorMessage, now, now, now, ...identity.params);
-      return;
+      return 'parked';
     }
     const backoffMs = Math.min(5 * 60 * 1000 * 2 ** (attempts - 1), 6 * 60 * 60 * 1000);
     db.prepare(
       `UPDATE post_queue SET status = 'pending', attempts = ?, not_before = ?, last_error = ?, error_category = ?, error_message = ?, first_failure_at = COALESCE(first_failure_at, ?), last_failure_at = ?, updated_at = ? WHERE ${identity.clause}`,
     ).run(attempts, now + backoffMs, errorMessage, category, errorMessage, now, now, now, ...identity.params);
+    return 'retrying';
   },
 
   // Crash recovery: anything left 'processing' by a previous run goes back to
