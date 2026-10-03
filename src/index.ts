@@ -35,6 +35,11 @@ import sharp from 'sharp';
 import { fetchPublicHttps } from './public-http-fetch.js';
 import { isRestoreRestartRequired } from './backup-service.js';
 import { resolveWebhookTarget, sendPinnedHttpsRequest } from './webhook.js';
+import {
+  BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS,
+  BSKY_POST_RETRY_DELAY_MS,
+  blueskyPostRetryDelayMs,
+} from './bsky-post-retry.js';
 import { applyTextCapabilities, generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { createBlueskyDigestDeliveryAdapter } from './adapters/bluesky-digest-delivery.js';
 import { createBlueskyNormalizedDeliveryAdapter } from './adapters/bluesky-normalized-delivery.js';
@@ -235,7 +240,7 @@ import type { BackfillJob, ProcessedTweetLookupEntry, QueueBatch } from './db.js
 import { prepareRouteInitialImportCandidates } from './pipeline/route-initial-import.js';
 import { metricsService } from './metrics.js';
 import { normalizeXPost, type NormalizedPost } from './normalized-post.js';
-import { notifyOperationsEvent } from './notification-service.js';
+import { clearOperationsAlert, notifyOperationsEvent } from './notification-service.js';
 import { buildDigestPreview, nextDigestRun } from './digest.js';
 import {
   type CorrelationContext,
@@ -1295,14 +1300,14 @@ function addTwitterHandleLinkFacets(
 
 // Uses the UserTweets endpoint (not Search) via the scraper's getTweets;
 // processedIds allows the caller to stop early once already-seen tweets appear.
-async function fetchUserTweets(
+export async function fetchUserTweets(
   username: string,
   limit: number,
   processedIds?: Set<string>,
   sessionKey = 'default',
   throwOnFailure = false,
 ): Promise<Tweet[]> {
-  const client = await getTwitterScraper(sessionKey);
+  let client = await getTwitterScraper(sessionKey);
   if (!client) {
     if (throwOnFailure) throw new Error('Twitter credentials are unavailable.');
     return [];
@@ -1367,8 +1372,14 @@ async function fetchUserTweets(
         // slot once, otherwise surface the failure so the operator re-auths.
         console.warn(`⚠️ [${username}] X rejected the current credentials (${describeError(error)}).`);
         if (await switchCredentials()) {
-          console.log('🔄 Retrying with backup credentials...');
-          continue;
+          // The switch drops cached sessions; rebuild the client so the retry
+          // actually uses the other cookie pair.
+          const switchedClient = await getTwitterScraper(sessionKey);
+          if (switchedClient) {
+            client = switchedClient;
+            console.log('🔄 Retrying with backup credentials...');
+            continue;
+          }
         }
         retries = 0;
       } else {
@@ -1393,7 +1404,7 @@ async function fetchUserTweets(
 
       console.warn(`Error fetching tweets for ${username}:`, describeError(error));
       const previousAuth = authRuntimeStateService.get('twitter');
-      const category = classifyQueueError(error);
+      const category = classifyQueueError(error, 'twitter');
       authRuntimeStateService.save({
         provider: 'twitter',
         configured: Boolean(getConfig().twitter.authToken && getConfig().twitter.ct0),
@@ -2242,6 +2253,7 @@ async function processTweets(
           if (postRecord.reply) console.log(`   - As reply to: ${postRecord.reply.parent.uri}`);
           response = { uri: 'at://did:plc:mock/app.bsky.feed.post/mock', cid: 'mock-cid' };
         } else {
+          let rateLimitBudgetMs = BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS;
           while (retries > 0) {
             try {
               response = await withTimeout(
@@ -2252,11 +2264,13 @@ async function processTweets(
               break;
             } catch (error: unknown) {
               retries--;
-              if (retries === 0) throw error;
+              const retryDelayMs = blueskyPostRetryDelayMs(error, Date.now(), rateLimitBudgetMs);
+              if (retries === 0 || retryDelayMs === undefined) throw error;
+              if (retryDelayMs > BSKY_POST_RETRY_DELAY_MS) rateLimitBudgetMs -= retryDelayMs;
               console.warn(
-                `[${twitterUsername}] ⚠️ Post failed (Socket/Network), retrying in 5s... (${retries} retries left)`,
+                `[${twitterUsername}] ⚠️ Post failed (${describeError(error)}), retrying in ${formatDurationMs(retryDelayMs)}... (${retries} retries left)`,
               );
-              await deliverySleep(5000);
+              await deliverySleep(retryDelayMs);
             }
           }
         }
@@ -2346,7 +2360,7 @@ async function processTweets(
   updateJob(mirrorJobId, null);
 }
 
-import { getAgent, invalidateCachedAgentOnAuthFailure } from './bsky.js';
+import { blueskyLoginBackoffMs, getAgent, invalidateCachedAgentOnAuthFailure } from './bsky.js';
 
 // ============================================================================
 // Fetch Sweep + Post Queue Workers (daemon mode)
@@ -2548,18 +2562,20 @@ async function executeCanonicalXSourceSweep(
           `[${source.username}] Sweep fetch timed out after ${Math.round(fetchTimeoutMs / 1000)}s`,
         );
         fetchedBySource.set(source.id, tweets);
+        clearOperationsAlert('twitter-auth-failure', source.id);
         metricsService.increment('fetchSuccess');
         return tweets;
       } catch (error) {
         metricsService.increment('fetchFailure');
         const message = describeError(error);
         errorsBySource.set(source.id, message);
-        errorCategoriesBySource.set(source.id, classifyQueueError(error));
+        const category = classifyQueueError(error, 'twitter');
+        errorCategoriesBySource.set(source.id, category);
         logPipeline('Sweep', `❌ Source fetch failed: ${message}`, true, {
           sweepId,
           sourceId: source.id,
         });
-        if (classifyQueueError(error) === 'twitter-auth') {
+        if (category === 'twitter-auth') {
           notifyOperationsEvent({
             event: 'twitter-auth-failure',
             occurredAt: new Date().toISOString(),
@@ -3125,6 +3141,7 @@ async function deliverPostBatch(
     });
     throw new Error('Bluesky login failed');
   }
+  clearOperationsAlert('bsky-auth-failure', effectiveMapping.id);
   runtimeStateService.recordDestinationEvent(effectiveMapping.id, 'login');
 
   if (batch.items.every((item) => item.source_type !== 'x')) {
@@ -3437,7 +3454,7 @@ async function importHistory(
     return;
   }
 
-  const authenticatedAgent = await getAgent(mapping);
+  const authenticatedAgent = await getAgent(mapping, { bypassLoginBackoff: true });
   let agent: BskyAgent;
   if (authenticatedAgent) {
     agent = authenticatedAgent;
@@ -3894,7 +3911,7 @@ async function syncPinnedTweetViaProfile(
       return 'Twitter credentials are not configured.';
     }
 
-    const agent = await getAgent(mapping);
+    const agent = await getAgent(mapping, { bypassLoginBackoff: action === 'pin-sync-manual' });
     if (!agent) {
       return 'Bluesky login failed.';
     }
@@ -3988,7 +4005,7 @@ async function maybeSyncMappingProfileInBackground(
   if (dryRun) {
     return;
   }
-  if (!isProfileSyncDue(mapping)) {
+  if (!isProfileSyncDue(mapping) || blueskyLoginBackoffMs(mapping) > 0) {
     return;
   }
 
@@ -4145,7 +4162,9 @@ async function runAccountTask(
       // happens later in the post workers. Requiring a session here turned an
       // auth blip into a dropped backfill.
       const requiresBlueskySession = !backfillReq || backfillDelivery === 'inline';
-      const agent = await getAgent(mapping);
+      // An operator-requested backfill gets a fresh login attempt even while
+      // scheduled work is backing off.
+      const agent = await getAgent(mapping, { bypassLoginBackoff: Boolean(backfillReq) });
       if (!agent && requiresBlueskySession) {
         console.warn(`${logPrefix} ⚠️ Unable to authenticate Bluesky account. Skipping task.`);
         if (backfillReq) {

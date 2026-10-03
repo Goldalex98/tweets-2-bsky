@@ -94,7 +94,10 @@ function dependencies(
       },
       findSettlement: (queueItem) => options.settlements?.get(queueItem.twitter_id) ?? null,
       markDone: (queueItem) => events.push(`done:${queueItem.twitter_id}`),
-      releaseForRetry: (queueItem, _error, maxAttempts) => events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`),
+      releaseForRetry: (queueItem, _error, maxAttempts) => {
+        events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`);
+        return queueItem.attempts + 1 >= maxAttempts ? 'parked' : 'retrying';
+      },
       deferUnattempted: (queueItem, _error, notBefore) => events.push(`defer:${queueItem.twitter_id}:${notBefore}`),
       describeError: (error) => (error instanceof Error ? error.message : String(error)),
       classifyError: () => 'delivery',
@@ -338,6 +341,28 @@ describe('DestinationQueueWorkerService', () => {
     expect(harness.events).toContain('parked:destination:1');
     expect(harness.metrics.get('posted')).toBe(1);
     expect(harness.metrics.get('failed')).toBe(1);
+  });
+
+  test('a rate-limited row on its last attempt is retried, not reported as parked', async () => {
+    const harness = dependencies([], {
+      delivery: async () => {
+        throw new Error('Rate Limit Exceeded');
+      },
+    });
+    harness.value.releaseForRetry = (queueItem, _error, maxAttempts) => {
+      harness.events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`);
+      return 'retrying';
+    };
+    const service = new DestinationQueueWorkerService(harness.value, 1, 3);
+
+    const result = await service.runBatch(
+      { id: 'destination', bskyIdentifier: 'destination.test' },
+      batch([item('limited', 2)]),
+    );
+
+    expect(result).toMatchObject({ retrying: 1, parked: 0 });
+    expect(harness.events).toContain('retry:limited:3');
+    expect(harness.events.some((event) => event.startsWith('parked:'))).toBe(false);
   });
 
   test('a migrated record always settles, even if it predates the item', async () => {

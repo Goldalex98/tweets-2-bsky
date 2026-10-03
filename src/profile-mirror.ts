@@ -921,7 +921,8 @@ export const syncBlueskyProfileFromTwitter = async (args: {
     avatar: authorizedFields.avatar && (args.syncAvatar ?? true) ? rawChanged.avatar : false,
     banner: authorizedFields.banner && (args.syncBanner ?? true) ? rawChanged.banner : false,
   };
-  const bsky = await validateBlueskyCredentials({
+  // One login serves both the credential check and the profile writes.
+  const { agent, credentials: bsky } = await loginBlueskyAgent({
     bskyIdentifier: args.bskyIdentifier,
     bskyPassword: args.bskyPassword,
     bskyServiceUrl: args.bskyServiceUrl,
@@ -938,15 +939,6 @@ export const syncBlueskyProfileFromTwitter = async (args: {
       warnings: [],
     };
   }
-
-  const agent = new BskyAgent({
-    service: bsky.serviceUrl,
-    fetch: managedBlueskyFetch({ bskyIdentifier: args.bskyIdentifier, bskyServiceUrl: bsky.serviceUrl }),
-  });
-  await agent.login({
-    identifier: args.bskyIdentifier,
-    password: args.bskyPassword,
-  });
 
   const warnings: string[] = [];
   let avatarBlob: BlobRef | undefined;

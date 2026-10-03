@@ -1,12 +1,16 @@
 import { createHash } from 'node:crypto';
 import { BskyAgent } from '@atproto/api';
+import { LoginBackoff } from './bsky-login-backoff.js';
 import { getConfig } from './config-manager.js';
+import { classifyQueueError } from './observability.js';
+import { parseRateLimitResetMs } from './x-rate-limit.js';
 import { assertDeliveryActive } from './services/delivery-context.js';
 import { isBlueskyAccountBlocked, managedBlueskyFetch } from './services/bluesky-mutation-guard.js';
 import { blueskyAccountRuntimeService, runtimeStateService } from './db.js';
 import { getCanonicalDestinationKey, normalizeBlueskyServiceUrl } from './mapping-helpers.js';
 
 const activeAgents = new Map<string, BskyAgent>();
+const loginBackoff = new LoginBackoff();
 
 type AgentMappingIdentity = {
   bskyAccountId?: string;
@@ -28,11 +32,17 @@ function agentCacheKey(mapping: AgentMappingIdentity): string {
 
 function clearCachedAgentsForIdentity(mapping: AgentMappingIdentity): void {
   const prefix = `${getCanonicalDestinationKey(mapping)}#`;
+  loginBackoff.clearPrefix(prefix);
   for (const key of activeAgents.keys()) {
     if (key.startsWith(prefix) || key === getCanonicalDestinationKey(mapping)) {
       activeAgents.delete(key);
     }
   }
+}
+
+/** Milliseconds until a failing credential may log in again (0 when it may). */
+export function blueskyLoginBackoffMs(mapping: AgentMappingIdentity): number {
+  return loginBackoff.remainingMs(agentCacheKey(mapping), Date.now());
 }
 
 export function clearCachedAgent(mapping: AgentMappingIdentity): void {
@@ -53,31 +63,50 @@ export function invalidateCachedAgentOnAuthFailure(mapping: AgentMappingIdentity
   return activeAgents.size < before || activeAgents.delete(agentCacheKey(mapping));
 }
 
-export async function getAgent(mapping: {
-  id?: string;
-  bskyAccountId?: string;
-  bskyIdentifier: string;
-  bskyPassword: string;
-  bskyServiceUrl?: string;
-  bskyDid?: string;
-  bskyCanonicalHandle?: string;
-}): Promise<BskyAgent | null> {
+export async function getAgent(
+  mapping: {
+    id?: string;
+    bskyAccountId?: string;
+    bskyIdentifier: string;
+    bskyPassword: string;
+    bskyServiceUrl?: string;
+    bskyDid?: string;
+    bskyCanonicalHandle?: string;
+  },
+  options: { bypassLoginBackoff?: boolean } = {},
+): Promise<BskyAgent | null> {
   const serviceUrl = mapping.bskyServiceUrl || 'https://bsky.social';
   if (isBlueskyAccountBlocked(mapping.bskyAccountId))
     throw new Error('Bluesky account is blocked; explicit resume is required.');
   const cacheKey = agentCacheKey(mapping);
   const existing = activeAgents.get(cacheKey);
   if (existing) return existing;
+  const backoffMs = options.bypassLoginBackoff ? 0 : loginBackoff.remainingMs(cacheKey, Date.now());
+  if (backoffMs > 0) {
+    console.warn(
+      `Skipping Bluesky login for ${mapping.bskyIdentifier}: retrying in ${Math.ceil(backoffMs / 1000)}s after a failed login.`,
+    );
+    return null;
+  }
 
   const agent = new BskyAgent({ service: serviceUrl, fetch: managedBlueskyFetch(mapping) });
   try {
     await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
     activeAgents.set(cacheKey, agent);
+    loginBackoff.noteSuccess(cacheKey);
     if (mapping.id) runtimeStateService.recordDestinationEvent(mapping.id, 'login');
     if (mapping.bskyAccountId) blueskyAccountRuntimeService.recordSuccess(mapping.bskyAccountId, 'login');
     return agent;
   } catch (err) {
     assertDeliveryActive();
+    // Only rejected credentials and rate limits back off; a network blip or PDS
+    // outage should not freeze logins.
+    const category = classifyQueueError(err);
+    const now = Date.now();
+    if (category === 'bsky-auth') loginBackoff.noteFailure(cacheKey, now);
+    if (category === 'bsky-rate-limit') {
+      loginBackoff.noteFailure(cacheKey, now, Math.max(0, (parseRateLimitResetMs(err, now) ?? now) - now));
+    }
     const message = err instanceof Error ? err.message : String(err);
     if (mapping.id) {
       runtimeStateService.recordDestinationFailure(mapping.id, 'login', message);
@@ -95,7 +124,7 @@ export async function deleteAllPosts(mappingId: string): Promise<number> {
   const mapping = config.mappings.find((m) => m.id === mappingId);
   if (!mapping) throw new Error('Mapping not found');
 
-  const agent = await getAgent(mapping);
+  const agent = await getAgent(mapping, { bypassLoginBackoff: true });
   if (!agent) throw new Error('Failed to authenticate with Bluesky');
   const repoDid = agent.session?.did;
   if (!repoDid) throw new Error('Bluesky session did is missing');
