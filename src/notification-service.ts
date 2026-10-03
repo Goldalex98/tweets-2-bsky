@@ -20,3 +20,8 @@ export function notifyOperationsEvent(payload: WebhookEventPayload): void {
     // Delivery status is persisted by the notifier. Never log target URLs or secrets.
   });
 }
+
+/** Lets the next failure alert immediately once the failing credential has recovered. */
+export function clearOperationsAlert(event: WebhookEventPayload['event'], scope: string): void {
+  cooldown.clear(event, scope);
+}

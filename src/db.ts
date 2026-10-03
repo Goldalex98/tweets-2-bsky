@@ -1401,7 +1401,10 @@ export const postQueueService = {
       : { clause: 'twitter_id = ? AND bsky_identifier = ?', params: [item.twitter_id, item.bsky_identifier] };
     // A rate limit says nothing about the post itself: wait out the advertised
     // reset without spending an attempt, so a long limit cannot park a backlog.
-    if (category === 'bsky-rate-limit') {
+    // After a day of limits the row falls through to the normal attempt path,
+    // so a permanent cap still ends in a parked row the operator can see.
+    const rateLimitedForMs = item.first_failure_at === undefined ? 0 : now - item.first_failure_at;
+    if (category === 'bsky-rate-limit' && rateLimitedForMs < 24 * 60 * 60 * 1000) {
       const resetAtMs = parseRateLimitResetMs(error, now) ?? now + 15 * 60 * 1000;
       const notBefore = Math.min(Math.max(resetAtMs, now + 60 * 1000), now + 6 * 60 * 60 * 1000);
       db.prepare(

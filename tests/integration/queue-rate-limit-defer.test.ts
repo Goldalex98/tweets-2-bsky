@@ -31,7 +31,12 @@ test('a Bluesky rate limit defers a row to the reset without spending its last a
           const second = postQueueService.claimNextBatch(new Set(), new Set(['destination-1']), undefined, 1);
           postQueueService.releaseForRetry(second.items[0], new Error('Upstream failure'), 1);
           const parked = postQueueService.inspect({ twitterId: '101', bskyIdentifier: 'storage-key' })[0];
+          enqueue('102');
+          const third = postQueueService.claimNextBatch(new Set(), new Set(['destination-1']), undefined, 1);
+          postQueueService.releaseForRetry({ ...third.items[0], first_failure_at: Date.now() - 25 * 60 * 60 * 1000 }, limited, 1);
+          const expired = postQueueService.inspect({ twitterId: '102', bskyIdentifier: 'storage-key' })[0];
           await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
+            expired: { status: expired.status, attempts: expired.attempts },
             deferred: { status: deferred.status, attempts: deferred.attempts, category: deferred.error_category,
               notBeforeIsReset: Math.abs(deferred.not_before - resetSeconds * 1000) < 1000 },
             parked: { status: parked.status, attempts: parked.attempts },
@@ -43,6 +48,8 @@ test('a Bluesky rate limit defers a row to the reset without spending its last a
     const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()]);
     expect(exitCode, stderr).toBe(0);
     expect(JSON.parse(fs.readFileSync(resultPath, 'utf8'))).toEqual({
+      // After a day of rate limits the row spends attempts and can park again.
+      expired: { status: 'failed', attempts: 1 },
       deferred: { status: 'pending', attempts: 0, category: 'bsky-rate-limit', notBeforeIsReset: true },
       parked: { status: 'failed', attempts: 1 },
     });

@@ -240,7 +240,7 @@ import type { BackfillJob, ProcessedTweetLookupEntry, QueueBatch } from './db.js
 import { prepareRouteInitialImportCandidates } from './pipeline/route-initial-import.js';
 import { metricsService } from './metrics.js';
 import { normalizeXPost, type NormalizedPost } from './normalized-post.js';
-import { notifyOperationsEvent } from './notification-service.js';
+import { clearOperationsAlert, notifyOperationsEvent } from './notification-service.js';
 import { buildDigestPreview, nextDigestRun } from './digest.js';
 import {
   type CorrelationContext,
@@ -2562,6 +2562,7 @@ async function executeCanonicalXSourceSweep(
           `[${source.username}] Sweep fetch timed out after ${Math.round(fetchTimeoutMs / 1000)}s`,
         );
         fetchedBySource.set(source.id, tweets);
+        clearOperationsAlert('twitter-auth-failure', source.id);
         metricsService.increment('fetchSuccess');
         return tweets;
       } catch (error) {
@@ -3140,6 +3141,7 @@ async function deliverPostBatch(
     });
     throw new Error('Bluesky login failed');
   }
+  clearOperationsAlert('bsky-auth-failure', effectiveMapping.id);
   runtimeStateService.recordDestinationEvent(effectiveMapping.id, 'login');
 
   if (batch.items.every((item) => item.source_type !== 'x')) {
@@ -3452,7 +3454,7 @@ async function importHistory(
     return;
   }
 
-  const authenticatedAgent = await getAgent(mapping);
+  const authenticatedAgent = await getAgent(mapping, { bypassLoginBackoff: true });
   let agent: BskyAgent;
   if (authenticatedAgent) {
     agent = authenticatedAgent;
@@ -3909,7 +3911,7 @@ async function syncPinnedTweetViaProfile(
       return 'Twitter credentials are not configured.';
     }
 
-    const agent = await getAgent(mapping);
+    const agent = await getAgent(mapping, { bypassLoginBackoff: action === 'pin-sync-manual' });
     if (!agent) {
       return 'Bluesky login failed.';
     }

@@ -12,11 +12,18 @@ export class AlertCooldown {
 
   shouldSend(payload: WebhookEventPayload, nowMs: number): boolean {
     if (!COOLDOWN_EVENTS.has(payload.event)) return true;
-    const scope = payload.details?.destinationId ?? payload.details?.sourceId ?? '';
-    const key = `${payload.event}\0${String(scope)}`;
+    const key = cooldownKey(payload.event, String(payload.details?.destinationId ?? payload.details?.sourceId ?? ''));
     const last = this.lastSentAt.get(key);
     if (last !== undefined && nowMs - last < this.cooldownMs) return false;
     this.lastSentAt.set(key, nowMs);
     return true;
   }
+
+  clear(event: WebhookEventPayload['event'], scope: string): void {
+    this.lastSentAt.delete(cooldownKey(event, scope));
+  }
+}
+
+function cooldownKey(event: WebhookEventPayload['event'], scope: string): string {
+  return `${event}\0${scope}`;
 }

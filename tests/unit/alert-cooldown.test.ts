@@ -23,4 +23,12 @@ describe('operations alert cooldown', () => {
     expect(cooldown.shouldSend(alert('queue-parked', { destinationId: 'd1' }), 0)).toBe(true);
     expect(cooldown.shouldSend(alert('queue-parked', { destinationId: 'd1' }), 1)).toBe(true);
   });
+
+  test('a recovery lets the next failure alert immediately', () => {
+    const cooldown = new AlertCooldown();
+    expect(cooldown.shouldSend(alert('bsky-auth-failure', { destinationId: 'd1' }), 0)).toBe(true);
+    expect(cooldown.shouldSend(alert('bsky-auth-failure', { destinationId: 'd1' }), 1)).toBe(false);
+    cooldown.clear('bsky-auth-failure', 'd1');
+    expect(cooldown.shouldSend(alert('bsky-auth-failure', { destinationId: 'd1' }), 2)).toBe(true);
+  });
 });
