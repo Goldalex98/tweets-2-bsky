@@ -95,12 +95,14 @@ import {
   blueskyAccountRuntimeService,
   databaseHealthService,
   dbService,
+  deliveryFallbackStatsService,
   duplicateFingerprintService,
   digestEntryService,
   digestJobService,
   ingestionAuditService,
   ingestionCredentialService,
   ingestionReplayService,
+  historyRetentionService,
   policyOverrideAuditService,
   postQueueService,
   routeInitialImportStateService,
@@ -108,6 +110,8 @@ import {
   webhookDeliveryService,
 } from './db.js';
 import type { ProcessedTweet } from './db.js';
+import { HISTORY_RETENTION_MAX_DAYS } from './history-retention.js';
+import { buildStorageReport } from './storage-report.js';
 import {
   applyProfileMirrorSyncState,
   bridgeBlueskyAccountToFediverse,
@@ -542,6 +546,14 @@ const webhookRateLimiter = createRateLimiter({
   scope: 'webhook',
   windowMs: 5 * 60 * 1000,
   max: 15,
+  key: (request) => getRequestIp(request),
+});
+
+// Storage and fallback reports count or scan tables, so cap how often one client can ask.
+const reportRateLimiter = createRateLimiter({
+  scope: 'storage-report',
+  windowMs: 60_000,
+  max: 60,
   key: (request) => getRequestIp(request),
 });
 
@@ -2852,6 +2864,64 @@ app.get(
   asAuthedHandler((req, res) => {
     const config = getConfig();
     res.json(buildUserSummary(config, req.user));
+  }),
+);
+
+app.get(
+  '/api/admin/storage',
+  reportRateLimiter,
+  authenticateToken,
+  requireAdmin,
+  asAuthedHandler((_req, res) => {
+    res.json(buildStorageReport());
+  }),
+);
+
+app.post(
+  '/api/admin/storage/prune',
+  reportRateLimiter,
+  authenticateToken,
+  requireAdmin,
+  requireJsonObject,
+  asAuthedHandler((req, res) => {
+    if (req.body?.confirmation !== 'PRUNE_HISTORY') {
+      res.status(403).json({
+        error: { code: 'CONFIRMATION_REQUIRED', message: 'Confirmation PRUNE_HISTORY is required.' },
+      });
+      return;
+    }
+    const days = Number(req.body?.olderThanDays);
+    if (!Number.isInteger(days) || days < 1 || days > HISTORY_RETENTION_MAX_DAYS) {
+      res.status(400).json({
+        error: {
+          code: 'INVALID_RETENTION_DAYS',
+          message: `olderThanDays must be a whole number from 1 to ${HISTORY_RETENTION_MAX_DAYS}.`,
+        },
+      });
+      return;
+    }
+    const pruned = historyRetentionService.prune({ retentionMs: days * 24 * 60 * 60_000 });
+    historyRetentionService.checkpoint();
+    res.json({ pruned, report: buildStorageReport({ fresh: true }) });
+  }),
+);
+
+app.get(
+  '/api/delivery-fallbacks',
+  reportRateLimiter,
+  authenticateToken,
+  asAuthedHandler((req, res) => {
+    const daysCandidate = Number(req.query.days ?? 30);
+    const days = Number.isFinite(daysCandidate) ? Math.max(1, Math.min(Math.round(daysCandidate), 365)) : 30;
+    const config = getConfig();
+    const visible = new Map(getVisibleMappings(config, req.user).map((mapping) => [mapping.id, mapping]));
+    const destinations = deliveryFallbackStatsService
+      .summarize(Date.now() - days * 24 * 60 * 60_000, [...visible.keys()])
+      .flatMap((stats) => {
+        const mapping = visible.get(stats.destinationId);
+        return mapping ? [{ ...stats, bskyIdentifier: mapping.bskyIdentifier }] : [];
+      });
+    res.json({ days, destinations });
   }),
 );
 

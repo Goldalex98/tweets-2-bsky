@@ -100,3 +100,40 @@ export async function waitForVideoProcessing<T>(
   }
   throw new Error('Video processing timed out after 20 minutes.');
 }
+
+/** Response of `app.bsky.video.getUploadLimits`. */
+export interface VideoUploadLimits {
+  canUpload: boolean;
+  remainingDailyVideos?: number;
+  remainingDailyBytes?: number;
+  message?: string;
+  error?: string;
+}
+
+/** The account cannot take this video today, so it goes out as a link instead. */
+export class VideoUploadLimitError extends Error {
+  override readonly name = 'VideoUploadLimitError';
+}
+
+/** Why the video service would refuse an upload, or null when it should be attempted. */
+export function videoUploadBlockedReason(limits: VideoUploadLimits | null, sizeBytes?: number): string | null {
+  if (!limits) return null;
+  if (!limits.canUpload) {
+    const detail = String(limits.message || limits.error || 'uploads not allowed right now').slice(0, 200);
+    return `Bluesky video upload limit: ${detail}`;
+  }
+  const remainingVideos = limits.remainingDailyVideos;
+  if (typeof remainingVideos === 'number' && Number.isFinite(remainingVideos) && remainingVideos <= 0) {
+    return 'Bluesky daily video upload limit reached';
+  }
+  const remainingBytes = limits.remainingDailyBytes;
+  if (
+    sizeBytes !== undefined &&
+    typeof remainingBytes === 'number' &&
+    Number.isFinite(remainingBytes) &&
+    sizeBytes > remainingBytes
+  ) {
+    return 'Video is larger than the remaining daily Bluesky upload allowance';
+  }
+  return null;
+}

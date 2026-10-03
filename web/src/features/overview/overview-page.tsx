@@ -6,6 +6,7 @@ import type { ActivityLog } from '../activity/types';
 import type { AccountMapping, BskyProfileView } from '../destinations/types';
 import type { StatusState } from '../status/types';
 import { formatCompactNumber, formatLocalDateTime, formatState } from '../../lib/dashboard-utils';
+import { FallbackStatsCard } from './fallback-stats-card';
 
 interface DashboardLink {
   id: DashboardTab;
@@ -145,6 +146,8 @@ export function OverviewPage({
           ))}
         </CardContent>
       </Card>
+
+      {mappings.length > 0 ? <FallbackStatsCard mappings={mappings} /> : null}
 
       <Card>
         <CardHeader>
