@@ -549,6 +549,14 @@ const webhookRateLimiter = createRateLimiter({
   key: (request) => getRequestIp(request),
 });
 
+// Storage and fallback reports count or scan tables, so cap how often one client can ask.
+const reportRateLimiter = createRateLimiter({
+  scope: 'storage-report',
+  windowMs: 60_000,
+  max: 60,
+  key: (request) => getRequestIp(request),
+});
+
 const ingestionRateLimiter = createRateLimiter({
   scope: 'normalized-ingestion',
   windowMs: 60_000,
@@ -2861,6 +2869,7 @@ app.get(
 
 app.get(
   '/api/admin/storage',
+  reportRateLimiter,
   authenticateToken,
   requireAdmin,
   asAuthedHandler((_req, res) => {
@@ -2870,6 +2879,7 @@ app.get(
 
 app.post(
   '/api/admin/storage/prune',
+  reportRateLimiter,
   authenticateToken,
   requireAdmin,
   requireJsonObject,
@@ -2898,6 +2908,7 @@ app.post(
 
 app.get(
   '/api/delivery-fallbacks',
+  reportRateLimiter,
   authenticateToken,
   asAuthedHandler((req, res) => {
     const daysCandidate = Number(req.query.days ?? 30);
