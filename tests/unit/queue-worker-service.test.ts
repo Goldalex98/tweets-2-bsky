@@ -96,6 +96,7 @@ function dependencies(
       markDone: (queueItem) => events.push(`done:${queueItem.twitter_id}`),
       releaseForRetry: (queueItem, _error, maxAttempts) => {
         events.push(`retry:${queueItem.twitter_id}:${maxAttempts}`);
+        return queueItem.attempts + 1 >= maxAttempts ? 'parked' : 'retrying';
       },
       deferUnattempted: (queueItem, _error, notBefore) => events.push(`defer:${queueItem.twitter_id}:${notBefore}`),
       describeError: (error) => (error instanceof Error ? error.message : String(error)),

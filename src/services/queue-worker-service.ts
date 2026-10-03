@@ -66,8 +66,8 @@ export interface QueueWorkerDependencies<Config extends QueueWorkerConfig, Mappi
    */
   findSettlement(item: QueueItem): { status: string; recordedAt?: number } | null;
   markDone(item: QueueItem): void;
-  /** Returns the row's outcome when the store knows it (a rate limit can defer without spending an attempt). */
-  releaseForRetry(item: QueueItem, error: string, maxAttempts: number): 'retrying' | 'parked' | void;
+  /** A rate-limited row can be deferred without spending an attempt, so the store reports the outcome. */
+  releaseForRetry(item: QueueItem, error: string, maxAttempts: number): 'retrying' | 'parked';
   deferUnattempted(item: QueueItem, error: string, notBefore: number): void;
   settleWithOwnership?(destinationKey: string, settle: () => void): boolean;
   describeError(error: unknown): string;
@@ -253,10 +253,8 @@ export class DestinationQueueWorkerService<Config extends QueueWorkerConfig, Map
           settlement.deferred += 1;
           continue;
         }
-        const outcome = this.dependencies.releaseForRetry(item, retryError, this.maxAttempts);
-        if ((outcome ?? (item.attempts + 1 >= this.maxAttempts ? 'parked' : 'retrying')) === 'parked') {
-          settlement.parked += 1;
-        } else settlement.retrying += 1;
+        if (this.dependencies.releaseForRetry(item, retryError, this.maxAttempts) === 'parked') settlement.parked += 1;
+        else settlement.retrying += 1;
       }
     };
     if (this.dependencies.settleWithOwnership) {
