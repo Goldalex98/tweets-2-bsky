@@ -45,6 +45,10 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
               headers: { 'x-forwarded-proto': 'https' },
               body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'initial-password' }),
             });
+            const unknownUserLogin = await request('/api/login', {
+              method: 'POST',
+              body: JSON.stringify({ identifier: 'nobody', password: 'initial-password' }),
+            });
             const cookieOnlyLogin = await request('/api/login', {
               method: 'POST',
               headers: { 'x-forwarded-proto': 'https' },
@@ -124,6 +128,17 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
               });
               if (rateLimited.status === 429) break;
             }
+            // Behind a proxy that appends the client address, rotating the
+            // client-supplied leftmost X-Forwarded-For entry must not reset the limit.
+            let spoofedRateLimited = null;
+            for (let index = 0; index < 35; index += 1) {
+              spoofedRateLimited = await request('/api/login', {
+                method: 'POST',
+                headers: { 'x-forwarded-for': '203.0.113.' + index + ', 198.51.100.7' },
+                body: JSON.stringify({ includeBearerToken: true, identifier: 'admin', password: 'wrong-password' }),
+              });
+              if (spoofedRateLimited.status === 429) break;
+            }
             await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
               loginStatus: login.status,
               loginHasToken: typeof login.body?.token === 'string',
@@ -145,6 +160,8 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
               tooLarge: tooLarge.status,
               tooLargeCode: tooLarge.body?.error?.code,
               rateLimited: rateLimited?.status,
+              unknownUserLogin: unknownUserLogin.status,
+              spoofedRateLimited: spoofedRateLimited?.status,
             }));
           } finally {
             await new Promise((resolve) => listener.close(resolve));
@@ -177,6 +194,8 @@ test('cookie auth, CSRF, bearer compatibility, revocation, and HTTP hardening wo
       tooLarge: 413,
       tooLargeCode: 'BODY_TOO_LARGE',
       rateLimited: 429,
+      spoofedRateLimited: 429,
+      unknownUserLogin: 401,
     });
     expect(result.corsHeader).toBeUndefined();
     const sessionCookie = result.cookieFlags.find((value: string) => value.startsWith('t2b_session='));

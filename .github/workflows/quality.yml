@@ -39,7 +39,14 @@ jobs:
 
       # Advisories against the resolved tree, not the declared ranges: stale
       # lockfile pins are how this project accumulated 68 advisories unnoticed.
-      - name: Audit dependencies
+      # Gate on what ships in the image. Release tooling (semantic-release and the
+      # npm copy it bundles) often has advisories with no published fix, so the
+      # full tree is reported without blocking releases.
+      - name: Audit production dependencies
+        run: bun audit --prod --audit-level=high
+
+      - name: Audit all dependencies (report only)
+        continue-on-error: true
         run: bun audit --audit-level=high
 
       - name: Verify scraper compatibility

@@ -84,6 +84,49 @@ describe('webhook notifications', () => {
     ).toBe('internal.test');
   });
 
+  test('IPv4-mapped, NAT64 and special-purpose addresses are private', async () => {
+    // WHATWG URL parsing rewrites [::ffff:127.0.0.1] to the hex form ::ffff:7f00:1.
+    for (const address of [
+      '::ffff:127.0.0.1',
+      '::ffff:7f00:1',
+      '[::ffff:7f00:1]',
+      '::ffff:a9fe:a9fe',
+      '::ffff:c0a8:105',
+      '64:ff9b::a9fe:a9fe',
+      '64:ff9b::127.0.0.1',
+      '2002:7f00:1::',
+      '2002:c0a8:101::1',
+      '2001:0:4136:e378::1',
+      'fec0::1',
+      '::ffff:0:7f00:1',
+      '::',
+      'fe80::1%eth0',
+      'fd00::1',
+      '192.0.0.8',
+      '198.18.0.1',
+      '255.255.255.255',
+    ]) {
+      expect(isPrivateNetworkAddress(address)).toBe(true);
+    }
+    for (const address of [
+      '::ffff:8.8.8.8',
+      '::ffff:808:808',
+      '64:ff9b::808:808',
+      '2002:808:808::1',
+      '2606:4700::1111',
+      '1.1.1.1',
+    ]) {
+      expect(isPrivateNetworkAddress(address)).toBe(false);
+    }
+    for (const url of ['https://[::ffff:127.0.0.1]/x', 'https://[::ffff:a9fe:a9fe]/x']) {
+      await expect(
+        validateWebhookTarget(url, false, async () => {
+          throw new Error('resolver must not be called for IPv6 literals');
+        }),
+      ).rejects.toThrow('private network');
+    }
+  });
+
   test('returns the validated address so the request cannot re-resolve DNS', async () => {
     const resolved = await resolveWebhookTarget('https://hooks.example.test/events', false, async () => [
       { address: '203.0.113.8', family: 4 },
