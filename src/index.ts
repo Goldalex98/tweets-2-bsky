@@ -1840,6 +1840,28 @@ async function processTweets(
       if (media.type === 'photo') {
         const url = media.media_url_https;
         if (!url) continue;
+        // Runs after an upload has succeeded, so an alt-text failure must not
+        // fall through to the retry below and upload the image a second time.
+        const resolveAltText = async (buffer: Buffer, mimeType: string): Promise<string> => {
+          if (media.ext_alt_text || !isAltTextConfigured(mapping.aiOverrides, aiConfigOverride)) {
+            return normalizeAltText(media.ext_alt_text);
+          }
+          try {
+            console.log(`[${twitterUsername}] 🤖 Generating alt text via AI provider...`);
+            // Use original tweet text for context, not the modified/cleaned one
+            const altTextContext = buildAltTextContext(tweet, tweetText, tweetMap);
+            const generated = await generateAltText(buffer, mimeType, altTextContext, {
+              overrides: mapping.aiOverrides,
+              config: aiConfigOverride,
+            });
+            if (generated) console.log(`[${twitterUsername}] ✅ Alt text generated: ${generated.substring(0, 50)}...`);
+            return normalizeAltText(generated);
+          } catch (altError) {
+            assertDeliveryActive();
+            console.warn(`[${twitterUsername}] ⚠️ Alt text generation failed: ${describeError(altError)}`);
+            return '';
+          }
+        };
         try {
           const highQualityUrl = url.includes('?') ? url.replace('?', ':orig?') : `${url}:orig`;
           console.log(`[${twitterUsername}] 📥 Downloading image (high quality): ${path.basename(highQualityUrl)}`);
@@ -1858,26 +1880,7 @@ async function processTweets(
             blob = await uploadToBluesky(agent, buffer, mimeType);
           }
 
-          // The image is already uploaded, so an alt-text failure must not fall
-          // through to the retry below and upload it a second time.
-          let altText = media.ext_alt_text;
-          if (!altText && isAltTextConfigured(mapping.aiOverrides, aiConfigOverride)) {
-            try {
-              console.log(`[${twitterUsername}] 🤖 Generating alt text via AI provider...`);
-              // Use original tweet text for context, not the modified/cleaned one
-              const altTextContext = buildAltTextContext(tweet, tweetText, tweetMap);
-              altText = await generateAltText(buffer, mimeType, altTextContext, {
-                overrides: mapping.aiOverrides,
-                config: aiConfigOverride,
-              });
-              if (altText) console.log(`[${twitterUsername}] ✅ Alt text generated: ${altText.substring(0, 50)}...`);
-            } catch (altError) {
-              assertDeliveryActive();
-              console.warn(`[${twitterUsername}] ⚠️ Alt text generation failed: ${describeError(altError)}`);
-            }
-          }
-
-          images.push({ alt: normalizeAltText(altText), image: blob, aspectRatio });
+          images.push({ alt: await resolveAltText(buffer, mimeType), image: blob, aspectRatio });
           console.log(`[${twitterUsername}] ✅ Image uploaded.`);
         } catch (err) {
           assertDeliveryActive();
@@ -1895,7 +1898,7 @@ async function processTweets(
             } else {
               blob = await uploadToBluesky(agent, buffer, mimeType);
             }
-            images.push({ alt: normalizeAltText(media.ext_alt_text), image: blob, aspectRatio });
+            images.push({ alt: await resolveAltText(buffer, mimeType), image: blob, aspectRatio });
             console.log(`[${twitterUsername}] ✅ Image uploaded on retry.`);
           } catch (retryErr) {
             console.error(`[${twitterUsername}] ❌ Retry also failed:`, (retryErr as Error).message);
