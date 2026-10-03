@@ -47,7 +47,7 @@ Useful commands:
 
 ```bash
 docker logs -f tweets-2-bsky
-docker exec -it tweets-2-bsky bun dist/cli.js status
+docker exec -it -u bun tweets-2-bsky bun dist/cli.js status
 docker compose pull && docker compose up -d
 ```
 
@@ -174,7 +174,7 @@ bun run cli -- notifications
 bun run cli -- encryption-status
 ```
 
-In Docker: `docker exec -it tweets-2-bsky bun dist/cli.js status` (same subcommands after `dist/cli.js`).
+In Docker: `docker exec -it -u bun tweets-2-bsky bun dist/cli.js status` (same subcommands after `dist/cli.js`).
 
 ## Updating
 

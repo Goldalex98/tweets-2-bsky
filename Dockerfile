@@ -54,7 +54,10 @@ COPY --from=build /app/scripts/image-data-invariants.ts ./scripts/image-data-inv
 COPY --from=build /app/scripts/image-copied-volume-smoke.ts ./scripts/image-copied-volume-smoke.ts
 COPY --from=build /app/tests/fixtures/config-v*-*.json ./scripts/fixtures/
 
+COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/tweets2bsky-entrypoint
+
 RUN mkdir -p /app/data \
+  && chown 1000:1000 /app/data \
   && ln -sf /app/data/config.json /app/config.json
 
 VOLUME ["/app/data"]
@@ -63,5 +66,6 @@ EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 CMD ["bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/readyz').then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# Starts as root only long enough to fix data volume ownership, then runs as bun (uid 1000).
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/tweets2bsky-entrypoint"]
 CMD ["bun", "dist/index.js"]

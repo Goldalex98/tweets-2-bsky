@@ -37,12 +37,30 @@ export async function validateImage(image: string, pull = true, copiedVolume?: s
     return;
   }
   const container = `tweets-2-bsky-validation-${process.pid}-${Date.now()}`;
+  // A volume written by an older, root-run image: the entrypoint must hand it to uid 1000.
+  const legacyVolume = `${container}-legacy`;
   try {
+    await runCommand('docker', ['volume', 'create', legacyVolume]);
+    await runCommand('docker', [
+      'run',
+      '--rm',
+      '--network',
+      'none',
+      '--mount',
+      `type=volume,source=${legacyVolume},target=/app/data`,
+      '--entrypoint',
+      'sh',
+      image,
+      '-c',
+      'touch /app/data/legacy-root-file && mkdir -p /app/data/backups',
+    ]);
     await runCommand('docker', [
       'run',
       '--detach',
       '--name',
       container,
+      '--mount',
+      `type=volume,source=${legacyVolume},target=/app/data`,
       '--publish',
       '127.0.0.1::3000',
       '--env',
@@ -74,6 +92,23 @@ export async function validateImage(image: string, pull = true, copiedVolume?: s
       await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
     if (!ready) throw new Error('Validation container readiness exceeded 180 seconds');
+    const appUid = await runCommand('docker', [
+      'exec',
+      container,
+      'sh',
+      '-c',
+      "for p in /proc/[0-9]*; do if tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null | grep -q '^bun dist/index.js'; then awk '/^Uid:/ {print $2}' \"$p/status\"; fi; done",
+    ]);
+    if (appUid !== '1000') throw new Error(`App process must run as uid 1000, found "${appUid}"`);
+    const legacyOwner = await runCommand('docker', [
+      'exec',
+      container,
+      'stat',
+      '-c',
+      '%u:%g',
+      '/app/data/legacy-root-file',
+    ]);
+    if (legacyOwner !== '1000:1000') throw new Error(`Legacy volume was not handed to uid 1000 (${legacyOwner})`);
     console.log(await runCommand('docker', ['exec', container, 'bun', '/app/scripts/image-runtime-smoke.ts'], 90_000));
     await validateImageData(image);
     console.log(`Published image readiness and runtime smoke passed: ${image}`);
@@ -83,8 +118,9 @@ export async function validateImage(image: string, pull = true, copiedVolume?: s
     );
     throw new Error(`Image validation failed. ${logs}`, { cause: error });
   } finally {
-    // Only this uniquely named, fresh fixture container and its anonymous volume.
+    // Only this uniquely named, fresh fixture container and its fixture volume.
     await runCommand('docker', ['rm', '--force', '--volumes', container]).catch(() => undefined);
+    await runCommand('docker', ['volume', 'rm', legacyVolume]).catch(() => undefined);
   }
 }
 
@@ -106,8 +142,10 @@ async function validateCopiedVolume(image: string, sourcePath: string): Promise<
         '--cap-drop=ALL',
         '--security-opt=no-new-privileges',
         '--tmpfs=/tmp:rw,nosuid,size=128m',
+        // volume-nocopy keeps the fresh volume root-owned: these stages run as
+        // root without capabilities, so they cannot write a uid 1000 copy-up.
         '--mount',
-        `type=volume,source=${volume},target=/app/data`,
+        `type=volume,source=${volume},target=/app/data,volume-nocopy`,
         '--env',
         'CONFIG_ENCRYPTION_KEY',
         '--entrypoint',
