@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  normalizePublicHttpUrl,
   normalizeXPost,
   queuedPostForPolicyEvaluation,
   validateNormalizedPost,
@@ -257,5 +258,12 @@ describe('queued policy re-evaluation payloads', () => {
         tweet_json: JSON.stringify({ sourceType: 'api', sourceId: 'source-api' }),
       }),
     ).toThrow();
+  });
+
+  test('public URLs reject IPv4-mapped IPv6 private literals', () => {
+    for (const url of ['https://[::ffff:127.0.0.1]/a', 'https://[::ffff:a9fe:a9fe]/a', 'https://[64:ff9b::a00:1]/a']) {
+      expect(() => normalizePublicHttpUrl(url)).toThrow('local or private address');
+    }
+    expect(normalizePublicHttpUrl('https://[2606:4700::1111]/a')).toBe('https://[2606:4700::1111]/a');
   });
 });

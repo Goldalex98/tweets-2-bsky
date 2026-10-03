@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { isPrivateNetworkAddress } from './webhook.js';
 
 export type NormalizedSourceType = 'x' | 'webhook' | 'api';
 export type NormalizedMediaType = 'image' | 'video' | 'gif';
@@ -114,16 +115,7 @@ export function normalizePublicHttpUrl(value: unknown, field = 'url'): string {
     throw new Error(`${field} must be an absolute HTTP(S) URL without embedded credentials.`);
   }
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  const privateIp =
-    isIP(host) > 0 &&
-    (/^(?:10|127|0)\./.test(host) ||
-      /^169\.254\./.test(host) ||
-      /^172\.(?:1[6-9]|2\d|3[01])\./.test(host) ||
-      /^192\.168\./.test(host) ||
-      host === '::1' ||
-      host === '::' ||
-      /^f[cd][0-9a-f]{2}:/i.test(host) ||
-      /^fe[89ab][0-9a-f]:/i.test(host));
+  const privateIp = isIP(host) > 0 && isPrivateNetworkAddress(host);
   if (
     !host ||
     host === 'localhost' ||

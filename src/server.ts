@@ -474,16 +474,9 @@ const authRateBuckets = new Map<string, RateLimitBucket>();
 // proxy; otherwise clients could spoof the header to bypass auth rate limiting.
 const TRUST_PROXY = ['1', 'true', 'yes'].includes((process.env.TRUST_PROXY || '').trim().toLowerCase());
 
+// With `trust proxy` set to one hop, Express derives req.ip from the entry the
+// proxy appended. The leftmost X-Forwarded-For entry is client-controlled.
 const getRequestIp = (req: Request): string => {
-  if (TRUST_PROXY) {
-    const forwarded = req.headers?.['x-forwarded-for'];
-    if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
-      const [first] = forwarded.split(',');
-      if (first && first.trim().length > 0) {
-        return first.trim();
-      }
-    }
-  }
   if (typeof req.ip === 'string' && req.ip.length > 0) {
     return req.ip;
   }
@@ -2670,6 +2663,10 @@ app.post('/api/register', authRateLimiter, (req, res) => {
   });
 });
 
+// Same cost as real hashes, computed once at startup so the first unknown-user
+// login is not slower than later ones.
+const UNKNOWN_USER_PASSWORD_HASH = bcrypt.hashSync(randomBytes(16).toString('hex'), 10);
+
 app.post('/api/login', authRateLimiter, async (req, res) => {
   const password = req.body?.password;
   const identifier = normalizeOptionalString(req.body?.identifier) ?? normalizeOptionalString(req.body?.email);
@@ -2681,7 +2678,10 @@ app.post('/api/login', authRateLimiter, async (req, res) => {
   const config = getConfig();
   const user = findUserByIdentifier(config, identifier);
 
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+  // Compare against a throwaway hash for unknown users so response timing does
+  // not reveal which usernames exist.
+  const passwordMatches = await bcrypt.compare(password, user?.passwordHash ?? UNKNOWN_USER_PASSWORD_HASH);
+  if (!user || !passwordMatches) {
     res.status(401).json({ error: 'Invalid credentials' });
     return;
   }

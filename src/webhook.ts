@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import https from 'node:https';
-import { isIP } from 'node:net';
+import { BlockList, isIP } from 'node:net';
 import type { NotificationConfig, NotificationEvent } from './config/schemas.js';
 import { sanitizeForDiagnostics } from './observability.js';
 
@@ -147,24 +147,82 @@ export function unwrapIpLiteralHostname(hostname: string): string {
   return hostname;
 }
 
+// Special-purpose ranges a public webhook or media URL must never reach.
+// BlockList also matches IPv4-mapped IPv6 (::ffff:7f00:1) against the IPv4 rules.
+const PRIVATE_NETWORKS = (() => {
+  const list = new BlockList();
+  for (const [network, prefix] of [
+    ['0.0.0.0', 8],
+    ['10.0.0.0', 8],
+    ['100.64.0.0', 10],
+    ['127.0.0.0', 8],
+    ['169.254.0.0', 16],
+    ['172.16.0.0', 12],
+    ['192.0.0.0', 24],
+    ['192.168.0.0', 16],
+    ['198.18.0.0', 15],
+    ['224.0.0.0', 3],
+  ] as const) {
+    list.addSubnet(network, prefix, 'ipv4');
+  }
+  for (const [network, prefix] of [
+    ['::', 96],
+    ['::ffff:0:0:0', 96],
+    ['64:ff9b:1::', 48],
+    ['100::', 64],
+    ['2001::', 32],
+    ['fc00::', 7],
+    ['fe80::', 10],
+    ['fec0::', 10],
+    ['ff00::', 8],
+  ] as const) {
+    list.addSubnet(network, prefix, 'ipv6');
+  }
+  return list;
+})();
+
 export function isPrivateNetworkAddress(address: string): boolean {
   const normalized = unwrapIpLiteralHostname(address).toLowerCase().split('%')[0] ?? '';
-  if (normalized === '::1' || normalized === '::' || normalized.startsWith('fe80:')) return true;
-  if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
-  if (normalized.startsWith('::ffff:')) return isPrivateNetworkAddress(normalized.slice(7));
-  if (isIP(normalized) !== 4) return false;
-  const octets = normalized.split('.').map(Number);
-  const [a = -1, b = -1] = octets;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    a >= 224
+  const family = isIP(normalized);
+  if (family === 4) return PRIVATE_NETWORKS.check(normalized, 'ipv4');
+  if (family !== 6) return false;
+  if (PRIVATE_NETWORKS.check(normalized, 'ipv6')) return true;
+  // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) carry an IPv4 address; judge that
+  // address so DNS64 hosts can still reach public IPv4-only services.
+  const embedded = embeddedIpv4(normalized);
+  return embedded !== undefined && PRIVATE_NETWORKS.check(embedded, 'ipv4');
+}
+
+function embeddedIpv4(address: string): string | undefined {
+  const groups = expandIpv6(address);
+  if (!groups) return undefined;
+  const toIpv4 = (high: number, low: number) => `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((group) => group === 0)) {
+    return toIpv4(groups[6] ?? 0, groups[7] ?? 0);
+  }
+  if (groups[0] === 0x2002) return toIpv4(groups[1] ?? 0, groups[2] ?? 0);
+  return undefined;
+}
+
+function expandIpv6(address: string): number[] | undefined {
+  let text = address;
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  if (dotted?.[1]) {
+    const octets = dotted[1].split('.').map(Number);
+    const [a = 0, b = 0, c = 0, d = 0] = octets;
+    text = `${text.slice(0, -dotted[1].length)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head = '', tail] = text.split('::');
+  const headGroups = head ? head.split(':') : [];
+  const tailGroups = tail ? tail.split(':') : [];
+  const missing = 8 - headGroups.length - tailGroups.length;
+  if (missing < 0 || (tail === undefined && missing !== 0)) return undefined;
+  const groups = [...headGroups, ...Array<string>(missing).fill('0'), ...tailGroups].map((group) =>
+    Number.parseInt(group, 16),
   );
+  return groups.length === 8 && groups.every((group) => Number.isInteger(group) && group >= 0 && group <= 0xffff)
+    ? groups
+    : undefined;
 }
 
 export interface ResolvedWebhookTarget {
