@@ -118,7 +118,7 @@ export async function validateImage(image: string, pull = true, copiedVolume?: s
     );
     throw new Error(`Image validation failed. ${logs}`, { cause: error });
   } finally {
-    // Only this uniquely named, fresh fixture container and its anonymous volume.
+    // Only this uniquely named, fresh fixture container and its fixture volume.
     await runCommand('docker', ['rm', '--force', '--volumes', container]).catch(() => undefined);
     await runCommand('docker', ['volume', 'rm', legacyVolume]).catch(() => undefined);
   }
@@ -142,8 +142,10 @@ async function validateCopiedVolume(image: string, sourcePath: string): Promise<
         '--cap-drop=ALL',
         '--security-opt=no-new-privileges',
         '--tmpfs=/tmp:rw,nosuid,size=128m',
+        // volume-nocopy keeps the fresh volume root-owned: these stages run as
+        // root without capabilities, so they cannot write a uid 1000 copy-up.
         '--mount',
-        `type=volume,source=${volume},target=/app/data`,
+        `type=volume,source=${volume},target=/app/data,volume-nocopy`,
         '--env',
         'CONFIG_ENCRYPTION_KEY',
         '--entrypoint',

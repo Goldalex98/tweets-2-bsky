@@ -30,12 +30,15 @@ test.skipIf(process.platform === 'win32')(
   async () => {
     const syntax = Bun.spawnSync(['sh', '-n', entrypoint]);
     expect(syntax.exitCode, syntax.stderr.toString()).toBe(0);
+    // As root the script drops to uid 1000, which needs setpriv and that user to exist.
+    const root = process.getuid?.() === 0;
+    if (root && Bun.spawnSync(['sh', '-c', 'command -v setpriv && getent passwd 1000']).exitCode !== 0) return;
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 't2b-entrypoint-'));
     try {
       const result = await run(['sh', '-c', 'echo "ran as $(id -u)"; exit 7'], { TWEETS2BSKY_DATA_DIR: dataDir });
       expect(result.code).toBe(7);
-      // Root drops to uid 1000; any other user keeps its own uid.
-      const expected = process.getuid?.() === 0 ? 1000 : process.getuid?.();
+      // Any other user keeps its own uid.
+      const expected = root ? 1000 : process.getuid?.();
       expect(result.stdout.split('\n').at(-1)).toBe(`ran as ${expected}`);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
