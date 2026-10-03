@@ -104,6 +104,40 @@ the key is required at startup. Keep the same key across restarts and copied-vol
 
 The Docker image runs the app as the unprivileged `bun` user (uid/gid 1000). The entrypoint starts as root only to check the data directory (`TWEETS2BSKY_DATA_DIR`, then `APP_DATA_DIR`, default `/app/data`): if anything in it is owned by another user (for example a volume written by an image before 3.7), it runs `chown -R 1000:1000` once and logs it, then drops privileges with `setpriv`. This also applies to a bind-mounted data directory, whose files become owned by uid 1000 on the host. Starting the container with `--user 1000:1000` skips this step. If the container cannot change ownership (no `CAP_CHOWN`), it logs a warning and keeps running as root on the still root-owned data; if it cannot switch users (no `SETUID`/`SETGID`), it exits with an error instead of running as a root that cannot write the data. Run CLI commands as the same user, `docker exec -it -u bun tweets-2-bsky bun dist/cli.js …`, so files they write stay readable by the app. Chromium screenshots still run with `--no-sandbox`.
 
+## Production host access
+
+Production runs on an OVH server (login user `ubuntu`) as the Portainer Git stack `tweets2bsky`
+(stack ID 2, endpoint 3, entry point `docker-compose.portainer.yml`, volume `tweets2bsky_data`).
+The app container publishes no host port; Portainer is bound to the server's loopback only.
+
+- **Public app:** `bluesky.agoldberg.net` → Cloudflare proxy → Caddy → app container.
+- **Portainer:** bound to the server's loopback (`127.0.0.1:9443`) only. It is published at
+  `portainer.agoldberg.net` through the Cloudflare Tunnel `ovh-t2b`. The connector is the
+  Portainer stack `cloudflared` (`cloudflare/cloudflared:latest`, host networking, uid 1000,
+  Watchtower-updated). It reads its token from `/home/ubuntu/.cloudflared/token` (mode 600), so
+  the token never appears in the stack or `docker inspect`. The route targets
+  `https://127.0.0.1:9443` with TLS verification off for that loopback hop only, because Portainer
+  serves a self-signed `localhost` certificate. A Cloudflare Access application (`portainer`, the
+  reusable "User" policy) gates the hostname. Portainer controls the Docker socket, so that Access
+  policy is the security boundary. Keep Portainer's own login.
+- **Updates:** the app stack `tweets2bsky` runs `ghcr.io/goldalex98/tweets-2-bsky:latest` with
+  `TWEETS2BSKY_AUTO_UPDATE=true` and no `TWEETS2BSKY_IMAGE` pin. The shared Watchtower (stack
+  `container-updater`, label-enable mode, hourly, cleanup on) updates every container labelled
+  `com.centurylinklabs.watchtower.enable=true`: the app, Caddy, `cloudflared` and Watchtower itself.
+  Every image-building push to `main` therefore reaches production within about an hour. Portainer
+  is updated by hand. To pin the app again, set `TWEETS2BSKY_IMAGE` to an `@sha256:` digest and
+  `TWEETS2BSKY_AUTO_UPDATE=false`.
+- **Stack Git reference:** Portainer 2.45 refuses to clone repositories that contain symlinks, and
+  `.claude/skills` is one. The stack therefore reads `docker-compose.portainer.yml` from
+  `refs/tags/v3.6.6`. Check that the file is unchanged on `main` before relying on that tag.
+- **SSH (operators and agents):** use a dedicated per-machine key and a host alias in
+  `~/.ssh/config`. Password login is still enabled on the server. The server address stays out of
+  this public repository.
+
+Fallback when the Cloudflare tunnel is down: Portainer listens on the server's loopback `127.0.0.1:9443`, so run
+`ssh -N -L 127.0.0.1:9446:127.0.0.1:9443 ubuntu@<server>` (password login works) and
+open `https://127.0.0.1:9446`.
+
 ## Backup and restore
 
 Redacted backups preserve the current deployment's users and credentials during restore. Full backups contain encrypted credentials and require current-admin reauthentication plus typed confirmation. Validation is dry-run and no-write. Restore stages SQLite for startup replacement, enters restart-required mode (mutating APIs blocked, `/readyz` not ready) until restart, and retains pre-restore rollback artifacts. On Windows, stop the service before retrying if pending-database rename fails because the file is locked.
