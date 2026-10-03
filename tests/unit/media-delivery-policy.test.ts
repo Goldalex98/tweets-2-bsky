@@ -7,6 +7,7 @@ import {
   THUMBNAIL_MAX_BYTES,
   VIDEO_MAX_BYTES,
   VIDEO_PROCESSING_TIMEOUT_MS,
+  videoUploadBlockedReason,
 } from '../../src/media-delivery-policy.js';
 import { runWithDeliveryContext } from '../../src/services/delivery-context.js';
 
@@ -186,5 +187,30 @@ describe('video policy', () => {
     ).rejects.toThrow('Fixture delivery cancelled');
     expect(requests).toBe(1);
     expect(sleeps).toBe(0);
+  });
+});
+
+describe('video upload limits', () => {
+  test('an account that can upload is not blocked, and an unknown answer never blocks', () => {
+    expect(videoUploadBlockedReason(null)).toBeNull();
+    expect(videoUploadBlockedReason({ canUpload: true, remainingDailyVideos: 3, remainingDailyBytes: 5_000 }, 4_000)).toBeNull();
+    expect(videoUploadBlockedReason({ canUpload: true })).toBeNull();
+  });
+
+  test('refusals, an exhausted daily count and an oversized video become link fallbacks', () => {
+    expect(videoUploadBlockedReason({ canUpload: false, message: 'Daily limit reached' })).toBe(
+      'Bluesky video upload limit: Daily limit reached',
+    );
+    expect(videoUploadBlockedReason({ canUpload: false })).toBe(
+      'Bluesky video upload limit: uploads not allowed right now',
+    );
+    expect(videoUploadBlockedReason({ canUpload: true, remainingDailyVideos: 0 })).toBe(
+      'Bluesky daily video upload limit reached',
+    );
+    // Size is only known after the download, so the pre-download check ignores bytes.
+    expect(videoUploadBlockedReason({ canUpload: true, remainingDailyBytes: 1_000 })).toBeNull();
+    expect(videoUploadBlockedReason({ canUpload: true, remainingDailyBytes: 1_000 }, 2_000)).toBe(
+      'Video is larger than the remaining daily Bluesky upload allowance',
+    );
   });
 });

@@ -6,7 +6,7 @@ import { classifyQueueError, sanitizeForDiagnostics, sanitizedErrorMessage } fro
 import { parseRateLimitResetMs } from './x-rate-limit.js';
 import { createIngestionSecrets, hashIngestionToken, type IngestionScope } from './ingestion-security.js';
 import { decryptValue, encryptValue, isEncryptedValue, parseEncryptionKey } from './secret-storage.js';
-import type { DeliveryFallbackEvent } from './delivery-diagnostics.js';
+import { type DeliveryFallbackEvent, parseDeliveryDiagnostics } from './delivery-diagnostics.js';
 import type { NormalizedPost } from './normalized-post.js';
 import { parseSqliteUtcTimestampMs, toIsoUtcTimestamp } from './sqlite-utc-timestamp.js';
 
@@ -1106,6 +1106,55 @@ export const historyRetentionService = {
   /** Folds the WAL back into the database file and truncates it. */
   checkpoint(): void {
     db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  },
+};
+
+export const databaseStorageService = {
+  /** Row count for every application table, largest first. */
+  tableRowCounts(): Array<{ name: string; rows: number }> {
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    return tables
+      .map(({ name }) => {
+        const row = db.prepare(`SELECT COUNT(*) AS c FROM "${name.replaceAll('"', '""')}"`).get() as
+          | { c: number }
+          | undefined;
+        return { name, rows: Number(row?.c) || 0 };
+      })
+      .sort((a, b) => b.rows - a.rows || a.name.localeCompare(b.name));
+  },
+};
+
+export interface DestinationFallbackStats {
+  destinationId: string;
+  posted: number;
+  postsWithFallback: number;
+  byKind: Partial<Record<DeliveryFallbackEvent['kind'], number>>;
+}
+
+export const deliveryFallbackStatsService = {
+  /** How many posts per destination since `sinceMs` used each non-native fallback. */
+  summarize(sinceMs: number): DestinationFallbackStats[] {
+    const rows = db
+      .prepare(
+        `SELECT destination_id, delivery_diagnostics FROM processed_tweets
+         WHERE status = 'migrated' AND posted_at >= ? AND destination_id IS NOT NULL`,
+      )
+      .all(sinceMs) as Array<{ destination_id: string; delivery_diagnostics: string | null }>;
+    const byDestination = new Map<string, DestinationFallbackStats>();
+    for (const row of rows) {
+      let stats = byDestination.get(row.destination_id);
+      if (!stats) {
+        stats = { destinationId: row.destination_id, posted: 0, postsWithFallback: 0, byKind: {} };
+        byDestination.set(row.destination_id, stats);
+      }
+      stats.posted += 1;
+      const kinds = new Set(parseDeliveryDiagnostics(row.delivery_diagnostics).map((event) => event.kind));
+      if (kinds.size > 0) stats.postsWithFallback += 1;
+      for (const kind of kinds) stats.byKind[kind] = (stats.byKind[kind] ?? 0) + 1;
+    }
+    return [...byDestination.values()].sort((a, b) => a.destinationId.localeCompare(b.destinationId));
   },
 };
 

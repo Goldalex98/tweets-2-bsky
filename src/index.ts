@@ -5,6 +5,9 @@ import {
   VIDEO_MAX_BYTES,
   VIDEO_MAX_DURATION_MS,
   VIDEO_PROCESSING_TIMEOUT_MS,
+  type VideoUploadLimits,
+  VideoUploadLimitError,
+  videoUploadBlockedReason,
 } from './media-delivery-policy.js';
 import {
   assertDeliveryActive,
@@ -76,6 +79,7 @@ import {
 import { evaluateSourceFilter, SOURCE_FILTER_POLICY_VERSION } from './source-filter.js';
 import type { SourceFilterDecision } from './source-filter.js';
 import { getSchedulerIntervalMinutes } from './scheduler-timing.js';
+import { historyRetentionDays } from './storage-report.js';
 import { XRateGovernor, isAuthError, isRateLimitError, parseRateLimitResetMs } from './x-rate-limit.js';
 import {
   buildPollNote,
@@ -456,7 +460,7 @@ const QUEUE_BATCH_MAX_ITEMS = envInt('QUEUE_BATCH_MAX_ITEMS', 50, 1, 500);
 const DESTINATION_LEASE_TTL_MS = envInt('DESTINATION_LEASE_TTL_MS', 5 * 60_000, 10_000, 60 * 60_000);
 // Days of operational history (ingestion audit, AI usage, webhook deliveries)
 // kept in SQLite; 0 keeps everything. Delivery history is never pruned.
-const HISTORY_RETENTION_DAYS = envInt('HISTORY_RETENTION_DAYS', 90, 0, 3650);
+const HISTORY_RETENTION_DAYS = historyRetentionDays();
 const HISTORY_RETENTION_INTERVAL_MS = 24 * 60 * 60_000;
 const SHUTDOWN_DEADLINE_MS = 50_000;
 // Identifies this process when taking destination leases and durable backfill
@@ -1209,6 +1213,31 @@ export async function buildSynthesizedQuoteCard(
   return { $type: 'app.bsky.embed.external', external };
 }
 
+/**
+ * Asks the video service whether this account can upload today, before the
+ * video is downloaded. Any failure to ask returns null and the upload is
+ * attempted as before.
+ */
+async function fetchVideoUploadLimits(agent: BskyAgent): Promise<VideoUploadLimits | null> {
+  try {
+    const { data: serviceAuth } = await agent.com.atproto.server.getServiceAuth({
+      aud: 'did:web:video.bsky.app',
+      lxm: 'app.bsky.video.getUploadLimits',
+    });
+    const response = await deliveryFetch('https://video.bsky.app/xrpc/app.bsky.video.getUploadLimits', {
+      headers: { Authorization: `Bearer ${serviceAuth.token}` },
+      signal: deliverySignal(AbortSignal.timeout(15_000)),
+    });
+    if (!response.ok) return null;
+    const limits = (await response.json()) as VideoUploadLimits;
+    return typeof limits?.canUpload === 'boolean' ? limits : null;
+  } catch (error) {
+    assertDeliveryActive();
+    console.warn(`[VIDEO] Could not check upload limits: ${describeError(error)}`);
+    return null;
+  }
+}
+
 async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: string): Promise<BlobRef> {
   const sanitizedFilename = filename.split('?')[0] || 'video.mp4';
   console.log(
@@ -1921,10 +1950,15 @@ async function processTweets(
         }
 
         try {
+          const uploadLimits = dryRun ? null : await fetchVideoUploadLimits(agent);
+          const blockedBeforeDownload = videoUploadBlockedReason(uploadLimits);
+          if (blockedBeforeDownload) throw new VideoUploadLimitError(blockedBeforeDownload);
           const { buffer, url: videoUrl } = await downloadVideoVariant(variants, duration, async (url) => {
             updateAppStatus({ message: `Downloading video: ${path.basename(url)}` });
             return (await downloadMedia(url, 30_000, VIDEO_MAX_BYTES)).buffer;
           });
+          const blockedBySize = videoUploadBlockedReason(uploadLimits, buffer.length);
+          if (blockedBySize) throw new VideoUploadLimitError(blockedBySize);
           const filename = videoUrl.split('/').pop() || 'video.mp4';
           if (dryRun) {
             console.log(`[${twitterUsername}] 🧪 [DRY RUN] Would upload video: ${filename}`);
@@ -1944,9 +1978,11 @@ async function processTweets(
           deliveryFallbacks.push({
             kind: 'video-link',
             reason:
-              message === 'VIDEO_FALLBACK_503'
-                ? 'Video processing unavailable (503)'
-                : `Video upload failed: ${message}`,
+              error instanceof VideoUploadLimitError
+                ? error.message
+                : message === 'VIDEO_FALLBACK_503'
+                  ? 'Video processing unavailable (503)'
+                  : `Video upload failed: ${message}`,
           });
         }
       }

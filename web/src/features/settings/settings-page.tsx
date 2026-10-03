@@ -36,6 +36,7 @@ import type {
   UserPermissions,
 } from './types';
 import type { SourceDefaultsSettings } from './use-source-defaults';
+import { StorageSection } from './storage-section';
 
 interface SettingsPageProps {
   section: SettingsSection;
@@ -305,6 +306,7 @@ export function SettingsPage(props: SettingsPageProps) {
             onRestore={props.onRestore}
           />
         ) : null}
+        {props.section === 'data' && isAdmin ? <StorageSection /> : null}
       </div>
     </section>
   );

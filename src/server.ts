@@ -95,12 +95,14 @@ import {
   blueskyAccountRuntimeService,
   databaseHealthService,
   dbService,
+  deliveryFallbackStatsService,
   duplicateFingerprintService,
   digestEntryService,
   digestJobService,
   ingestionAuditService,
   ingestionCredentialService,
   ingestionReplayService,
+  historyRetentionService,
   policyOverrideAuditService,
   postQueueService,
   routeInitialImportStateService,
@@ -108,6 +110,7 @@ import {
   webhookDeliveryService,
 } from './db.js';
 import type { ProcessedTweet } from './db.js';
+import { HISTORY_RETENTION_MAX_DAYS, buildStorageReport } from './storage-report.js';
 import {
   applyProfileMirrorSyncState,
   bridgeBlueskyAccountToFediverse,
@@ -2852,6 +2855,61 @@ app.get(
   asAuthedHandler((req, res) => {
     const config = getConfig();
     res.json(buildUserSummary(config, req.user));
+  }),
+);
+
+app.get(
+  '/api/admin/storage',
+  authenticateToken,
+  requireAdmin,
+  asAuthedHandler((_req, res) => {
+    res.json(buildStorageReport());
+  }),
+);
+
+app.post(
+  '/api/admin/storage/prune',
+  authenticateToken,
+  requireAdmin,
+  requireJsonObject,
+  asAuthedHandler((req, res) => {
+    if (req.body?.confirmation !== 'PRUNE_HISTORY') {
+      res.status(403).json({
+        error: { code: 'CONFIRMATION_REQUIRED', message: 'Confirmation PRUNE_HISTORY is required.' },
+      });
+      return;
+    }
+    const days = Number(req.body?.olderThanDays);
+    if (!Number.isInteger(days) || days < 1 || days > HISTORY_RETENTION_MAX_DAYS) {
+      res.status(400).json({
+        error: {
+          code: 'INVALID_RETENTION_DAYS',
+          message: `olderThanDays must be a whole number from 1 to ${HISTORY_RETENTION_MAX_DAYS}.`,
+        },
+      });
+      return;
+    }
+    const pruned = historyRetentionService.prune({ retentionMs: days * 24 * 60 * 60_000 });
+    historyRetentionService.checkpoint();
+    res.json({ pruned, report: buildStorageReport() });
+  }),
+);
+
+app.get(
+  '/api/delivery-fallbacks',
+  authenticateToken,
+  asAuthedHandler((req, res) => {
+    const daysCandidate = Number(req.query.days ?? 30);
+    const days = Number.isFinite(daysCandidate) ? Math.max(1, Math.min(Math.round(daysCandidate), 365)) : 30;
+    const config = getConfig();
+    const visible = new Map(getVisibleMappings(config, req.user).map((mapping) => [mapping.id, mapping]));
+    const destinations = deliveryFallbackStatsService
+      .summarize(Date.now() - days * 24 * 60 * 60_000)
+      .flatMap((stats) => {
+        const mapping = visible.get(stats.destinationId);
+        return mapping ? [{ ...stats, bskyIdentifier: mapping.bskyIdentifier }] : [];
+      });
+    res.json({ days, destinations });
   }),
 );
 

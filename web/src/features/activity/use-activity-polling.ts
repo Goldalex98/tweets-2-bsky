@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../api/client';
 import type { DashboardTab } from '../../api/types';
+import { useDocumentVisible } from '../../hooks/use-document-visible';
 import type { StatusResponse } from '../status/types';
 import type { ActivityLog, EnrichedPost, QueueItemView } from './types';
 
@@ -18,6 +19,8 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
+  const visible = useDocumentVisible();
+  const wasVisibleRef = useRef(visible);
   const statusRequestRef = useRef(0);
   const statusMutationRef = useRef(0);
   const activityRequestRef = useRef(0);
@@ -119,7 +122,20 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
   }, [authenticated, fetchEnrichedPosts, fetchQueueItems, fetchRecentActivity, fetchStatus]);
 
   useEffect(() => {
-    if (!authenticated) return;
+    if (!authenticated || !visible) {
+      wasVisibleRef.current = visible;
+      return;
+    }
+    // Coming back to a hidden tab: catch up at once instead of waiting a full interval.
+    if (!wasVisibleRef.current) {
+      wasVisibleRef.current = true;
+      void fetchStatus();
+      if (activeTab === 'overview' || activeTab === 'activity') {
+        void fetchRecentActivity();
+        void fetchQueueItems();
+      }
+      if (activeTab === 'overview' || activeTab === 'posts') void fetchEnrichedPosts();
+    }
     const statusIntervalMs = activeTab === 'accounts' ? 7000 : 3000;
     const statusInterval = window.setInterval(() => void fetchStatus(), statusIntervalMs);
     const activityInterval =
@@ -138,14 +154,14 @@ export function useActivityPolling({ authenticated, activeTab, onError }: UseAct
       if (activityInterval !== null) window.clearInterval(activityInterval);
       if (postsInterval !== null) window.clearInterval(postsInterval);
     };
-  }, [activeTab, authenticated, fetchEnrichedPosts, fetchQueueItems, fetchRecentActivity, fetchStatus]);
+  }, [activeTab, authenticated, fetchEnrichedPosts, fetchQueueItems, fetchRecentActivity, fetchStatus, visible]);
 
   useEffect(() => {
-    if (activeTab !== 'overview' || !status?.nextCheckTime) return;
+    if (activeTab !== 'overview' || !status?.nextCheckTime || !visible) return;
     setClock(Date.now());
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [activeTab, status?.nextCheckTime]);
+  }, [activeTab, status?.nextCheckTime, visible]);
 
   const countdown = useMemo(() => {
     if (activeTab !== 'overview' || !status?.nextCheckTime) return '--';

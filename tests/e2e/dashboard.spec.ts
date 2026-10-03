@@ -63,6 +63,16 @@ function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 }
 
+const storageReport = {
+  databaseBytes: 5 * 1024 * 1024,
+  walBytes: 0,
+  historyRetentionDays: 90,
+  tables: [
+    { name: 'processed_tweets', rows: 1200 },
+    { name: 'ingestion_audit', rows: 40 },
+  ],
+};
+
 async function mockDashboard(page: Page) {
   const mutations: Array<{ path: string; body: unknown; csrf?: string }> = [];
   let destinations: unknown[] = [];
@@ -281,6 +291,11 @@ async function mockDashboard(page: Page) {
       return json(route, { status: 'ok', database: 'ok', scheduler: 'running', queue: { depth: 0 } });
     }
     if (path === '/api/metrics') return json(route, { counters: { queueRetried: 0 } });
+    if (path === '/api/admin/storage') return json(route, storageReport);
+    if (path === '/api/admin/storage/prune') {
+      return json(route, { pruned: { ingestionAudit: 3, aiProviderUsage: 2 }, report: storageReport });
+    }
+    if (path === '/api/delivery-fallbacks') return json(route, { days: 30, destinations: [] });
     return json(route, { ...version, success: true, jobs: [], entries: [] });
   });
 
@@ -946,4 +961,100 @@ test('adding a source updates the filter select without closing the editor', asy
   await dialog.getByRole('button', { name: 'Save Destination' }).click();
   await expect(page.getByText('Destination updated.')).toBeVisible();
   expect(membershipMutations.filter((entry) => entry.startsWith('DELETE'))).toEqual([]);
+});
+
+test('the storage panel shows database usage and prunes only after confirmation', async ({ page }) => {
+  const mutations = await mockDashboard(page);
+  await page.goto('/settings/data');
+  await expect(page.getByText('5.0 MB')).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'processed_tweets' })).toBeVisible();
+  await expect(page.getByText('After 90 days')).toBeVisible();
+
+  const days = page.getByLabel('Prune history older than (days)');
+  await days.fill('0');
+  await expect(page.getByRole('button', { name: 'Prune now' })).toBeDisabled();
+  await days.fill('30');
+  await page.getByRole('button', { name: 'Prune now' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Prune operational history?' });
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  expect(mutations.filter((entry) => entry.path === '/api/admin/storage/prune')).toHaveLength(0);
+
+  await page.getByRole('button', { name: 'Prune now' }).click();
+  await dialog.getByRole('button', { name: 'Prune history' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Removed 5 rows older than 30 days.' })).toBeVisible();
+  expect(mutations.find((entry) => entry.path === '/api/admin/storage/prune')).toMatchObject({
+    body: { olderThanDays: 30, confirmation: 'PRUNE_HISTORY' },
+    csrf: 'mock-csrf',
+  });
+});
+
+test('the overview shows how often each destination fell back from native media', async ({ page }) => {
+  await mockDashboard(page);
+  await page.route('**/api/destinations', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return json(route, [
+      {
+        ...version,
+        id: 'destination-1',
+        twitterUsernames: ['alpha'],
+        pausedTwitterUsernames: [],
+        bskyIdentifier: 'osint-mirrors.bsky.social',
+        bskyCanonicalHandle: 'osint-mirrors.bsky.social',
+        bskyServiceUrl: 'https://bsky.social',
+        enabled: true,
+        postingPolicy,
+        profileManagement,
+        sources: [{ username: 'alpha', routeId: 'route_alpha', state: 'enabled', delivery: { mode: 'immediate' } }],
+        queue: null,
+        runtime: null,
+      },
+    ]);
+  });
+  await page.route('**/api/delivery-fallbacks*', (route) =>
+    json(route, {
+      days: 30,
+      destinations: [
+        {
+          destinationId: 'destination-1',
+          bskyIdentifier: 'osint-mirrors.bsky.social',
+          posted: 10,
+          postsWithFallback: 3,
+          byKind: { 'video-link': 2, 'quote-card': 1 },
+        },
+      ],
+    }),
+  );
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Native vs Fallback' })).toBeVisible();
+  const row = page.getByText('7 of 10 native · 2 video as link, 1 quote as card').locator('..');
+  await expect(row).toContainText('@osint-mirrors.bsky.social');
+});
+
+test('a hidden dashboard tab stops polling and catches up when shown again', async ({ page }) => {
+  await mockDashboard(page);
+  await page.clock.install();
+  let statusRequests = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/status') statusRequests += 1;
+  });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Overview', level: 1 })).toBeVisible();
+  await page.clock.runFor(7_000);
+  await expect.poll(() => statusRequests).toBeGreaterThan(1);
+
+  const setVisibility = (state: 'hidden' | 'visible') =>
+    page.evaluate((value) => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, state);
+
+  await setVisibility('hidden');
+  await page.waitForTimeout(100);
+  const whileHidden = statusRequests;
+  await page.clock.runFor(30_000);
+  await page.waitForTimeout(100);
+  expect(statusRequests).toBe(whileHidden);
+
+  await setVisibility('visible');
+  await expect.poll(() => statusRequests).toBeGreaterThan(whileHidden);
 });
