@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "atproto": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["atproto-mcp==0.4.0"]
+    }
+  }
+}
