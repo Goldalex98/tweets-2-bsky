@@ -79,7 +79,7 @@ import {
 import { evaluateSourceFilter, SOURCE_FILTER_POLICY_VERSION } from './source-filter.js';
 import type { SourceFilterDecision } from './source-filter.js';
 import { getSchedulerIntervalMinutes } from './scheduler-timing.js';
-import { historyRetentionDays } from './storage-report.js';
+import { historyRetentionDays } from './history-retention.js';
 import { XRateGovernor, isAuthError, isRateLimitError, parseRateLimitResetMs } from './x-rate-limit.js';
 import {
   buildPollNote,

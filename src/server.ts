@@ -110,7 +110,8 @@ import {
   webhookDeliveryService,
 } from './db.js';
 import type { ProcessedTweet } from './db.js';
-import { HISTORY_RETENTION_MAX_DAYS, buildStorageReport } from './storage-report.js';
+import { HISTORY_RETENTION_MAX_DAYS } from './history-retention.js';
+import { buildStorageReport } from './storage-report.js';
 import {
   applyProfileMirrorSyncState,
   bridgeBlueskyAccountToFediverse,
@@ -2891,7 +2892,7 @@ app.post(
     }
     const pruned = historyRetentionService.prune({ retentionMs: days * 24 * 60 * 60_000 });
     historyRetentionService.checkpoint();
-    res.json({ pruned, report: buildStorageReport() });
+    res.json({ pruned, report: buildStorageReport({ fresh: true }) });
   }),
 );
 
@@ -2904,7 +2905,7 @@ app.get(
     const config = getConfig();
     const visible = new Map(getVisibleMappings(config, req.user).map((mapping) => [mapping.id, mapping]));
     const destinations = deliveryFallbackStatsService
-      .summarize(Date.now() - days * 24 * 60 * 60_000)
+      .summarize(Date.now() - days * 24 * 60 * 60_000, [...visible.keys()])
       .flatMap((stats) => {
         const mapping = visible.get(stats.destinationId);
         return mapping ? [{ ...stats, bskyIdentifier: mapping.bskyIdentifier }] : [];

@@ -1135,21 +1135,30 @@ export interface DestinationFallbackStats {
 
 export const deliveryFallbackStatsService = {
   /** How many posts per destination since `sinceMs` used each non-native fallback. */
-  summarize(sinceMs: number): DestinationFallbackStats[] {
-    const rows = db
+  summarize(sinceMs: number, destinationIds: readonly string[]): DestinationFallbackStats[] {
+    if (destinationIds.length === 0) return [];
+    const scope = `status = 'migrated' AND posted_at >= ? AND destination_id IN (${destinationIds.map(() => '?').join(', ')})`;
+    const byDestination = new Map<string, DestinationFallbackStats>();
+    const counts = db
+      .prepare(`SELECT destination_id, COUNT(*) AS posted FROM processed_tweets WHERE ${scope} GROUP BY destination_id`)
+      .all(sinceMs, ...destinationIds) as Array<{ destination_id: string; posted: number }>;
+    for (const row of counts) {
+      byDestination.set(row.destination_id, {
+        destinationId: row.destination_id,
+        posted: Number(row.posted) || 0,
+        postsWithFallback: 0,
+        byKind: {},
+      });
+    }
+    const diagnostics = db
       .prepare(
         `SELECT destination_id, delivery_diagnostics FROM processed_tweets
-         WHERE status = 'migrated' AND posted_at >= ? AND destination_id IS NOT NULL`,
+         WHERE ${scope} AND delivery_diagnostics IS NOT NULL AND delivery_diagnostics != ''`,
       )
-      .all(sinceMs) as Array<{ destination_id: string; delivery_diagnostics: string | null }>;
-    const byDestination = new Map<string, DestinationFallbackStats>();
-    for (const row of rows) {
-      let stats = byDestination.get(row.destination_id);
-      if (!stats) {
-        stats = { destinationId: row.destination_id, posted: 0, postsWithFallback: 0, byKind: {} };
-        byDestination.set(row.destination_id, stats);
-      }
-      stats.posted += 1;
+      .all(sinceMs, ...destinationIds) as Array<{ destination_id: string; delivery_diagnostics: string }>;
+    for (const row of diagnostics) {
+      const stats = byDestination.get(row.destination_id);
+      if (!stats) continue;
       const kinds = new Set(parseDeliveryDiagnostics(row.delivery_diagnostics).map((event) => event.kind));
       if (kinds.size > 0) stats.postsWithFallback += 1;
       for (const kind of kinds) stats.byKind[kind] = (stats.byKind[kind] ?? 0) + 1;

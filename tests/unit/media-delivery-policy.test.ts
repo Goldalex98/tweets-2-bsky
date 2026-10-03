@@ -212,5 +212,13 @@ describe('video upload limits', () => {
     expect(videoUploadBlockedReason({ canUpload: true, remainingDailyBytes: 1_000 }, 2_000)).toBe(
       'Video is larger than the remaining daily Bluesky upload allowance',
     );
+    expect(videoUploadBlockedReason({ canUpload: true, remainingDailyBytes: 1_000 }, 1_000)).toBeNull();
+    // Malformed fields from the service never block, and a long server message is capped.
+    expect(
+      videoUploadBlockedReason({ canUpload: true, remainingDailyVideos: '0', remainingDailyBytes: '1' } as never, 5),
+    ).toBeNull();
+    expect(videoUploadBlockedReason({ canUpload: false, message: 'x'.repeat(500) })?.length).toBe(
+      'Bluesky video upload limit: '.length + 200,
+    );
   });
 });

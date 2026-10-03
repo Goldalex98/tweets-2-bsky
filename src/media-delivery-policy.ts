@@ -119,12 +119,20 @@ export class VideoUploadLimitError extends Error {
 export function videoUploadBlockedReason(limits: VideoUploadLimits | null, sizeBytes?: number): string | null {
   if (!limits) return null;
   if (!limits.canUpload) {
-    return `Bluesky video upload limit: ${limits.message || limits.error || 'uploads not allowed right now'}`;
+    const detail = String(limits.message || limits.error || 'uploads not allowed right now').slice(0, 200);
+    return `Bluesky video upload limit: ${detail}`;
   }
-  if (limits.remainingDailyVideos !== undefined && limits.remainingDailyVideos <= 0) {
+  const remainingVideos = limits.remainingDailyVideos;
+  if (typeof remainingVideos === 'number' && Number.isFinite(remainingVideos) && remainingVideos <= 0) {
     return 'Bluesky daily video upload limit reached';
   }
-  if (sizeBytes !== undefined && limits.remainingDailyBytes !== undefined && sizeBytes > limits.remainingDailyBytes) {
+  const remainingBytes = limits.remainingDailyBytes;
+  if (
+    sizeBytes !== undefined &&
+    typeof remainingBytes === 'number' &&
+    Number.isFinite(remainingBytes) &&
+    sizeBytes > remainingBytes
+  ) {
     return 'Video is larger than the remaining daily Bluesky upload allowance';
   }
   return null;
