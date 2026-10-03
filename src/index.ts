@@ -35,7 +35,11 @@ import sharp from 'sharp';
 import { fetchPublicHttps } from './public-http-fetch.js';
 import { isRestoreRestartRequired } from './backup-service.js';
 import { resolveWebhookTarget, sendPinnedHttpsRequest } from './webhook.js';
-import { blueskyPostRetryDelayMs } from './bsky-post-retry.js';
+import {
+  BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS,
+  BSKY_POST_RETRY_DELAY_MS,
+  blueskyPostRetryDelayMs,
+} from './bsky-post-retry.js';
 import { applyTextCapabilities, generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { createBlueskyDigestDeliveryAdapter } from './adapters/bluesky-digest-delivery.js';
 import { createBlueskyNormalizedDeliveryAdapter } from './adapters/bluesky-normalized-delivery.js';
@@ -2249,6 +2253,7 @@ async function processTweets(
           if (postRecord.reply) console.log(`   - As reply to: ${postRecord.reply.parent.uri}`);
           response = { uri: 'at://did:plc:mock/app.bsky.feed.post/mock', cid: 'mock-cid' };
         } else {
+          let rateLimitBudgetMs = BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS;
           while (retries > 0) {
             try {
               response = await withTimeout(
@@ -2259,8 +2264,9 @@ async function processTweets(
               break;
             } catch (error: unknown) {
               retries--;
-              const retryDelayMs = blueskyPostRetryDelayMs(error, Date.now());
+              const retryDelayMs = blueskyPostRetryDelayMs(error, Date.now(), rateLimitBudgetMs);
               if (retries === 0 || retryDelayMs === undefined) throw error;
+              if (retryDelayMs > BSKY_POST_RETRY_DELAY_MS) rateLimitBudgetMs -= retryDelayMs;
               console.warn(
                 `[${twitterUsername}] ⚠️ Post failed (${describeError(error)}), retrying in ${formatDurationMs(retryDelayMs)}... (${retries} retries left)`,
               );
@@ -2354,12 +2360,7 @@ async function processTweets(
   updateJob(mirrorJobId, null);
 }
 
-import {
-  blueskyLoginBackoffMs,
-  getAgent,
-  invalidateCachedAgentOnAuthFailure,
-  noteBlueskyLoginFailure,
-} from './bsky.js';
+import { blueskyLoginBackoffMs, getAgent, invalidateCachedAgentOnAuthFailure } from './bsky.js';
 
 // ============================================================================
 // Fetch Sweep + Post Queue Workers (daemon mode)
@@ -4061,7 +4062,6 @@ async function maybeSyncMappingProfileInBackground(
 
     console.log(`${logPrefix} ✅ Profile sync completed.`);
   } catch (error) {
-    if (classifyQueueError(error) === 'bsky-auth') noteBlueskyLoginFailure(mapping);
     console.error(`${logPrefix} ❌ Automatic profile sync failed: ${describeError(error)}`);
   } finally {
     updateJob(profileJobId, null);
@@ -4160,7 +4160,9 @@ async function runAccountTask(
       // happens later in the post workers. Requiring a session here turned an
       // auth blip into a dropped backfill.
       const requiresBlueskySession = !backfillReq || backfillDelivery === 'inline';
-      const agent = await getAgent(mapping);
+      // An operator-requested backfill gets a fresh login attempt even while
+      // scheduled work is backing off.
+      const agent = await getAgent(mapping, { bypassLoginBackoff: Boolean(backfillReq) });
       if (!agent && requiresBlueskySession) {
         console.warn(`${logPrefix} ⚠️ Unable to authenticate Bluesky account. Skipping task.`);
         if (backfillReq) {

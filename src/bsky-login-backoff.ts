@@ -15,9 +15,10 @@ export class LoginBackoff {
     return failure ? Math.max(0, failure.retryAtMs - nowMs) : 0;
   }
 
-  noteFailure(key: string, nowMs: number): number {
+  /** `minDelayMs` lets a rate limit's advertised reset outlast the doubling delay. */
+  noteFailure(key: string, nowMs: number, minDelayMs = 0): number {
     const count = (this.failures.get(key)?.count ?? 0) + 1;
-    const delayMs = Math.min(LOGIN_BACKOFF_BASE_MS * 2 ** (count - 1), LOGIN_BACKOFF_MAX_MS);
+    const delayMs = Math.max(Math.min(LOGIN_BACKOFF_BASE_MS * 2 ** (count - 1), LOGIN_BACKOFF_MAX_MS), minDelayMs);
     this.failures.set(key, { count, retryAtMs: nowMs + delayMs });
     return delayMs;
   }

@@ -30,7 +30,19 @@ describe('Bluesky post retry policy', () => {
     expect(blueskyPostRetryDelayMs(rateLimited(3600), now)).toBeUndefined();
   });
 
-  test('a rate limit without a reset header waits the inline maximum', () => {
-    expect(blueskyPostRetryDelayMs(new XRPCError(429), now)).toBe(BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS);
+  test('a rate limit without a reset header is handed back to the queue', () => {
+    expect(blueskyPostRetryDelayMs(new XRPCError(429), now)).toBeUndefined();
+  });
+
+  test('inline rate-limit waits share one budget per post', () => {
+    expect(blueskyPostRetryDelayMs(rateLimited(40), now, BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS)).toBe(41_000);
+    expect(blueskyPostRetryDelayMs(rateLimited(40), now, BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS - 41_000)).toBeUndefined();
+  });
+
+  test('a rejected request is not retried, but a server error is', () => {
+    expect(blueskyPostRetryDelayMs(new XRPCError(400, 'InvalidRequest', 'Invalid record'), now)).toBeUndefined();
+    expect(blueskyPostRetryDelayMs(new XRPCError(502, 'UpstreamFailure', 'Upstream failure'), now)).toBe(
+      BSKY_POST_RETRY_DELAY_MS,
+    );
   });
 });

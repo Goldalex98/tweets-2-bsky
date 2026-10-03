@@ -5,7 +5,7 @@ import { createTemporaryDataDir } from '../helpers/temporary-data-dir.js';
 
 const moduleUrl = (name: string) => JSON.stringify(new URL(`../../src/${name}`, import.meta.url).href);
 
-test('a failed Bluesky login is not retried on the next call, and a password change retries at once', async () => {
+test('a rejected Bluesky login backs off; password changes, operator actions and outages do not', async () => {
   const temporary = createTemporaryDataDir();
   const resultPath = path.join(temporary.path, 'login-backoff.json');
   try {
@@ -16,11 +16,13 @@ test('a failed Bluesky login is not retried on the next call, and a password cha
         `
       const { getAgent, clearCachedAgent } = await import(${moduleUrl('bsky.ts')});
       let logins = 0;
+      let networkDown = false;
       globalThis.fetch = async (input) => {
         const url = new URL(input instanceof Request ? input.url : String(input));
         if (url.hostname !== 'bsky.social') throw new Error('Unexpected fixture outbound request');
         if (url.pathname.endsWith('com.atproto.server.createSession')) {
           logins++;
+          if (networkDown) throw new TypeError('fetch failed');
           return Response.json({ error: 'AuthenticationRequired', message: 'Invalid identifier or password' }, { status: 401 });
         }
         throw new Error('Unexpected fixture lexicon ' + url.pathname);
@@ -33,8 +35,16 @@ test('a failed Bluesky login is not retried on the next call, and a password cha
       const afterRotation = logins;
       clearCachedAgent({ ...mapping, bskyPassword: '<redacted-new>' });
       await getAgent({ ...mapping, bskyPassword: '<redacted-new>' });
+      const afterClear = logins;
+      await getAgent({ ...mapping, bskyPassword: '<redacted-new>' }, { bypassLoginBackoff: true });
+      const afterBypass = logins;
+      networkDown = true;
+      const outage = { ...mapping, bskyIdentifier: 'outage.example' };
+      await getAgent(outage);
+      await getAgent(outage);
       await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
-        first: first === null, second: second === null, rotated: rotated === null, afterBackoff, afterRotation, afterClear: logins,
+        first: first === null, second: second === null, rotated: rotated === null,
+        afterBackoff, afterRotation, afterClear, afterBypass, afterOutage: logins,
       }));
     `,
       ],
@@ -49,6 +59,9 @@ test('a failed Bluesky login is not retried on the next call, and a password cha
       afterBackoff: 1,
       afterRotation: 2,
       afterClear: 3,
+      afterBypass: 4,
+      // A network failure is not a rejected credential and does not back off.
+      afterOutage: 6,
     });
   } finally {
     temporary.cleanup();
