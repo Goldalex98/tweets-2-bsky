@@ -40,6 +40,7 @@ import {
   BSKY_POST_RETRY_DELAY_MS,
   blueskyPostRetryDelayMs,
 } from './bsky-post-retry.js';
+import { createPostAtRkey, deterministicPostRkey } from './deterministic-rkey.js';
 import { applyTextCapabilities, generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { createBlueskyDigestDeliveryAdapter } from './adapters/bluesky-digest-delivery.js';
 import { createBlueskyNormalizedDeliveryAdapter } from './adapters/bluesky-normalized-delivery.js';
@@ -67,7 +68,6 @@ import { isBackfillStillRequested } from './pipeline/backfill-cancellation.js';
 import {
   LEGACY_DELIVERY_POLICY,
   mergeSnapshotAiCredentials,
-  recoveredRecordMatches,
   resolveDeliveryPolicy,
   type DeliveryPolicy,
 } from './pipeline/delivery-policy.js';
@@ -1433,7 +1433,7 @@ export async function fetchUserTweets(
 
 const checkpointContentHash = (text: string): string => createHash('sha256').update(text).digest('hex');
 
-async function postWithDeterministicRkey(
+export async function postWithDeterministicRkey(
   agent: BskyAgent,
   mapping: AccountMapping,
   destinationId: string,
@@ -1441,39 +1441,16 @@ async function postWithDeterministicRkey(
   chunkIndex: number,
   record: Record<string, unknown>,
 ): Promise<{ uri: string; cid: string }> {
-  const rkey = createHash('sha256')
-    .update(`${destinationId}\0${externalPostId}\0${chunkIndex}`)
-    .digest('hex')
-    .slice(0, 24);
-  try {
-    return await (
-      agent.post as unknown as (
-        post: Record<string, unknown>,
-        options: { rkey: string },
-      ) => Promise<{ uri: string; cid: string }>
-    )(record, { rkey });
-  } catch (error) {
-    const message = sanitizedErrorMessage(error).toLowerCase();
-    if (!message.includes('already') && !message.includes('exists')) throw error;
-    const repo = agent.session?.did ?? mapping.bskyDid;
-    if (!repo) throw error;
-    const response = await agent.com.atproto.repo.getRecord({
-      repo,
-      collection: 'app.bsky.feed.post',
-      rkey,
-    });
-    const cid = response.data?.cid;
-    if (!cid) throw error;
-    if (!recoveredRecordMatches(response.data?.value, record)) {
-      throw new Error(
-        `Refusing to adopt the existing record at rkey ${rkey}: its content does not match the post being delivered.`,
-      );
-    }
-    return {
-      uri: `at://${repo}/app.bsky.feed.post/${rkey}`,
-      cid: String(cid),
-    };
+  const createdAtMs = typeof record.createdAt === 'string' ? Date.parse(record.createdAt) : Number.NaN;
+  const repo = agent.session?.did ?? mapping.bskyDid;
+  // Without a stable createdAt the key would change between retries, so it
+  // could not find an earlier attempt; post with a server-assigned key instead.
+  if (!Number.isFinite(createdAtMs) || createdAtMs < 0 || !repo) {
+    console.warn(`[${mapping.bskyIdentifier}] Posting without a deterministic record key; retries cannot be deduplicated.`);
+    return agent.post(record as Parameters<BskyAgent['post']>[0]);
   }
+  const rkey = deterministicPostRkey(destinationId, externalPostId, chunkIndex, createdAtMs);
+  return createPostAtRkey(agent.app.bsky.feed.post, repo, rkey, record);
 }
 
 async function processTweets(

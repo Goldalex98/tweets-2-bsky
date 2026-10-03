@@ -5,6 +5,7 @@ import {
   BSKY_POST_RETRY_DELAY_MS,
   blueskyPostRetryDelayMs,
 } from '../../src/bsky-post-retry.js';
+import { RkeyConflictError } from '../../src/deterministic-rkey.js';
 
 const now = Date.parse('2026-10-03T12:00:00.000Z');
 const rateLimited = (resetInSeconds: number) =>
@@ -19,6 +20,10 @@ describe('Bluesky post retry policy', () => {
 
   test('a dead session is not retried inline', () => {
     expect(blueskyPostRetryDelayMs(new XRPCError(400, 'ExpiredToken', 'Token has expired'), now)).toBeUndefined();
+  });
+
+  test('a record key holding a different post is not retried inline', () => {
+    expect(blueskyPostRetryDelayMs(new RkeyConflictError('Refusing to adopt'), now)).toBeUndefined();
   });
 
   test('a short rate limit waits until the advertised reset', () => {

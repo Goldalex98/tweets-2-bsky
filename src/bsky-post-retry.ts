@@ -1,3 +1,4 @@
+import { RkeyConflictError } from './deterministic-rkey.js';
 import { classifyQueueError } from './observability.js';
 import { parseRateLimitResetMs } from './x-rate-limit.js';
 
@@ -24,6 +25,7 @@ export function blueskyPostRetryDelayMs(
   nowMs: number,
   inlineRateLimitBudgetMs = BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS,
 ): number | undefined {
+  if (error instanceof RkeyConflictError) return undefined;
   const category = classifyQueueError(error);
   if (category === 'bsky-auth') return undefined;
   if (category === 'bsky-rate-limit') {
