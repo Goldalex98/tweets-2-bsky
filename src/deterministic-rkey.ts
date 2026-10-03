@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { BSKY_AUTH_ERROR_CODES } from './observability.js';
 import { recoveredRecordMatches } from './pipeline/delivery-policy.js';
 
 const S32_ALPHABET = '234567abcdefghijklmnopqrstuvwxyz';
@@ -20,6 +21,8 @@ export function encodeTid(timestampMicros: bigint, clockId: number): string {
  * landed but timed out is found again instead of posted twice. Posts must use
  * TID keys, so the key is a TID at the record's createdAt, with the sub-
  * millisecond digits and clock id taken from a hash of the delivery identity.
+ * The chunk index is added in milliseconds, so the chunks of one post never
+ * share a millisecond and their keys sort in thread order.
  */
 export function deterministicPostRkey(
   destinationId: string,
@@ -30,7 +33,16 @@ export function deterministicPostRkey(
   const hash = createHash('sha256').update(`${destinationId}\0${externalPostId}\0${chunkIndex}`).digest();
   const microsWithinMs = hash.readUInt16BE(0) % 1000;
   const clockId = hash.readUInt16BE(2) & 0x3ff;
-  return encodeTid(BigInt(Math.floor(createdAtMs)) * 1000n + BigInt(microsWithinMs), clockId);
+  const timestampMs = BigInt(Math.floor(createdAtMs) + chunkIndex);
+  return encodeTid(timestampMs * 1000n + BigInt(microsWithinMs), clockId);
+}
+
+/**
+ * The key holds a different record. Retrying cannot change that, so the post
+ * loop stops at once and the queue parks the delivery for an operator.
+ */
+export class RkeyConflictError extends Error {
+  override readonly name = 'RkeyConflictError';
 }
 
 export interface PostRecordClient {
@@ -41,12 +53,24 @@ export interface PostRecordClient {
   get(params: { repo: string; rkey: string }): Promise<{ cid?: string; value: unknown }>;
 }
 
-/** A create that may have failed because the key already holds a record. */
+/**
+ * A create that may have failed because the key already holds a record. Auth
+ * and rate-limit failures are passed through untouched so their classifiers
+ * see them; anything else that could be a taken key is checked by reading it.
+ */
 function mayBeExistingRecord(error: unknown): boolean {
-  const status = (error as { status?: unknown } | null)?.status;
-  if (status === 400 || status === 409) return true;
+  const { status, error: code } = (error ?? {}) as { status?: unknown; error?: unknown };
+  if (typeof code === 'string' && (BSKY_AUTH_ERROR_CODES.has(code) || code === 'RateLimitExceeded')) return false;
+  if (status === 400 || status === 409 || (typeof status === 'number' && status >= 500)) return true;
   const message = error instanceof Error ? error.message : String(error);
-  return /already|exists/i.test(message);
+  return /already exists|record exists/i.test(message);
+}
+
+/** The text and reply target must both match before a record is adopted. */
+function sameReplyParent(existing: unknown, intended: Record<string, unknown>): boolean {
+  const parentUri = (value: unknown): unknown =>
+    (value as { reply?: { parent?: { uri?: unknown } } } | null)?.reply?.parent?.uri;
+  return parentUri(existing) === parentUri(intended);
 }
 
 /**
@@ -72,9 +96,10 @@ export async function createPostAtRkey(
       throw error;
     }
     if (!existing.cid) throw error;
-    if (!recoveredRecordMatches(existing.value, record)) {
-      throw new Error(
+    if (!recoveredRecordMatches(existing.value, record) || !sameReplyParent(existing.value, record)) {
+      throw new RkeyConflictError(
         `Refusing to adopt the existing record at rkey ${rkey}: its content does not match the post being delivered.`,
+        { cause: error },
       );
     }
     return { uri: `at://${repo}/app.bsky.feed.post/${rkey}`, cid: String(existing.cid) };

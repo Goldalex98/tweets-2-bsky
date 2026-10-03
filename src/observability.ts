@@ -81,7 +81,7 @@ export function sanitizedErrorMessage(error: unknown, fallback = 'Operation fail
   return sanitizeText(message || fallback).slice(0, 500);
 }
 
-const BSKY_AUTH_ERROR_CODES = new Set([
+export const BSKY_AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'AuthenticationRequired',
   'AuthMissing',
   'ExpiredToken',

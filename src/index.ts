@@ -1445,7 +1445,8 @@ export async function postWithDeterministicRkey(
   const repo = agent.session?.did ?? mapping.bskyDid;
   // Without a stable createdAt the key would change between retries, so it
   // could not find an earlier attempt; post with a server-assigned key instead.
-  if (!Number.isFinite(createdAtMs) || !repo) {
+  if (!Number.isFinite(createdAtMs) || createdAtMs < 0 || !repo) {
+    console.warn(`[${mapping.bskyIdentifier}] Posting without a deterministic record key; retries cannot be deduplicated.`);
     return agent.post(record as Parameters<BskyAgent['post']>[0]);
   }
   const rkey = deterministicPostRkey(destinationId, externalPostId, chunkIndex, createdAtMs);

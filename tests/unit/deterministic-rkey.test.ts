@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { XRPCError } from '@atproto/api';
 import {
   type PostRecordClient,
+  RkeyConflictError,
   createPostAtRkey,
   deterministicPostRkey,
   encodeTid,
@@ -32,6 +33,13 @@ describe('deterministic post record keys', () => {
       deterministicPostRkey('destination', '1840000000000000001', 0, createdAtMs),
     ];
     expect(new Set([first, ...others]).size).toBe(4);
+  });
+
+  test('chunks that share a createdAt get distinct keys in thread order', () => {
+    const createdAtMs = Date.parse('2026-10-03T12:00:00.000Z');
+    const keys = [0, 1, 2, 3].map((index) => deterministicPostRkey('destination', 'post', index, createdAtMs));
+    expect(new Set(keys).size).toBe(4);
+    expect([...keys].sort()).toEqual(keys);
   });
 });
 
@@ -87,8 +95,32 @@ describe('creating a post at a deterministic key', () => {
     await expect(createPostAtRkey(posts, 'did:plc:redacted', '3abc', record)).rejects.toThrow('Refusing to adopt');
   });
 
+  test('a same-text record replying elsewhere is not adopted, and the original error is kept as the cause', async () => {
+    const failure = new XRPCError(400, 'InvalidRequest', 'Record already exists');
+    const posts = client({
+      create: async () => {
+        throw failure;
+      },
+      get: async () => ({
+        cid: 'existing-cid',
+        value: { text: 'Redacted post', reply: { parent: { uri: 'at://did:plc:redacted/app.bsky.feed.post/other' } } },
+      }),
+    });
+    const threaded = { ...record, reply: { parent: { uri: 'at://did:plc:redacted/app.bsky.feed.post/mine' } } };
+    const rejection = await createPostAtRkey(posts, 'did:plc:redacted', '3abc', threaded).catch((error) => error);
+    expect(rejection).toBeInstanceOf(RkeyConflictError);
+    expect((rejection as Error).cause).toBe(failure);
+  });
+
   test('auth and rate-limit failures are rethrown without a lookup', async () => {
-    for (const failure of [new XRPCError(401, 'AuthenticationRequired'), new XRPCError(429, 'RateLimitExceeded')]) {
+    // ExpiredToken and InvalidToken arrive as 400s, the same status as a taken key.
+    for (const failure of [
+      new XRPCError(401, 'AuthenticationRequired'),
+      new XRPCError(429, 'RateLimitExceeded'),
+      new XRPCError(400, 'ExpiredToken', 'Token has expired'),
+      new XRPCError(400, 'InvalidToken'),
+      new Error('fetch failed: socket closed'),
+    ]) {
       const posts = client({
         create: async () => {
           throw failure;
