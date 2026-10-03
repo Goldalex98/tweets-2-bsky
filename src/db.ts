@@ -1060,6 +1060,55 @@ export const databaseHealthService = {
   },
 };
 
+export interface HistoryPruneResult {
+  ingestionAudit: number;
+  aiProviderUsage: number;
+  webhookDeliveries: number;
+  contentFingerprints: number;
+  ingestionNonces: number;
+}
+
+/** Longer than the largest duplicate window (365 days), so pruning never weakens dedupe. */
+const FINGERPRINT_RETENTION_MS = 366 * 24 * 60 * 60 * 1000;
+
+/**
+ * Bounds tables that only grow. Delivery history (`processed_tweets`), queue
+ * rows, digest entries, ingestion idempotency keys and operator audit rows are
+ * never pruned here: they are what stops an old post being mirrored twice, or
+ * the record of who overrode a policy.
+ */
+export const historyRetentionService = {
+  prune(input: { retentionMs: number; now?: number }): HistoryPruneResult {
+    const now = input.now ?? Date.now();
+    const cutoff = now - input.retentionMs;
+    const run = (sql: string, ...params: unknown[]): number => {
+      db.prepare(sql).run(...params);
+      return changesCount();
+    };
+    let result: HistoryPruneResult | undefined;
+    db.transaction(() => {
+      result = {
+        ingestionAudit: run('DELETE FROM ingestion_audit WHERE occurred_at < ?', cutoff),
+        aiProviderUsage: run('DELETE FROM ai_provider_usage WHERE requested_at < ?', cutoff),
+        webhookDeliveries: run('DELETE FROM webhook_deliveries WHERE updated_at < ?', cutoff),
+        contentFingerprints: run(
+          `DELETE FROM content_fingerprints WHERE created_at < ? AND id NOT IN (
+             SELECT override_of_id FROM content_fingerprints WHERE override_of_id IS NOT NULL
+           )`,
+          now - FINGERPRINT_RETENTION_MS,
+        ),
+        ingestionNonces: run('DELETE FROM ingestion_nonces WHERE expires_at <= ?', now),
+      };
+    })();
+    return result as HistoryPruneResult;
+  },
+
+  /** Folds the WAL back into the database file and truncates it. */
+  checkpoint(): void {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  },
+};
+
 interface PostQueueRow {
   queue_id?: string;
   twitter_id: string;

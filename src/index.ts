@@ -35,6 +35,7 @@ import sharp from 'sharp';
 import { fetchPublicHttps } from './public-http-fetch.js';
 import { isRestoreRestartRequired } from './backup-service.js';
 import { resolveWebhookTarget, sendPinnedHttpsRequest } from './webhook.js';
+import { AsyncSemaphore } from './async-semaphore.js';
 import {
   BSKY_MAX_INLINE_RATE_LIMIT_WAIT_MS,
   BSKY_POST_RETRY_DELAY_MS,
@@ -223,6 +224,7 @@ import {
   digestJobService,
   deliveryCheckpointService,
   destinationLeaseService,
+  historyRetentionService,
   duplicateFingerprintService,
   backfillJobService,
   parseSqliteUtcTimestampMs,
@@ -451,11 +453,45 @@ const QUEUE_BATCH_MAX_ITEMS = envInt('QUEUE_BATCH_MAX_ITEMS', 50, 1, 500);
 // Destination leases are renewed roughly once per second by the worker loop, so
 // the TTL only has to outlive one slow batch plus a scheduling gap.
 const DESTINATION_LEASE_TTL_MS = envInt('DESTINATION_LEASE_TTL_MS', 5 * 60_000, 10_000, 60 * 60_000);
+// Days of operational history (ingestion audit, AI usage, webhook deliveries)
+// kept in SQLite; 0 keeps everything. Delivery history is never pruned.
+const HISTORY_RETENTION_DAYS = envInt('HISTORY_RETENTION_DAYS', 90, 0, 3650);
+const HISTORY_RETENTION_INTERVAL_MS = 24 * 60 * 60_000;
+const SHUTDOWN_DEADLINE_MS = 50_000;
 // Identifies this process when taking destination leases and durable backfill
 // claims, so a second replica can tell whose lock it is looking at.
 const RUNTIME_OWNER_ID = `${process.env.HOSTNAME || 'local'}:${process.pid}:${randomUUID().slice(0, 8)}`;
 
 const pipelineLogger = createStructuredLogger();
+
+function checkpointDatabase(): void {
+  try {
+    historyRetentionService.checkpoint();
+  } catch (error) {
+    console.warn(`[Storage] WAL checkpoint failed: ${describeError(error)}`);
+  }
+}
+
+function pruneHistory(): void {
+  if (HISTORY_RETENTION_DAYS > 0) {
+    try {
+      const pruned = historyRetentionService.prune({ retentionMs: HISTORY_RETENTION_DAYS * 24 * 60 * 60_000 });
+      const total = Object.values(pruned).reduce((sum, count) => sum + count, 0);
+      if (total > 0) {
+        console.log(`[Storage] 🧹 Pruned ${total} history row(s) older than ${HISTORY_RETENTION_DAYS} days.`);
+      }
+    } catch (error) {
+      console.warn(`[Storage] History pruning failed: ${describeError(error)}`);
+    }
+  }
+  checkpointDatabase();
+}
+
+/** Prunes once at startup, then daily; the timer never keeps the process alive. */
+function startHistoryRetention(): void {
+  pruneHistory();
+  setInterval(pruneHistory, HISTORY_RETENTION_INTERVAL_MS).unref();
+}
 
 const logPipeline = (
   tag: 'Sweep' | 'Queue',
@@ -956,7 +992,34 @@ interface ScreenshotResult {
   height: number;
 }
 
+// Each quote screenshot starts a Chromium (~150-300 MB). Independent
+// destinations deliver concurrently, so without a cap a burst of quote tweets
+// can start several at once on a small VM. 0 disables screenshots.
+const SCREENSHOT_MAX_CONCURRENCY = envInt('SCREENSHOT_MAX_CONCURRENCY', 1, 0, 8);
+// Shorter than the shutdown deadline, so a waiting delivery never holds shutdown.
+const SCREENSHOT_SLOT_WAIT_MS = 45_000;
+// A wedged Chromium is killed after this, so it cannot hold the only slot.
+const SCREENSHOT_CAPTURE_DEADLINE_MS = 60_000;
+const screenshotSlots = new AsyncSemaphore(SCREENSHOT_MAX_CONCURRENCY);
+
 async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResult | null> {
+  if (SCREENSHOT_MAX_CONCURRENCY === 0) return null;
+  const outcome = await screenshotSlots.run(
+    async () => {
+      assertDeliveryActive();
+      return captureTweetScreenshotNow(tweetUrl);
+    },
+    SCREENSHOT_SLOT_WAIT_MS,
+    deliverySignal(),
+  );
+  if (outcome.ran) return outcome.value;
+  if (outcome.reason === 'timeout') {
+    console.warn('[SCREENSHOT] ⏩ Skipping screenshot: the browser slot stayed busy too long.');
+  }
+  return null;
+}
+
+async function captureTweetScreenshotNow(tweetUrl: string): Promise<ScreenshotResult | null> {
   const browserPaths = [
     '/usr/bin/google-chrome',
     '/usr/bin/chromium-browser',
@@ -975,11 +1038,17 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
 
   console.log(`[SCREENSHOT] 📸 Capturing screenshot for: ${tweetUrl} using ${executablePath}`);
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    browser?.process()?.kill('SIGKILL');
+  }, SCREENSHOT_CAPTURE_DEADLINE_MS);
   try {
     browser = await puppeteer.launch({
       executablePath,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     });
+    if (timedOut) browser.process()?.kill('SIGKILL');
     const page = await browser.newPage();
     await page.setViewport({ width: 800, height: 1200, deviceScaleFactor: 2 });
 
@@ -1034,9 +1103,11 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
       }
     }
   } catch (err) {
-    console.error('[SCREENSHOT] ❌ Error capturing tweet:', (err as Error).message);
+    const reason = timedOut ? `no result after ${SCREENSHOT_CAPTURE_DEADLINE_MS / 1000}s` : (err as Error).message;
+    console.error('[SCREENSHOT] ❌ Error capturing tweet:', reason);
   } finally {
-    if (browser) await browser.close();
+    clearTimeout(deadline);
+    if (browser) await browser.close().catch(() => browser?.process()?.kill('SIGKILL'));
   }
   return null;
 }
@@ -4500,10 +4571,13 @@ async function main(): Promise<void> {
     shutdownRequested = true;
     stopScheduler();
     stopDelivery();
+    // Inside compose's 60s stop_grace_period, so the WAL checkpoint below runs
+    // before Docker sends SIGKILL.
     const deadline = setTimeout(() => {
       console.error('[Shutdown] Timed out draining; preserving durable work for recovery.');
+      checkpointDatabase();
       process.exit(1);
-    }, 60_000);
+    }, SHUTDOWN_DEADLINE_MS);
     void Promise.all([
       queueWorkerService.stop(),
       digestWorkerService.stop(),
@@ -4517,10 +4591,12 @@ async function main(): Promise<void> {
         clearTimeout(deadline);
         destinationLeaseService.releaseOwner(RUNTIME_OWNER_ID);
         destinationLeaseService.releaseOwner(destinationMaintenance.ownerId);
+        checkpointDatabase();
         process.exit(0);
       },
       (error) => {
         console.error('[Shutdown] Failed to drain:', describeError(error));
+        checkpointDatabase();
         process.exit(1);
       },
     );
@@ -4718,6 +4794,7 @@ async function main(): Promise<void> {
     destinationMaintenance.ownerId,
   );
   destinationLeaseService.purgeExpired();
+  startHistoryRetention();
   startPostWorkers();
 
   const schedulerService = new SchedulerService({
