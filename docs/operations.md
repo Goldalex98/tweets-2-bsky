@@ -102,6 +102,8 @@ Browser sessions use `HttpOnly` cookies and CSRF tokens. CLI automation may use 
 the key is required at startup. Keep the same key across restarts and copied-volume validation. See
 [security and backups](security-and-backups.md).
 
+The Docker image runs the app as the unprivileged `bun` user (uid/gid 1000). The entrypoint starts as root only to check `/app/data`: if anything in it is owned by another user (for example a volume written by an image before 3.7), it runs `chown -R 1000:1000` once and logs it, then drops privileges with `setpriv`. Starting the container with `--user 1000:1000` skips this step. If the container cannot change ownership or drop privileges (for example `--cap-drop=ALL`), it logs a warning and keeps running as root so existing data stays writable. Chromium screenshots still run with `--no-sandbox`.
+
 ## Backup and restore
 
 Redacted backups preserve the current deployment's users and credentials during restore. Full backups contain encrypted credentials and require current-admin reauthentication plus typed confirmation. Validation is dry-run and no-write. Restore stages SQLite for startup replacement, enters restart-required mode (mutating APIs blocked, `/readyz` not ready) until restart, and retains pre-restore rollback artifacts. On Windows, stop the service before retrying if pending-database rename fails because the file is locked.
