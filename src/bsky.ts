@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto';
 import { BskyAgent } from '@atproto/api';
 import { LoginBackoff } from './bsky-login-backoff.js';
 import { getConfig } from './config-manager.js';
-import { classifyQueueError } from './observability.js';
+import { classifyQueueError, sanitizedErrorMessage } from './observability.js';
 import { parseRateLimitResetMs } from './x-rate-limit.js';
 import { assertDeliveryActive } from './services/delivery-context.js';
 import { isBlueskyAccountBlocked, managedBlueskyFetch } from './services/bluesky-mutation-guard.js';
-import { blueskyAccountRuntimeService, runtimeStateService } from './db.js';
+import { blueskyAccountRuntimeService, destinationLeaseService, runtimeStateService } from './db.js';
+import { DestinationMaintenanceRunner, mapWithConcurrency } from './destination-maintenance.js';
 import { getCanonicalDestinationKey, normalizeBlueskyServiceUrl } from './mapping-helpers.js';
 
 const activeAgents = new Map<string, BskyAgent>();
@@ -119,40 +120,67 @@ export async function getAgent(
   }
 }
 
+/** Deletes in flight at once; Bluesky counts each one against the account's write limit. */
+const DELETE_CONCURRENCY = 5;
+const MAINTENANCE_LEASE_TTL_MS = 5 * 60_000;
+
+export const destinationMaintenance = new DestinationMaintenanceRunner(
+  {
+    acquire: (destinationKey, ownerId, ttlMs) =>
+      Boolean(destinationLeaseService.acquire({ destinationKey, ownerId, ttlMs, purpose: 'maintenance' })),
+    renew: (destinationKey, ownerId, ttlMs) => destinationLeaseService.renew(destinationKey, ownerId, ttlMs),
+    release: (destinationKey, ownerId) => {
+      destinationLeaseService.release(destinationKey, ownerId);
+    },
+  },
+  MAINTENANCE_LEASE_TTL_MS,
+);
+
+/**
+ * Deletes every post in the destination's repo. Holds the destination lease
+ * for the whole run, so queue workers do not post into the account while it is
+ * being emptied, and throws `DestinationBusyError` while a delivery is running.
+ */
 export async function deleteAllPosts(mappingId: string): Promise<number> {
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === mappingId);
   if (!mapping) throw new Error('Mapping not found');
 
-  const agent = await getAgent(mapping, { bypassLoginBackoff: true });
-  if (!agent) throw new Error('Failed to authenticate with Bluesky');
-  const repoDid = agent.session?.did;
-  if (!repoDid) throw new Error('Bluesky session did is missing');
+  return destinationMaintenance.run(mapping.id, async (lease) => {
+    const agent = await getAgent(mapping, { bypassLoginBackoff: true });
+    if (!agent) throw new Error('Failed to authenticate with Bluesky');
+    const repoDid = agent.session?.did;
+    if (!repoDid) throw new Error('Bluesky session did is missing');
 
-  let cursor: string | undefined;
-  let deletedCount = 0;
+    let cursor: string | undefined;
+    let deletedCount = 0;
 
-  console.log(`[${mapping.bskyIdentifier}] 🗑️ Starting deletion of all posts...`);
+    console.log(`[${mapping.bskyIdentifier}] 🗑️ Starting deletion of all posts...`);
 
-  // Safety break to prevent infinite loops
-  let loops = 0;
-  while (loops < 1000) {
-    loops++;
-    try {
-      const { data } = await agent.com.atproto.repo.listRecords({
-        repo: repoDid,
-        collection: 'app.bsky.feed.post',
-        limit: 50, // Keep batch size reasonable
-        cursor,
-      });
+    // Safety break to prevent infinite loops
+    let loops = 0;
+    while (loops < 1000) {
+      loops++;
+      if (!lease.renew()) throw new Error('Lost the destination lease while deleting posts; stopped.');
+      try {
+        const { data } = await agent.com.atproto.repo.listRecords({
+          repo: repoDid,
+          collection: 'app.bsky.feed.post',
+          limit: 50, // Keep batch size reasonable
+          cursor,
+        });
 
-      if (!data.records || data.records.length === 0) {
-        break;
-      }
+        if (!data.records || data.records.length === 0) {
+          break;
+        }
 
-      // Use p-limit like approach or just Promise.all since 50 is manageable
-      const results = await Promise.all(
-        data.records.map(async (r) => {
+        let stopError: unknown;
+        const results = await mapWithConcurrency(data.records, DELETE_CONCURRENCY, async (r) => {
+          if (stopError) return false;
+          if (!lease.renew()) {
+            stopError = new Error('Lost the destination lease while deleting posts; stopped.');
+            return false;
+          }
           const rkey = r.uri.split('/').pop();
           if (!rkey) {
             console.warn(`Failed to delete record ${r.uri}: missing rkey`);
@@ -166,24 +194,31 @@ export async function deleteAllPosts(mappingId: string): Promise<number> {
             });
             return true;
           } catch (e) {
-            console.warn(`Failed to delete record ${r.uri}:`, e);
+            // A rate limit or dead session fails every remaining delete too.
+            const category = classifyQueueError(e);
+            if (category === 'bsky-rate-limit' || category === 'bsky-auth') stopError ??= e;
+            invalidateCachedAgentOnAuthFailure(mapping, category);
+            console.warn(`Failed to delete record ${r.uri}: ${sanitizedErrorMessage(e)}`);
             return false;
           }
-        }),
-      );
+        });
 
-      deletedCount += results.filter(Boolean).length;
-      cursor = data.cursor;
-      if (!cursor) break;
+        deletedCount += results.filter(Boolean).length;
+        if (stopError) throw stopError;
+        cursor = data.cursor;
+        if (!cursor) break;
 
-      // Small delay to be nice to the API
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    } catch (e) {
-      console.error(`[${mapping.bskyIdentifier}] Error listing records:`, e);
-      throw e;
+        // Small delay to be nice to the API
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } catch (e) {
+        console.error(
+          `[${mapping.bskyIdentifier}] Error deleting posts after ${deletedCount} deletions: ${sanitizedErrorMessage(e)}`,
+        );
+        throw e;
+      }
     }
-  }
 
-  console.log(`[${mapping.bskyIdentifier}] ✅ Deleted ${deletedCount} posts.`);
-  return deletedCount;
+    console.log(`[${mapping.bskyIdentifier}] ✅ Deleted ${deletedCount} posts.`);
+    return deletedCount;
+  });
 }
