@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isAuthError, isRateLimitError } from './x-rate-limit.js';
 
 export type QueueErrorCategory =
   | 'twitter-auth'
@@ -80,10 +81,48 @@ export function sanitizedErrorMessage(error: unknown, fallback = 'Operation fail
   return sanitizeText(message || fallback).slice(0, 500);
 }
 
-export function classifyQueueError(error: unknown): QueueErrorCategory {
+const BSKY_AUTH_ERROR_CODES = new Set([
+  'AuthenticationRequired',
+  'AuthMissing',
+  'ExpiredToken',
+  'InvalidToken',
+  'AuthFactorTokenRequired',
+]);
+
+/** An `XRPCError` from @atproto/api: its message rarely names Bluesky. */
+function readXrpcError(error: unknown): { status: number; code?: string } | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const candidate = error as { status?: unknown; error?: unknown; success?: unknown };
+  if (candidate.success !== false || typeof candidate.status !== 'number') return undefined;
+  return { status: candidate.status, ...(typeof candidate.error === 'string' ? { code: candidate.error } : {}) };
+}
+
+/** The scraper's `ApiError` keeps the X response; its message is "Response status: …". */
+function readScraperStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object' || !('data' in error)) return undefined;
+  const response = (error as { response?: { status?: unknown } }).response;
+  return typeof response?.status === 'number' ? response.status : undefined;
+}
+
+/**
+ * `source` is the side the failing call talked to when the caller knows it
+ * (an X fetch passes 'twitter'); otherwise the error's shape and wording decide.
+ */
+export function classifyQueueError(error: unknown, source?: 'twitter'): QueueErrorCategory {
   const candidate = `${error instanceof Error ? error.name : ''} ${sanitizedErrorMessage(error)}`.toLowerCase();
   if (candidate.includes('timeout') || candidate.includes('timed out') || candidate.includes('abort')) {
     return 'timeout';
+  }
+  const xrpc = source === 'twitter' ? undefined : readXrpcError(error);
+  if (xrpc) {
+    if (xrpc.status === 401 || (xrpc.code && BSKY_AUTH_ERROR_CODES.has(xrpc.code))) return 'bsky-auth';
+    if (xrpc.status === 429 || xrpc.code === 'RateLimitExceeded') return 'bsky-rate-limit';
+  }
+  const scraperStatus = readScraperStatus(error);
+  if (source === 'twitter' || scraperStatus !== undefined) {
+    if (scraperStatus === 401 || scraperStatus === 403 || isAuthError(error)) return 'twitter-auth';
+    if (scraperStatus === 429 || isRateLimitError(error)) return 'twitter-rate-limit';
+    return 'twitter-fetch';
   }
   if (candidate.includes('twitter') || candidate.includes('x.com') || candidate.includes('scraper')) {
     if (candidate.includes('401') || candidate.includes('403') || candidate.includes('auth') || candidate.includes('cookie')) {

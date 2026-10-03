@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { XRPCError } from '@atproto/api';
+import { ApiError } from '@the-convocation/twitter-scraper';
 import {
   classifyQueueError,
   createStructuredLogger,
@@ -70,5 +72,32 @@ describe('operations logging', () => {
     expect(classifyQueueError(new Error('Twitter rate limit 429'))).toBe('twitter-rate-limit');
     expect(classifyQueueError(new Error('image upload failed'))).toBe('media-upload');
     expect(classifyQueueError(new Error('request timed out'))).toBe('timeout');
+  });
+
+  test('classifies real atproto errors by status and error code', () => {
+    // Real XRPCError messages never mention Bluesky, atproto, or a PDS.
+    expect(classifyQueueError(new XRPCError(400, 'ExpiredToken', 'Token has expired'))).toBe('bsky-auth');
+    expect(classifyQueueError(new XRPCError(400, 'InvalidToken', 'Token could not be verified'))).toBe('bsky-auth');
+    expect(classifyQueueError(new XRPCError(401, 'AuthenticationRequired', 'Invalid identifier or password'))).toBe(
+      'bsky-auth',
+    );
+    expect(classifyQueueError(new XRPCError(429, 'RateLimitExceeded', 'Rate Limit Exceeded'))).toBe('bsky-rate-limit');
+    expect(classifyQueueError(new XRPCError(429))).toBe('bsky-rate-limit');
+    expect(classifyQueueError(new XRPCError(400, 'BlobTooLarge', 'blob is too large'))).toBe('media-upload');
+  });
+
+  test('classifies real scraper errors by HTTP status', () => {
+    const scraperError = (status: number) => new ApiError(new Response('{}', { status }), { errors: [] });
+    expect(classifyQueueError(scraperError(401))).toBe('twitter-auth');
+    expect(classifyQueueError(scraperError(403))).toBe('twitter-auth');
+    expect(classifyQueueError(scraperError(429))).toBe('twitter-rate-limit');
+    expect(classifyQueueError(scraperError(500))).toBe('twitter-fetch');
+  });
+
+  test('an X fetch context classifies generic auth and rate failures as X', () => {
+    expect(classifyQueueError(Object.assign(new Error('Forbidden'), { status: 403 }), 'twitter')).toBe('twitter-auth');
+    expect(classifyQueueError(new Error('Too Many Requests'), 'twitter')).toBe('twitter-rate-limit');
+    expect(classifyQueueError(new Error('socket hang up'), 'twitter')).toBe('twitter-fetch');
+    expect(classifyQueueError(new Error('Sweep fetch timed out after 90s'), 'twitter')).toBe('timeout');
   });
 });

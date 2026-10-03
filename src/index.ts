@@ -35,6 +35,7 @@ import sharp from 'sharp';
 import { fetchPublicHttps } from './public-http-fetch.js';
 import { isRestoreRestartRequired } from './backup-service.js';
 import { resolveWebhookTarget, sendPinnedHttpsRequest } from './webhook.js';
+import { blueskyPostRetryDelayMs } from './bsky-post-retry.js';
 import { applyTextCapabilities, generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { createBlueskyDigestDeliveryAdapter } from './adapters/bluesky-digest-delivery.js';
 import { createBlueskyNormalizedDeliveryAdapter } from './adapters/bluesky-normalized-delivery.js';
@@ -1295,14 +1296,14 @@ function addTwitterHandleLinkFacets(
 
 // Uses the UserTweets endpoint (not Search) via the scraper's getTweets;
 // processedIds allows the caller to stop early once already-seen tweets appear.
-async function fetchUserTweets(
+export async function fetchUserTweets(
   username: string,
   limit: number,
   processedIds?: Set<string>,
   sessionKey = 'default',
   throwOnFailure = false,
 ): Promise<Tweet[]> {
-  const client = await getTwitterScraper(sessionKey);
+  let client = await getTwitterScraper(sessionKey);
   if (!client) {
     if (throwOnFailure) throw new Error('Twitter credentials are unavailable.');
     return [];
@@ -1367,8 +1368,14 @@ async function fetchUserTweets(
         // slot once, otherwise surface the failure so the operator re-auths.
         console.warn(`⚠️ [${username}] X rejected the current credentials (${describeError(error)}).`);
         if (await switchCredentials()) {
-          console.log('🔄 Retrying with backup credentials...');
-          continue;
+          // The switch drops cached sessions; rebuild the client so the retry
+          // actually uses the other cookie pair.
+          const switchedClient = await getTwitterScraper(sessionKey);
+          if (switchedClient) {
+            client = switchedClient;
+            console.log('🔄 Retrying with backup credentials...');
+            continue;
+          }
         }
         retries = 0;
       } else {
@@ -1393,7 +1400,7 @@ async function fetchUserTweets(
 
       console.warn(`Error fetching tweets for ${username}:`, describeError(error));
       const previousAuth = authRuntimeStateService.get('twitter');
-      const category = classifyQueueError(error);
+      const category = classifyQueueError(error, 'twitter');
       authRuntimeStateService.save({
         provider: 'twitter',
         configured: Boolean(getConfig().twitter.authToken && getConfig().twitter.ct0),
@@ -2252,11 +2259,12 @@ async function processTweets(
               break;
             } catch (error: unknown) {
               retries--;
-              if (retries === 0) throw error;
+              const retryDelayMs = blueskyPostRetryDelayMs(error, Date.now());
+              if (retries === 0 || retryDelayMs === undefined) throw error;
               console.warn(
-                `[${twitterUsername}] ⚠️ Post failed (Socket/Network), retrying in 5s... (${retries} retries left)`,
+                `[${twitterUsername}] ⚠️ Post failed (${describeError(error)}), retrying in ${formatDurationMs(retryDelayMs)}... (${retries} retries left)`,
               );
-              await deliverySleep(5000);
+              await deliverySleep(retryDelayMs);
             }
           }
         }
@@ -2346,7 +2354,12 @@ async function processTweets(
   updateJob(mirrorJobId, null);
 }
 
-import { getAgent, invalidateCachedAgentOnAuthFailure } from './bsky.js';
+import {
+  blueskyLoginBackoffMs,
+  getAgent,
+  invalidateCachedAgentOnAuthFailure,
+  noteBlueskyLoginFailure,
+} from './bsky.js';
 
 // ============================================================================
 // Fetch Sweep + Post Queue Workers (daemon mode)
@@ -2554,12 +2567,13 @@ async function executeCanonicalXSourceSweep(
         metricsService.increment('fetchFailure');
         const message = describeError(error);
         errorsBySource.set(source.id, message);
-        errorCategoriesBySource.set(source.id, classifyQueueError(error));
+        const category = classifyQueueError(error, 'twitter');
+        errorCategoriesBySource.set(source.id, category);
         logPipeline('Sweep', `❌ Source fetch failed: ${message}`, true, {
           sweepId,
           sourceId: source.id,
         });
-        if (classifyQueueError(error) === 'twitter-auth') {
+        if (category === 'twitter-auth') {
           notifyOperationsEvent({
             event: 'twitter-auth-failure',
             occurredAt: new Date().toISOString(),
@@ -3988,7 +4002,7 @@ async function maybeSyncMappingProfileInBackground(
   if (dryRun) {
     return;
   }
-  if (!isProfileSyncDue(mapping)) {
+  if (!isProfileSyncDue(mapping) || blueskyLoginBackoffMs(mapping) > 0) {
     return;
   }
 
@@ -4047,6 +4061,7 @@ async function maybeSyncMappingProfileInBackground(
 
     console.log(`${logPrefix} ✅ Profile sync completed.`);
   } catch (error) {
+    if (classifyQueueError(error) === 'bsky-auth') noteBlueskyLoginFailure(mapping);
     console.error(`${logPrefix} ❌ Automatic profile sync failed: ${describeError(error)}`);
   } finally {
     updateJob(profileJobId, null);
