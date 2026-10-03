@@ -33,7 +33,7 @@ export function createDigestRouter(dependencies: DigestRouterDependencies): Rout
 
   router.post('/api/admin/digests/:routeId/preview', ...admin, (request, response) => {
     const route = dependencies.findRoute(request.params.routeId as string);
-    if (!route?.delivery || route.delivery.mode !== 'digest') {
+    if (route?.delivery?.mode !== 'digest') {
       response.status(404).json({ error: 'Digest route not found.' });
       return;
     }
@@ -47,7 +47,7 @@ export function createDigestRouter(dependencies: DigestRouterDependencies): Rout
 
   router.post('/api/admin/digests/:routeId/publish', ...admin, (request, response) => {
     const route = dependencies.findRoute(request.params.routeId as string);
-    if (!route?.delivery || route.delivery.mode !== 'digest') {
+    if (route?.delivery?.mode !== 'digest') {
       response.status(404).json({ error: 'Digest route not found.' });
       return;
     }

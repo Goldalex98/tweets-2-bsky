@@ -1713,7 +1713,7 @@ const queueBackfill = (destinationIds: string[]): { queued: number; skipped: num
   const config = getConfig();
   for (const id of destinationIds) {
     const mapping = config.mappings.find((entry) => entry.id === id);
-    if (!mapping || !mapping.enabled || getActiveTwitterUsernames(mapping).length === 0) {
+    if (!mapping?.enabled || getActiveTwitterUsernames(mapping).length === 0) {
       skipped += 1;
       continue;
     }
@@ -5834,7 +5834,7 @@ app.post(
       return;
     }
     const skipped = dbService.getPost(tweetId, destination.id);
-    if (!skipped || skipped.status !== 'skipped') {
+    if (skipped?.status !== 'skipped') {
       res.status(404).json({ error: 'Retained skipped item not found.' });
       return;
     }

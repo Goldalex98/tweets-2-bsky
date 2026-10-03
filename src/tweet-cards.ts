@@ -528,7 +528,6 @@ export function injectSyndicationMedia(tweet: CardTweet, syndication: { images: 
   const media = syndication.images.slice(0, 4).map((url) => ({
     media_url_https: url,
     type: 'photo' as const,
-    ext_alt_text: 'Image from Twitter',
     source: 'card' as const,
   }));
 

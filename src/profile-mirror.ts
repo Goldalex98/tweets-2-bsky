@@ -648,6 +648,9 @@ export const ensureBlueskyBotSelfLabel = async (args: {
     $type: 'app.bsky.actor.profile',
   };
 
+  // The CID read here guards the write below, so a profile edited meanwhile
+  // (in the Bluesky app, or by another sync) is not overwritten wholesale.
+  let existingProfileCid: string | undefined;
   try {
     const response = await agent.com.atproto.repo.getRecord({
       repo,
@@ -656,6 +659,7 @@ export const ensureBlueskyBotSelfLabel = async (args: {
     });
     if (isRecord(response.data?.value)) {
       existingProfileRecord = { ...response.data.value };
+      existingProfileCid = response.data.cid;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -693,6 +697,7 @@ export const ensureBlueskyBotSelfLabel = async (args: {
     collection: 'app.bsky.actor.profile',
     rkey: 'self',
     record: nextProfileRecord,
+    swapRecord: existingProfileCid,
   });
 
   return {
@@ -722,6 +727,9 @@ export const ensureBlueskyDisplayNameBotSuffix = async (args: {
     $type: 'app.bsky.actor.profile',
   };
 
+  // The CID read here guards the write below, so a profile edited meanwhile
+  // (in the Bluesky app, or by another sync) is not overwritten wholesale.
+  let existingProfileCid: string | undefined;
   try {
     const response = await agent.com.atproto.repo.getRecord({
       repo,
@@ -730,6 +738,7 @@ export const ensureBlueskyDisplayNameBotSuffix = async (args: {
     });
     if (isRecord(response.data?.value)) {
       existingProfileRecord = { ...response.data.value };
+      existingProfileCid = response.data.cid;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -767,6 +776,7 @@ export const ensureBlueskyDisplayNameBotSuffix = async (args: {
       collection: 'app.bsky.actor.profile',
       rkey: 'self',
       record: nextProfileRecord,
+      swapRecord: existingProfileCid,
     });
   }
 
