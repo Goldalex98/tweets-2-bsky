@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"$CLAUDE_PROJECT_DIR/.codex/hooks/block-sensitive-git.mjs\""
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-sensitive-git.mjs\""
           }
         ]
       }
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"$CLAUDE_PROJECT_DIR/.codex/hooks/remind-migration-tests.mjs\""
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/remind-migration-tests.mjs\""
           }
         ]
       }
