@@ -14,7 +14,7 @@ When config schema or identity changes, update only the documents that drift:
 - `docs/security-and-backups.md`: encrypted field paths
 - `docs/development-and-release.md`: migration and rollback notes
 - `TROUBLESHOOTING.md`: new symptoms and fixes
-- `AGENTS.md`: durable Codex guidance when the invariant is recurring
+- `CLAUDE.md`: durable project guidance when the invariant is recurring
 - `.github/copilot-instructions.md`: short shared invariants only
 
 Document implemented behavior only, keep examples sanitized, and avoid

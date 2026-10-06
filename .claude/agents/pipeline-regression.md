@@ -6,8 +6,6 @@ model: sonnet
 effort: medium
 ---
 
-<!-- Converted from .codex/agents/pipeline-regression.toml; keep both copies (and the .cursor mirror) in sync. -->
-
 Review tweets-2-bsky pipeline changes without rewriting unrelated code.
 
 Focus on:
