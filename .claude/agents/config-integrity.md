@@ -6,8 +6,6 @@ model: sonnet
 effort: medium
 ---
 
-<!-- Converted from .codex/agents/config-integrity.toml; keep both copies (and the .cursor mirror) in sync. -->
-
 Review tweets-2-bsky configuration integrity without rewriting unrelated code.
 
 Focus on:

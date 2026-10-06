@@ -24,5 +24,5 @@ description: Trace a Destination or BlueskyAccount field through schema, normali
 - Rotating a password updates encrypted storage and clears the cached agent.
 - Deleting a linked account returns `409`.
 
-Run `run-quality-gate` afterward and request the `config_integrity` custom
-agent for a focused review when useful.
+Run `run-quality-gate` afterward and use the `config-integrity` subagent
+for a focused review when useful.

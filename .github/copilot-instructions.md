@@ -1,10 +1,8 @@
 # Repository guidance
 
-Codex reads `AGENTS.md` and discovers repository skills under `.agents/skills/`.
-Cursor compatibility files remain under `.cursor/` (`rules/`, `skills/`,
-`commands/`, `agents/`, and hooks). This file is the short shared baseline for
-Copilot and other tools; keep it aligned with the Codex guidance without
-duplicating the full rule set.
+Claude Code reads `CLAUDE.md` and discovers repository skills under
+`.claude/skills/`. This file is the short shared baseline for Copilot and other
+tools; keep it aligned with `CLAUDE.md` without duplicating the full rule set.
 
 ## Stack
 
@@ -43,4 +41,4 @@ Never commit: `.env`, `config.json*`, `data/`, `*.sqlite*`, `dist/`, `web/dist/`
 
 ## Migrations
 
-Config and SQLite migrations must be idempotent/additive and tested against a **temporary** data dir. After schema/pipeline changes run the quality gate (see `.agents/skills/run-quality-gate`, mirrored for Cursor at `.cursor/skills/run-quality-gate`).
+Config and SQLite migrations must be idempotent/additive and tested against a **temporary** data dir. After schema/pipeline changes run the quality gate (see `.claude/skills/run-quality-gate`).
