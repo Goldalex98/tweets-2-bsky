@@ -250,7 +250,7 @@ export function ActivityQueuePage(props: ActivityQueuePageProps) {
                                 : 'outline'
                           }
                         >
-                          {activity.status}
+                          {activity.status === 'migrated' ? 'posted' : activity.status}
                         </Badge>
                       </td>
                       <td className="px-2 py-3 align-top text-xs text-muted-foreground">
