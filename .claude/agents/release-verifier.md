@@ -6,8 +6,9 @@ description: >-
   "Current release" agreement. Also pre-checks commit subjects before a push. Use
   after pushing to main, or before pushing behavior changes. Read-only.
 tools: Read, Grep, Glob, Bash
-model: sonnet
-effort: medium
+model: haiku
+effort: high
+maxTurns: 25
 color: purple
 ---
 
@@ -17,7 +18,12 @@ history.
 
 Bash is for read-only commands only:
 - `git fetch --tags` (allowed), `git log`, `git tag`, `git show`
-- `gh run list|view`, `gh release view|list`, `gh api` GET calls
+- `gh run list|view`, `gh release view|list`, `gh api` GET calls. Always pass
+  `-R Goldalex98/tweets-2-bsky` (the owner's fork); `upstream` is j4ckxyz's original
+  and is never the release target.
+- If a command is denied or needs approval, do **not** try alternatives (other
+  tools, direct binaries, wrappers). Mark that step **blocked**, finish the rest,
+  and report `partial`. Never end with a question.
 
 **Before a push** (task says "pre-push"):
 - List commits since the last `v*` tag (`git describe --tags --abbrev=0`) with their
@@ -28,7 +34,7 @@ Bash is for read-only commands only:
 
 **After a push:**
 1. Find the Release workflow run for the pushed commit
-   (`gh run list --workflow release.yml --commit <sha>`) and its conclusion. If it
+   (`gh run list -R Goldalex98/tweets-2-bsky --workflow release.yml --commit <sha>`) and its conclusion. If it
    is still running, report "in progress" with the run URL; don't poll in a loop.
 2. Check that a new `vX.Y.Z` tag and GitHub Release exist for the expected bump.
 3. Check that `package.json` version and the README `Current release` line on

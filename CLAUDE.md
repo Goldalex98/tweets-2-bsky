@@ -9,7 +9,8 @@ Keep it concise and put repeatable workflows in `.claude/skills/`.
   `add-sqlite-migration`, `feature-destination-or-account`,
   `secrets-regression-check`, `sync-schema-docs`).
 - Subagents: `.claude/agents/` has `config-integrity`, `pipeline-regression`,
-  `quality-gate` and `release-verifier` (all Sonnet, medium effort). They run
+  `quality-gate` and `release-verifier` (all Haiku, high effort, per the
+  2026-10-10 benchmark). They run
   gate commands as plain `bun run <script>` so they match the
   `.claude/settings.json` allow rules; the test suites isolate their own data
   dirs.
