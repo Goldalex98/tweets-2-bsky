@@ -8,8 +8,9 @@ description: >-
 tools: Read, Grep, Glob, Bash
 skills:
   - run-quality-gate
-model: sonnet
-effort: medium
+model: haiku
+effort: high
+maxTurns: 25
 color: yellow
 ---
 
