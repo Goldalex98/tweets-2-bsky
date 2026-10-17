@@ -5,11 +5,12 @@
       "Bash(bun run lint:check)",
       "Bash(bun run typecheck)",
       "Bash(bun run test)",
-      "Bash(bun run test:unit:*)",
-      "Bash(bun run test:integration:*)",
-      "Bash(bun run test:release:*)",
-      "Bash(bun test tests/:*)",
-      "Bash(bun run typecheck:*)"
+      "Bash(bun run test:unit)",
+      "Bash(bun run test:integration)",
+      "Bash(bun run test:release)",
+      "Bash(bun test tests/integration/database-migrations.test.ts)",
+      "Bash(bun run typecheck:server)",
+      "Bash(bun run typecheck:web)"
     ]
   },
   "hooks": {

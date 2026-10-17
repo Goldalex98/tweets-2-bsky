@@ -23,8 +23,9 @@ Keep it concise and put repeatable workflows in `.claude/skills/`.
 - Handoff: read `.claude/HANDOFF.md` at session start and update it before
   ending.
 - Linux: this checkout runs on Debian; `bun` is at `~/.local/bin/bun`. The
-  Windows PATH/PowerShell notes below apply only on Windows. Run gates with a
-  temporary data dir:
+  Windows PATH/PowerShell notes below apply only on Windows. Agents run plain
+  `bun run check` (the test suites isolate their own data dirs; an env-var prefix
+  would not match the exact allow rule). By hand you can add a temporary data dir:
   `TWEETS2BSKY_DATA_DIR=$(mktemp -d) APP_DATA_DIR=$(mktemp -d) bun run check`.
 - `.github/copilot-instructions.md` is the short shared baseline for GitHub
   Copilot; keep it aligned with this file.

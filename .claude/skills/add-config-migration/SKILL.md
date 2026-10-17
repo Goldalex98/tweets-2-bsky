@@ -18,7 +18,8 @@ description: Add an idempotent JSON config schema migration and wire backups, no
   directory; never use real `data/config.json`.
 - Sync `docs/config-v3-migration.md`, `docs/architecture.md`, and other drifted
   docs with `sync-schema-docs`.
-- Run `bun run typecheck:server` and focused migration tests.
+- Run `bun run typecheck:server` and `bun run test:unit` (plain scripts; the allow
+  rules are exact, so agents cannot pass test file paths).
 
 ## Implementation notes
 
