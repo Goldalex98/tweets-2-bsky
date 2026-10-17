@@ -21,7 +21,7 @@ Run the applicable commands in this order:
 
 1. `bun run lint:check`
 2. `bun run typecheck:server` and/or `bun run typecheck:web`
-3. Focused unit/integration tests, or `bun run test:unit` / `bun run test:integration`
+3. `bun run test:unit` / `bun run test:integration` / `bun run test:release` as plain scripts (agents cannot pass file paths or flags; the allow rules are exact)
 
 ## Full gate
 

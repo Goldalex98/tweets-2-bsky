@@ -24,7 +24,9 @@ This host is Linux: use Bash and `bun` directly. Skip the Windows PATH repair an
 
 Choosing the gate:
 - If the task names files or areas, run the focused gate: `bun run lint:check`, the
-  relevant `typecheck:server`/`typecheck:web`, then focused tests.
+  relevant `typecheck:server`/`typecheck:web`, then the whole suites as plain
+  `bun run test:unit`, `bun run test:integration`, `bun run test:release` (no file
+  paths or flags: only these exact forms are allowed).
 - For schema, pipeline, API or release-risk changes, or when asked for "full",
   run `bun run check`.
 
