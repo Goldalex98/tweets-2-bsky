@@ -2,11 +2,11 @@
 
 _Update this file before ending a session or near the context limit. Read it first when resuming. Keep it short: current state, next step, open questions. Durable facts belong in docs/memory, not here._
 
-**Last updated:** 2026-10-21 by Claude (security patch v3.8.3; CI runner decision)
+**Last updated:** 2026-10-22 by Claude (Bun 1.4.4 and Node 24.22.1 security bump)
 
 ## Current state
 - `main` is at `v3.8.3` (2026-10-21): follow-redirects 1.16.1, handlebars 4.7.10 and vite 8.3.5 for open advisories. The Docker publish now uses `pull: true` and `no-cache-filters: runtime`, so the image gets Debian security updates; the 3.8.3 image has ca-certificates `20250419+deb13u1` (DSA-6572-1, eMudhra).
-- Open: Bun 1.4.2 still embeds the old root store. The eMudhra fix (oven-sh/bun#46300, NSS 3.131.1 plus a blocked-key check) merged 2026-10-21 but isn't in a release; 1.4.3 doesn't have it. When the next Bun release ships, bump `oven/bun` in `Dockerfile`, `packageManager`, and the CI `bun-version` pins.
+- Done 2026-10-22: Bun 1.4.4 (includes oven-sh/bun#46300: NSS 3.131.1 roots plus the blocked-key check for the eMudhra compromise) in `Dockerfile`, `packageManager` and the CI `bun-version` pins; CI Node 24.22.1 (Node.js 2026-10-21 security release). `@types/bun` stays 1.4.2 until a 1.4.4 types package is published.
 - Open: `braces` 3.0.3 (GHSA-vfj7-8cjw-p6xm) has no patched release; it is only reached through semantic-release at release time.
 - CI stays on GitHub-hosted runners (owner decision 2026-10-21): the repo is public, so minutes are free, and a self-hosted runner would run fork PRs on OVH. The OVH runner `ovh-1` serves weather-desk-web only.
 - No PHP anywhere in this repo or image (CVE-2026-109618/109619 not applicable).
