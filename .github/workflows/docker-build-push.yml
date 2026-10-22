@@ -135,6 +135,10 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Rebuild the runtime stage on every publish so Debian security updates
+          # (for example ca-certificates DSA-6572-1) are never served from cache.
+          pull: true
+          no-cache-filters: runtime
           cache-from: type=gha,scope=docker-${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.platform }}
           outputs: type=image,name=${{ needs.plan.outputs.image }},push-by-digest=true,name-canonical=true,push=true
