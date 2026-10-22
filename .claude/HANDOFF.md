@@ -2,10 +2,14 @@
 
 _Update this file before ending a session or near the context limit. Read it first when resuming. Keep it short: current state, next step, open questions. Durable facts belong in docs/memory, not here._
 
-**Last updated:** 2026-10-03 by Claude (production access, server updates, app unpinned)
+**Last updated:** 2026-10-21 by Claude (security patch v3.8.3; CI runner decision)
 
 ## Current state
-- `main` is at `v3.8.0` (2026-10-03). PRs #9–#16 shipped 3.6.9–3.8.0; Docker publish and CodeQL are green.
+- `main` is at `v3.8.3` (2026-10-21): follow-redirects 1.16.1, handlebars 4.7.10 and vite 8.3.5 for open advisories. The Docker publish now uses `pull: true` and `no-cache-filters: runtime`, so the image gets Debian security updates; the 3.8.3 image has ca-certificates `20250419+deb13u1` (DSA-6572-1, eMudhra).
+- Open: Bun 1.4.2 still embeds the old root store. The eMudhra fix (oven-sh/bun#46300, NSS 3.131.1 plus a blocked-key check) merged 2026-10-21 but isn't in a release; 1.4.3 doesn't have it. When the next Bun release ships, bump `oven/bun` in `Dockerfile`, `packageManager`, and the CI `bun-version` pins.
+- Open: `braces` 3.0.3 (GHSA-vfj7-8cjw-p6xm) has no patched release; it is only reached through semantic-release at release time.
+- CI stays on GitHub-hosted runners (owner decision 2026-10-21): the repo is public, so minutes are free, and a self-hosted runner would run fork PRs on OVH. The OVH runner `ovh-1` serves weather-desk-web only.
+- No PHP anywhere in this repo or image (CVE-2026-109618/109619 not applicable).
 - Fixed since the last handoff: `deleteAllPosts` now runs under the destination maintenance lease (#12), and login backoff only applies to auth and rate-limit errors (#10).
 - Read-only lint (`bun run lint:check`): 0 errors, 2 warnings (`!important` in `public/index.html`), 1 info.
 - Agents: `config-integrity`, `pipeline-regression`, `quality-gate`, `release-verifier`.
