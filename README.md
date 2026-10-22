@@ -5,7 +5,7 @@ Cross-post from Twitter/X to Bluesky with threads, media, durable queues, and a 
 Current release: app `3.8.3`, schema **v8** (`Source → Route → Destination → BlueskyAccount`), managed Bluesky
 accounts, content routing/moderation/dedup, webhook/API ingestion, digests, encrypted configuration, and
 WAL-consistent backup/restore. **Bun** is the only supported runtime and package manager (`bun.lock` only —
-never add `package-lock.json`). This repo pins Bun **1.4.2** via `packageManager`.
+never add `package-lock.json`). This repo pins Bun **1.4.4** via `packageManager`.
 
 Forked from [`j4ckxyz/tweets-2-bsky`](https://github.com/j4ckxyz/tweets-2-bsky) (also mirrored on Tangled as
 [j4ck.xyz/tweets2bsky](https://tangled.org/j4ck.xyz/tweets2bsky)). **Install and deploy from this repository**
@@ -78,7 +78,7 @@ For Traefik (or similar) behind a trusted proxy, use [docker-compose.portainer.y
 Prerequisites:
 
 - `git`
-- Bun **1.4.2** (the installer can install/upgrade Bun)
+- Bun **1.4.4** (the installer can install/upgrade Bun)
 - PM2 (optional, recommended for background runtime)
 
 ```bash

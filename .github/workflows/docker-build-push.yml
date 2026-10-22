@@ -146,7 +146,7 @@ jobs:
       - name: Set up Bun for exact-image verification
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.4'
 
       # Each matrix job is native to its architecture. Digests are not handed
       # to the tag-promotion job until the actual artifact passes runtime tests.
