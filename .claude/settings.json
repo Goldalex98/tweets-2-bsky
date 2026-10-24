@@ -11,6 +11,15 @@
       "Bash(bun test tests/integration/database-migrations.test.ts)",
       "Bash(bun run typecheck:server)",
       "Bash(bun run typecheck:web)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.production)",
+      "Read(./.env.prod)",
+      "Read(./.env.development)",
+      "Read(./.env.dev)",
+      "Read(./.env.test)"
     ]
   },
   "hooks": {
