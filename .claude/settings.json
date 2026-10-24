@@ -19,7 +19,15 @@
       "Read(./.env.prod)",
       "Read(./.env.development)",
       "Read(./.env.dev)",
-      "Read(./.env.test)"
+      "Read(./.env.test)",
+      "Read(./.env.staging)",
+      "Read(./.env.stage)",
+      "Read(./.env.*.local)",
+      "Read(./.env.bak)",
+      "Read(./.env.backup)",
+      "Read(./.env.old)",
+      "Read(./.env.orig)",
+      "Read(./.env.save)"
     ]
   },
   "hooks": {
