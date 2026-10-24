@@ -42,8 +42,14 @@ jobs:
       # Gate on what ships in the image. Release tooling (semantic-release and the
       # npm copy it bundles) often has advisories with no published fix, so the
       # full tree is reported without blocking releases.
+      #
+      # Exception GHSA-mrhx-c7xc-m3w5 (zod <4.6.6, 2026-10-24): fixed only in zod
+      # 4, but @atproto/api, lexicon, xrpc and common-web (through api 0.29.4) and
+      # chromium-bidi all require zod@^3. Runtime parsing of untrusted input is the
+      # DID document from the account's own PDS session response; chromium-bidi
+      # is unused (Puppeteer uses CDP). Drop the ignore once @atproto moves to zod 4.
       - name: Audit production dependencies
-        run: bun audit --prod --audit-level=high
+        run: bun audit --prod --audit-level=high --ignore=GHSA-mrhx-c7xc-m3w5
 
       - name: Audit all dependencies (report only)
         continue-on-error: true

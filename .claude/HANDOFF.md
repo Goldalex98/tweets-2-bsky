@@ -2,7 +2,12 @@
 
 _Update this file before ending a session or near the context limit. Read it first when resuming. Keep it short: current state, next step, open questions. Durable facts belong in docs/memory, not here._
 
-**Last updated:** 2026-10-22 by Claude (Bun 1.4.4 and Node 24.22.1 security bump)
+**Last updated:** 2026-10-24 by Claude (audit fix for the 2026-10-24 advisories)
+
+## In progress: audit fix, then merge PR #17
+- Branch `fix/audit-2026-10-24` (from `origin/main` = v3.8.4): `bun audit fix` moved body-parser 2.3.0 → 2.4.0 (GHSA-27r3-jxmh-p828), undici 7.30.0 → 7.30.1 and 6.28.1 → 6.29.1 (GHSA-xjj6-f33q-929c), and the `ip-address` override 10.7.3 → 10.7.4. Local `bun run check` passed (unit 416, integration 68, release 15, build).
+- zod GHSA-mrhx-c7xc-m3w5 is a documented exception: the CI prod audit step in `.github/workflows/quality.yml` passes `--ignore=GHSA-mrhx-c7xc-m3w5`. The fix exists only in zod 4.6.6, and every `@atproto/*` release (api through 0.29.4, lexicon, xrpc, common-web) plus chromium-bidi requires `zod@^3`. The only untrusted runtime parse is the DID doc in the account's own PDS session response (`isValidDidDoc`); chromium-bidi is unused (CDP). Remove the ignore once @atproto ships zod 4.
+- Next: PR, CI green, merge (a `fix(deps):` subject gives a patch release, and prod auto-updates), verify the release, then re-run `quality` on PR #17 (`chore/env-deny-rules`, `.claude/settings.json` `.env` deny rules only) and merge it.
 
 ## Current state
 - `main` is at `v3.8.3` (2026-10-21): follow-redirects 1.16.1, handlebars 4.7.10 and vite 8.3.5 for open advisories. The Docker publish now uses `pull: true` and `no-cache-filters: runtime`, so the image gets Debian security updates; the 3.8.3 image has ca-certificates `20250419+deb13u1` (DSA-6572-1, eMudhra).
