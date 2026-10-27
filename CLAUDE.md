@@ -22,8 +22,8 @@ Keep it concise and put repeatable workflows in `.claude/skills/`.
   `bun install --frozen-lockfile`. It no-ops outside `CLAUDE_CODE_REMOTE`.
 - Handoff: read `.claude/HANDOFF.md` at session start and update it before
   ending.
-- Linux: this checkout runs on Debian; `bun` is at `~/.local/bin/bun`. The
-  Windows PATH/PowerShell notes below apply only on Windows. Agents run plain
+- Linux/macOS: `bun` is installed per machine (check with `command -v bun`).
+  The Windows PATH/PowerShell notes below apply only on Windows. Agents run plain
   `bun run check` (the test suites isolate their own data dirs; an env-var prefix
   would not match the exact allow rule). By hand you can add a temporary data dir:
   `TWEETS2BSKY_DATA_DIR=$(mktemp -d) APP_DATA_DIR=$(mktemp -d) bun run check`.
@@ -31,6 +31,9 @@ Keep it concise and put repeatable workflows in `.claude/skills/`.
   Copilot; keep it aligned with this file.
 - Human reference: use `docs/architecture.md`, `docs/operations.md`, and the
   other focused documents under `docs/` for deeper behavior and runbooks.
+- MCP: `atproto` is local-scoped to this folder and points at the shared
+  `atproto-mcp.service` (systemd --user, `http://127.0.0.1:8765/mcp`, behind a
+  serialization wrapper). Never launch a separate `uvx atproto-mcp`.
 
 ## Identity (schema v8)
 
